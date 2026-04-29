@@ -1,0 +1,45 @@
+project:
+  name: quant_data_center
+  timezone: Asia/Shanghai
+
+paths:
+  data_dir: data
+  raw_dir: data/raw
+  parquet_dir: data/parquet
+  metadata_dir: data/metadata
+  duckdb_dir: data/duckdb
+  logs_dir: logs
+
+api:
+  provider: baostock
+  baostock:
+    adjustflag_map:
+      none: "3"
+      qfq: "2"
+      hfq: "1"
+
+datasets:
+  daily_k:
+    names:
+      - daily_k_none
+      - daily_k_qfq
+      - daily_k_hfq
+    fields: "date,code,open,high,low,close,preclose,volume,amount,adjustflag,turn,tradestatus,pctChg,peTTM,pbMRQ,psTTM,pcfNcfTTM,isST"
+    frequency: d
+  stock_basic:
+    fields: "code,code_name,ipoDate,outDate,type,status"
+  calendar:
+    fields: "calendar_date,is_trading_day"
+
+pipeline:
+  lookback_days: 30
+  raw_cache_days: 7
+  max_retries: 3
+  default_code: sh.600000
+  metadata_flush_size: 200
+
+storage:
+  duckdb_file: data/duckdb/quant.duckdb
+
+logging:
+  file: logs/qdc.log

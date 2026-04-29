@@ -1,0 +1,3 @@
+universe:
+  default:
+    - sh.600000

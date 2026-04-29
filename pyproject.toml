@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "quant-data-center"
+version = "0.1.0"
+description = "Windows local low-frequency quant data center built on Baostock, Parquet, and DuckDB."
+requires-python = ">=3.10"
+dependencies = [
+    "pandas",
+    "pyarrow",
+    "duckdb",
+    "baostock",
+    "pydantic",
+    "pyyaml",
+    "loguru",
+    "tenacity",
+    "click",
+    "pytest",
+]
+
+[project.scripts]
+qdc = "src.cli:cli"
+
+[tool.setuptools.packages.find]
+include = ["src*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]

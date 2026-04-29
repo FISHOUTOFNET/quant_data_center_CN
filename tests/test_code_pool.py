@@ -1,0 +1,44 @@
+from __future__ import annotations
+
+from src.pipeline.common import resolve_codes
+from src.storage.parquet_store import ParquetStore
+from src.utils.config_mgr import ConfigManager
+
+
+def test_resolve_codes_prefers_explicit_codes(tmp_path, stock_basic_sample) -> None:
+    store = ParquetStore(root=tmp_path)
+    store.ensure_layout()
+    store.write_stock_basic(stock_basic_sample())
+
+    codes = resolve_codes(ConfigManager(tmp_path), store, ("sz.300001",), None, "active")
+
+    assert codes == ["sz.300001"]
+
+
+def test_resolve_codes_keeps_deprecated_universe_compatibility(tmp_path, stock_basic_sample) -> None:
+    _write_universe(tmp_path)
+    store = ParquetStore(root=tmp_path)
+    store.ensure_layout()
+    store.write_stock_basic(stock_basic_sample())
+
+    codes = resolve_codes(ConfigManager(tmp_path), store, (), "default", "active")
+
+    assert codes == ["sh.600000"]
+
+
+def test_resolve_codes_uses_stock_basic_modes_by_default(tmp_path, stock_basic_sample) -> None:
+    store = ParquetStore(root=tmp_path)
+    store.ensure_layout()
+    store.write_stock_basic(stock_basic_sample())
+
+    history_codes = resolve_codes(ConfigManager(tmp_path), store, (), None, "all")
+    update_codes = resolve_codes(ConfigManager(tmp_path), store, (), None, "active")
+
+    assert history_codes == ["sh.000001", "sh.600000", "sz.000001"]
+    assert update_codes == ["sh.600000"]
+
+
+def _write_universe(root) -> None:
+    config_dir = root / "config"
+    config_dir.mkdir()
+    (config_dir / "universe.yaml").write_text("universe:\n  default:\n    - sh.600000\n", encoding="utf-8")

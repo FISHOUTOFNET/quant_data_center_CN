@@ -1,0 +1,114 @@
+from __future__ import annotations
+
+import pandas as pd
+
+import src.pipeline.repair_tool as repair_module
+
+
+def test_repair_normalizes_non_trading_range_to_trading_bounds(
+    tmp_path,
+    monkeypatch,
+    daily_sample,
+) -> None:
+    _write_settings(tmp_path)
+    state: dict[str, list[dict[str, str]]] = {"history_params": []}
+
+    class FakeProvider:
+        name = "fake"
+
+        def __init__(self, config=None) -> None:
+            self.config = config
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> None:
+            return None
+
+        def query_trade_dates(
+            self,
+            start_date: str | None = None,
+            end_date: str | None = None,
+        ) -> pd.DataFrame:
+            dates = pd.date_range(start_date or "1990-01-01", end_date or "2024-12-31", freq="D")
+            return pd.DataFrame(
+                [
+                    {
+                        "calendar_date": item.date(),
+                        "is_trading_day": "1" if item.weekday() < 5 else "0",
+                    }
+                    for item in dates
+                ]
+            )
+
+        def query_stock_basic(
+            self,
+            code: str | None = None,
+            code_name: str | None = None,
+        ) -> pd.DataFrame:
+            return pd.DataFrame()
+
+        def query_daily_k(
+            self,
+            request,
+        ) -> pd.DataFrame:
+            state["history_params"].append(
+                {
+                    "code": request.code,
+                    "start_date": request.start_date,
+                    "end_date": request.end_date,
+                    "adjustflag": {"daily_k_none": "3", "daily_k_qfq": "2", "daily_k_hfq": "1"}[request.dataset],
+                }
+            )
+            return daily_sample().assign(
+                code=request.code,
+                adjustflag={"daily_k_none": "3", "daily_k_qfq": "2", "daily_k_hfq": "1"}[request.dataset],
+            )
+
+    def create_provider(config, provider: str | None = None):
+        return FakeProvider(config)
+
+    monkeypatch.setattr(repair_module, "create_provider", create_provider)
+
+    repair_module.repair(
+        code="sh.600000",
+        start="2024-01-06",
+        end="2024-01-14",
+        dataset="daily_k_qfq",
+        root=tmp_path,
+        build_views=False,
+    )
+
+    assert state["history_params"] == [
+        {
+            "code": "sh.600000",
+            "start_date": "2024-01-08",
+            "end_date": "2024-01-12",
+            "adjustflag": "2",
+        }
+    ]
+
+
+def _write_settings(root) -> None:
+    config_dir = root / "config"
+    config_dir.mkdir()
+    (config_dir / "settings.yaml").write_text(
+        "\n".join(
+            [
+                "api:",
+                "  baostock:",
+                "    adjustflag_map:",
+                '      none: "3"',
+                '      qfq: "2"',
+                '      hfq: "1"',
+                "datasets:",
+                "  daily_k:",
+                '    fields: "date,code,open,high,low,close,preclose,volume,amount,adjustflag,turn,tradestatus,pctChg,peTTM,pbMRQ,psTTM,pcfNcfTTM,isST"',
+                "    frequency: d",
+                "pipeline:",
+                "  max_retries: 1",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )

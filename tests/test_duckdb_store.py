@@ -1,0 +1,20 @@
+from __future__ import annotations
+
+import duckdb
+
+from src.storage.duckdb_store import DuckDBStore
+from src.storage.parquet_store import ParquetStore
+
+
+def test_duckdb_views_can_be_created_and_queried(tmp_path, daily_sample) -> None:
+    store = ParquetStore(root=tmp_path)
+    store.ensure_layout()
+    store.write_daily_k("daily_k_qfq", "sh.600000", daily_sample())
+
+    duck_store = DuckDBStore(root=tmp_path)
+    sqls = duck_store.build_views()
+
+    assert any("v_daily_k_qfq" in sql for sql in sqls)
+    with duckdb.connect(str(tmp_path / "data" / "duckdb" / "quant.duckdb")) as conn:
+        result = conn.execute("select count(*) from v_daily_k_qfq where code='sh.600000'").fetchone()
+    assert result == (2,)

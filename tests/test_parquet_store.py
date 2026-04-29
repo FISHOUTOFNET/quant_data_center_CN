@@ -1,0 +1,316 @@
+from __future__ import annotations
+
+from datetime import datetime
+
+import pandas as pd
+
+from src.pipeline.common import PipelineCheckpointLookup, should_skip_checkpoint
+from src.storage.parquet_store import ParquetStore
+
+
+def test_daily_k_atomic_write(tmp_path, daily_sample) -> None:
+    store = ParquetStore(root=tmp_path)
+    store.ensure_layout()
+    raw = daily_sample().astype({"volume": "string", "peTTM": "string"})
+    raw.loc[0, "peTTM"] = ""
+
+    path = store.write_daily_k("daily_k_qfq", "sh.600000", raw)
+
+    assert path.exists()
+    assert not (path.parent / "data.tmp.parquet").exists()
+    loaded = pd.read_parquet(path)
+    assert len(loaded) == 2
+    assert loaded["volume"].tolist() == [1000, 1200]
+    assert pd.isna(loaded.loc[0, "peTTM"])
+
+
+def test_stock_basic_codes_from_latest_snapshot(tmp_path, stock_basic_sample) -> None:
+    store = ParquetStore(root=tmp_path)
+    store.ensure_layout()
+    store.write_stock_basic(stock_basic_sample())
+
+    assert store.stock_basic_codes("all") == ["sh.000001", "sh.600000", "sz.000001"]
+    assert store.stock_basic_codes("active") == ["sh.600000"]
+
+
+def test_write_calendar_merges_existing_dates(tmp_path) -> None:
+    store = ParquetStore(root=tmp_path)
+    store.ensure_layout()
+    store.write_calendar(
+        pd.DataFrame(
+            [
+                {"calendar_date": "2024-01-05", "is_trading_day": "1"},
+                {"calendar_date": "2024-01-06", "is_trading_day": "0"},
+            ]
+        )
+    )
+    store.write_calendar(
+        pd.DataFrame(
+            [
+                {"calendar_date": "2024-01-06", "is_trading_day": "0"},
+                {"calendar_date": "2024-01-07", "is_trading_day": "0"},
+            ]
+        )
+    )
+
+    calendar = store.read_calendar()
+    assert pd.to_datetime(calendar["calendar_date"], errors="coerce").dt.strftime("%Y-%m-%d").tolist() == [
+        "2024-01-05",
+        "2024-01-06",
+        "2024-01-07",
+    ]
+
+
+def test_pipeline_checkpoint_requires_success_and_output_file(tmp_path, daily_sample) -> None:
+    store = ParquetStore(root=tmp_path)
+    store.ensure_layout()
+    output_path = store.write_daily_k("daily_k_qfq", "sh.600000", daily_sample())
+
+    checkpoint = pd.DataFrame(
+        [
+            {
+                "pipeline": "init_history",
+                "dataset": "daily_k_qfq",
+                "code": "sh.600000",
+                "start_date": "2024-01-01",
+                "end_date": "2024-01-31",
+                "status": "success",
+                "row_count": 2,
+                "output_path": str(output_path),
+                "updated_at": datetime(2024, 1, 31, 16, 0),
+                "error_stack": "",
+            }
+        ]
+    )
+    store.upsert_pipeline_checkpoints(checkpoint)
+
+    assert store.pipeline_checkpoint_succeeded(
+        "init_history", "daily_k_qfq", "sh.600000", "2024-01-01", "2024-01-31", output_path
+    )
+    assert should_skip_checkpoint(
+        store,
+        "init_history",
+        "daily_k_qfq",
+        "sh.600000",
+        "2024-01-01",
+        "2024-01-31",
+        output_path,
+        resume=True,
+        force=False,
+    )
+    assert not should_skip_checkpoint(
+        store,
+        "init_history",
+        "daily_k_qfq",
+        "sh.600000",
+        "2024-01-01",
+        "2024-01-31",
+        output_path,
+        resume=True,
+        force=True,
+    )
+    assert not should_skip_checkpoint(
+        store,
+        "init_history",
+        "daily_k_qfq",
+        "sh.600000",
+        "2024-01-01",
+        "2024-01-31",
+        output_path,
+        resume=False,
+        force=False,
+    )
+
+    output_path.unlink()
+
+    assert not store.pipeline_checkpoint_succeeded(
+        "init_history", "daily_k_qfq", "sh.600000", "2024-01-01", "2024-01-31", output_path
+    )
+
+
+def test_checkpoint_date_resume_is_scoped_to_pipeline(tmp_path, daily_sample) -> None:
+    def store_with_checkpoint(root, pipeline: str, start_date: str):
+        store = ParquetStore(root=root)
+        store.ensure_layout()
+        output_path = store.write_daily_k("daily_k_qfq", "sh.600000", daily_sample())
+        store.upsert_pipeline_checkpoints(
+            pd.DataFrame(
+                [
+                    {
+                        "pipeline": pipeline,
+                        "dataset": "daily_k_qfq",
+                        "code": "sh.600000",
+                        "start_date": start_date,
+                        "end_date": "2024-01-31",
+                        "status": "success",
+                        "row_count": 2,
+                        "output_path": str(output_path),
+                        "updated_at": datetime(2024, 1, 31, 16, 0),
+                        "error_stack": "",
+                    }
+                ]
+            )
+        )
+        return store, output_path, PipelineCheckpointLookup.from_store(store)
+
+    def assert_skip(store, output_path, lookup, pipeline: str, expected: bool) -> None:
+        args = (
+            store,
+            pipeline,
+            "daily_k_qfq",
+            "sh.600000",
+            "2024-01-15",
+            "2024-01-31",
+            output_path,
+        )
+        assert should_skip_checkpoint(*args, resume=True, force=False) == expected
+        assert should_skip_checkpoint(*args, resume=True, force=False, checkpoint_lookup=lookup) == expected
+
+    init_store, init_output_path, init_lookup = store_with_checkpoint(
+        tmp_path / "init_only", "init_history", "1990-01-01"
+    )
+    assert_skip(init_store, init_output_path, init_lookup, "init_history", True)
+    assert_skip(init_store, init_output_path, init_lookup, "update_daily", False)
+
+    update_store, update_output_path, update_lookup = store_with_checkpoint(
+        tmp_path / "update_only", "update_daily", "2024-01-01"
+    )
+    assert_skip(update_store, update_output_path, update_lookup, "update_daily", True)
+    assert_skip(update_store, update_output_path, update_lookup, "init_history", False)
+
+
+def test_checkpoint_lookup_matches_store_resume_semantics(tmp_path, daily_sample) -> None:
+    store = ParquetStore(root=tmp_path)
+    store.ensure_layout()
+    output_path = store.write_daily_k("daily_k_qfq", "sh.600000", daily_sample())
+    missing_path = store.daily_k_path("daily_k_qfq", "sz.000001")
+
+    store.upsert_pipeline_checkpoints(
+        pd.DataFrame(
+            [
+                {
+                    "pipeline": "init_history",
+                    "dataset": "daily_k_qfq",
+                    "code": "sh.600000",
+                    "start_date": "1990-01-01",
+                    "end_date": "2024-01-31",
+                    "status": "success",
+                    "row_count": 2,
+                    "output_path": str(output_path),
+                    "updated_at": datetime(2024, 1, 31, 16, 0),
+                    "error_stack": "",
+                },
+                {
+                    "pipeline": "update_daily",
+                    "dataset": "daily_k_qfq",
+                    "code": "sh.600000",
+                    "start_date": "2024-01-01",
+                    "end_date": "2024-01-31",
+                    "status": "success",
+                    "row_count": 2,
+                    "output_path": str(output_path),
+                    "updated_at": datetime(2024, 2, 1, 16, 0),
+                    "error_stack": "",
+                },
+                {
+                    "pipeline": "update_daily",
+                    "dataset": "daily_k_qfq",
+                    "code": "sz.000001",
+                    "start_date": "2024-01-01",
+                    "end_date": "2024-01-31",
+                    "status": "failed",
+                    "row_count": 0,
+                    "output_path": str(missing_path),
+                    "updated_at": datetime(2024, 2, 1, 16, 0),
+                    "error_stack": "boom",
+                },
+            ]
+        )
+    )
+    lookup = PipelineCheckpointLookup.from_store(store)
+
+    scenarios = [
+        ("update_daily", "daily_k_qfq", "sh.600000", "2024-01-01", "2024-01-31", output_path),
+        ("update_daily", "daily_k_qfq", "sh.600000", "2024-01-15", "2024-01-31", output_path),
+        ("update_daily", "daily_k_qfq", "sz.000001", "2024-01-01", "2024-01-31", missing_path),
+    ]
+    for pipeline, dataset, code, start_date, end_date, path in scenarios:
+        assert should_skip_checkpoint(
+            store,
+            pipeline,
+            dataset,
+            code,
+            start_date,
+            end_date,
+            path,
+            resume=True,
+            force=False,
+        ) == should_skip_checkpoint(
+            store,
+            pipeline,
+            dataset,
+            code,
+            start_date,
+            end_date,
+            path,
+            resume=True,
+            force=False,
+            checkpoint_lookup=lookup,
+        )
+
+
+def test_persist_update_metadata_batches_match_individual_writes(tmp_path) -> None:
+    run_rows = [
+        {
+            "task_id": "task-1",
+            "dataset": "daily_k_qfq",
+            "code": "sh.600000",
+            "status": "success",
+            "start_date": "2024-01-01",
+            "end_date": "2024-01-31",
+            "start_time": datetime(2024, 1, 31, 9, 0),
+            "end_time": datetime(2024, 1, 31, 9, 1),
+            "row_count": 2,
+            "error_stack": "",
+        }
+    ]
+    status_rows = [
+        {
+            "dataset": "daily_k_qfq",
+            "code": "sh.600000",
+            "last_success_date": "2024-01-31",
+            "row_count": 2,
+            "status": "success",
+            "updated_at": datetime(2024, 1, 31, 9, 1),
+            "error_stack": "",
+        }
+    ]
+    checkpoint_rows = [
+        {
+            "pipeline": "update_daily",
+            "dataset": "daily_k_qfq",
+            "code": "sh.600000",
+            "start_date": "2024-01-01",
+            "end_date": "2024-01-31",
+            "status": "success",
+            "row_count": 2,
+            "output_path": "daily_k_qfq/code=sh.600000/data.parquet",
+            "updated_at": datetime(2024, 1, 31, 9, 1),
+            "error_stack": "",
+        }
+    ]
+
+    individual = ParquetStore(root=tmp_path / "individual")
+    batched = ParquetStore(root=tmp_path / "batched")
+    individual.ensure_layout()
+    batched.ensure_layout()
+
+    individual.append_update_runs(pd.DataFrame(run_rows))
+    individual.upsert_update_status(pd.DataFrame(status_rows))
+    individual.upsert_pipeline_checkpoints(pd.DataFrame(checkpoint_rows))
+    batched.persist_update_metadata(run_rows, status_rows, checkpoint_rows)
+
+    for name in ["update_runs", "update_status", "pipeline_checkpoints"]:
+        left = pd.read_parquet(individual.metadata_path(name))
+        right = pd.read_parquet(batched.metadata_path(name))
+        pd.testing.assert_frame_equal(left, right)
