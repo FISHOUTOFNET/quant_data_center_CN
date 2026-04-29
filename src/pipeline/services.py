@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
+from threading import RLock
+from typing import TypeVar
+
 import pandas as pd
 
 from src.api.market_data import DailyKRequest, MarketDataProvider
@@ -9,6 +13,9 @@ from src.pipeline.common import FULL_HISTORY_START_DATE, calendar_covers_range
 from src.storage.parquet_store import ParquetStore
 from src.utils.config_mgr import ConfigManager
 from src.utils.logging import logger
+
+
+T = TypeVar("T")
 
 
 class PipelineMetadataBatch:
@@ -23,6 +30,7 @@ class PipelineMetadataBatch:
         self._run_rows: list[dict[str, object]] = []
         self._status_rows: list[dict[str, object]] = []
         self._checkpoint_rows: list[dict[str, object]] = []
+        self._lock = RLock()
 
     def add(
         self,
@@ -30,16 +38,25 @@ class PipelineMetadataBatch:
         status_row: dict[str, object] | None = None,
         checkpoint: dict[str, object] | None = None,
     ) -> None:
-        if run_row is not None:
-            self._run_rows.append(run_row)
-        if status_row is not None:
-            self._status_rows.append(status_row)
-        if checkpoint is not None:
-            self._checkpoint_rows.append(checkpoint)
-        if self._pending_count >= self._flush_size:
-            self.flush()
+        with self._lock:
+            if run_row is not None:
+                self._run_rows.append(run_row)
+            if status_row is not None:
+                self._status_rows.append(status_row)
+            if checkpoint is not None:
+                self._checkpoint_rows.append(checkpoint)
+            if self._pending_count >= self._flush_size:
+                self._flush_unlocked()
 
     def flush(self) -> None:
+        with self._lock:
+            self._flush_unlocked()
+
+    def run_serialized(self, action: Callable[[], T]) -> T:
+        with self._lock:
+            return action()
+
+    def _flush_unlocked(self) -> None:
         if self._pending_count == 0:
             return
         run_rows = self._run_rows

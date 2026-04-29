@@ -6,6 +6,7 @@ import traceback
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
+from threading import Lock
 
 import pandas as pd
 
@@ -49,7 +50,7 @@ class _AdjustFactorState:
 
 
 class _DailyUpdateBackgroundWorker:
-    """Single-thread worker for update_daily dataframe and storage work."""
+    """Thread-safe worker for update_daily dataframe and storage work."""
 
     def __init__(
         self,
@@ -68,6 +69,7 @@ class _DailyUpdateBackgroundWorker:
         self._metadata_batch = metadata_batch
         self._factor_state: dict[str, _AdjustFactorState] = {}
         self._daily_plans_by_code: dict[str, tuple[DailyTargetPlan, ...]] = {}
+        self._state_lock = Lock()
 
     def process_adjust_factor_success(
         self,
@@ -93,19 +95,23 @@ class _DailyUpdateBackgroundWorker:
                 "",
             )
             status_row = _status_row(ADJUST_FACTOR_DATASET, code, self._end_date, len(stored), "success", "")
-            _persist_run_status(self._store, run_row, status_row)
-            write_checkpoint(
-                self._store,
-                PIPELINE_UPDATE_DAILY,
-                ADJUST_FACTOR_DATASET,
-                code,
-                FULL_HISTORY_START_DATE,
-                self._end_date,
-                "success",
-                len(stored),
-                output_path,
-            )
-            self._factor_state[code] = _AdjustFactorState(stored, changed, None)
+
+            def persist_metadata() -> None:
+                _persist_run_status(self._store, run_row, status_row)
+                write_checkpoint(
+                    self._store,
+                    PIPELINE_UPDATE_DAILY,
+                    ADJUST_FACTOR_DATASET,
+                    code,
+                    FULL_HISTORY_START_DATE,
+                    self._end_date,
+                    "success",
+                    len(stored),
+                    output_path,
+                )
+
+            self._metadata_batch.run_serialized(persist_metadata)
+            self._set_factor_state(code, _AdjustFactorState(stored, changed, None))
             return BackgroundTaskResult(run_records=[run_row])
         except Exception:
             error_stack = traceback.format_exc()
@@ -139,27 +145,30 @@ class _DailyUpdateBackgroundWorker:
         )
         status_row = _status_row(ADJUST_FACTOR_DATASET, code, None, 0, "failed", error_stack)
         try:
-            _persist_run_status(self._store, run_row, status_row)
-            write_checkpoint(
-                self._store,
-                PIPELINE_UPDATE_DAILY,
-                ADJUST_FACTOR_DATASET,
-                code,
-                FULL_HISTORY_START_DATE,
-                self._end_date,
-                "failed",
-                0,
-                output_path,
-                error_stack,
-            )
+            def persist_metadata() -> None:
+                _persist_run_status(self._store, run_row, status_row)
+                write_checkpoint(
+                    self._store,
+                    PIPELINE_UPDATE_DAILY,
+                    ADJUST_FACTOR_DATASET,
+                    code,
+                    FULL_HISTORY_START_DATE,
+                    self._end_date,
+                    "failed",
+                    0,
+                    output_path,
+                    error_stack,
+                )
+
+            self._metadata_batch.run_serialized(persist_metadata)
         except Exception:
             logger.exception("Failed to persist adjust factor failure for {}", code)
 
         if existing.empty:
-            self._factor_state[code] = _AdjustFactorState(existing, False, error_stack)
+            self._set_factor_state(code, _AdjustFactorState(existing, False, error_stack))
         else:
             logger.warning("Using existing local adjust factors for {} after fetch failure", code)
-            self._factor_state[code] = _AdjustFactorState(existing, False, None)
+            self._set_factor_state(code, _AdjustFactorState(existing, False, None))
         result.run_records.append(run_row)
         return result
 
@@ -171,7 +180,7 @@ class _DailyUpdateBackgroundWorker:
         unadjusted: pd.DataFrame,
         api_error_stack: str | None,
     ) -> BackgroundTaskResult:
-        self._daily_plans_by_code[code] = tuple(plans)
+        self._set_daily_plans(code, plans)
         try:
             return self._process_daily_initial(code, plans, fetch_start_date, unadjusted, api_error_stack)
         except Exception:
@@ -187,7 +196,7 @@ class _DailyUpdateBackgroundWorker:
     ) -> BackgroundTaskResult:
         plans = [
             plan
-            for plan in self._daily_plans_by_code.get(request.code, ())
+            for plan in self._daily_plans_for_code(request.code)
             if plan.dataset in set(request.datasets)
         ]
         try:
@@ -215,6 +224,22 @@ class _DailyUpdateBackgroundWorker:
             logger.exception("Pipeline metadata flush failed")
             return BackgroundTaskResult(run_records=[{"status": "failed", "error_stack": error_stack}])
 
+    def _set_factor_state(self, code: str, state: _AdjustFactorState) -> None:
+        with self._state_lock:
+            self._factor_state[code] = state
+
+    def _factor_state_for_code(self, code: str) -> _AdjustFactorState:
+        with self._state_lock:
+            return self._factor_state.get(code, _AdjustFactorState(pd.DataFrame(), False, None))
+
+    def _set_daily_plans(self, code: str, plans: list[DailyTargetPlan]) -> None:
+        with self._state_lock:
+            self._daily_plans_by_code[code] = tuple(plans)
+
+    def _daily_plans_for_code(self, code: str) -> tuple[DailyTargetPlan, ...]:
+        with self._state_lock:
+            return self._daily_plans_by_code.get(code, ())
+
     def _process_daily_initial(
         self,
         code: str,
@@ -224,7 +249,7 @@ class _DailyUpdateBackgroundWorker:
         api_error_stack: str | None,
     ) -> BackgroundTaskResult:
         result = BackgroundTaskResult()
-        factor_state = self._factor_state.get(code, _AdjustFactorState(pd.DataFrame(), False, None))
+        factor_state = self._factor_state_for_code(code)
         active_plans: list[DailyTargetPlan] = []
 
         for plan in plans:
@@ -323,10 +348,7 @@ class _DailyUpdateBackgroundWorker:
         fetch_start_date: str,
     ) -> list[dict[str, object]]:
         records: list[dict[str, object]] = []
-        factor_state = self._factor_state.get(
-            plans[0].code if plans else "",
-            _AdjustFactorState(pd.DataFrame(), False, None),
-        )
+        factor_state = self._factor_state_for_code(plans[0].code if plans else "")
         for plan in plans:
             try:
                 fresh = self._daily_frame_from_unadjusted(plan.dataset, plan.code, unadjusted, factor_state.frame)

@@ -5,6 +5,8 @@ import threading
 import pandas as pd
 
 import src.pipeline.update_daily as update_daily_module
+import src.pipeline.update_daily_worker as update_daily_worker_module
+from src.pipeline.adjustments import ADJUST_FACTOR_DATASET
 from src.storage.parquet_store import ParquetStore
 from update_daily_fakes import _fake_provider_factory, _provider_factory_for, _write_settings
 
@@ -143,6 +145,157 @@ def test_update_daily_full_fetches_next_code_while_previous_write_is_pending(
 
     assert not thread.is_alive()
     assert errors == []
+
+
+def test_update_daily_background_executor_uses_eight_workers(
+    tmp_path,
+    monkeypatch,
+    daily_sample,
+    stock_basic_sample,
+) -> None:
+    _write_settings(tmp_path)
+    provider_factory, _state = _fake_provider_factory(stock_basic_sample(), daily_sample())
+    monkeypatch.setattr(update_daily_module, "create_provider", provider_factory)
+
+    max_workers_seen = []
+    original_executor = update_daily_module.ThreadPoolExecutor
+
+    class ObservingExecutor(original_executor):
+        def __init__(self, *args, **kwargs):
+            if "max_workers" in kwargs:
+                max_workers_seen.append(kwargs["max_workers"])
+            elif args:
+                max_workers_seen.append(args[0])
+            super().__init__(*args, **kwargs)
+
+    monkeypatch.setattr(update_daily_module, "ThreadPoolExecutor", ObservingExecutor)
+
+    update_daily_module.update_daily(
+        dataset="daily_k_none",
+        mode="full",
+        start="2024-01-01",
+        end="2024-01-31",
+        code="sh.600000",
+        root=tmp_path,
+        build_views=False,
+    )
+
+    assert max_workers_seen == [8]
+
+
+def test_update_daily_waits_for_adjust_factor_before_adjusted_calculation(
+    tmp_path,
+    monkeypatch,
+    daily_sample,
+    stock_basic_sample,
+) -> None:
+    _write_settings(tmp_path)
+    code = "sh.600000"
+    factor_df = pd.DataFrame(
+        [
+            {
+                "code": code,
+                "dividOperateDate": "2024-01-02",
+                "foreAdjustFactor": 2.0,
+                "backAdjustFactor": 3.0,
+                "adjustFactor": 2.0,
+            }
+        ]
+    )
+    provider_factory, _state = _fake_provider_factory(
+        stock_basic_sample(),
+        daily_sample(),
+        adjust_factor_df=factor_df,
+    )
+    monkeypatch.setattr(update_daily_module, "create_provider", provider_factory)
+
+    factor_write_started = threading.Event()
+    release_factor_write = threading.Event()
+    adjusted_calculation_started = threading.Event()
+    factor_rows_seen = []
+    original_write_adjust_factor = ParquetStore.write_adjust_factor
+    original_calculate_adjusted = update_daily_worker_module.calculate_adjusted_daily_k
+
+    def slow_write_adjust_factor(self, stock_code: str, df: pd.DataFrame):
+        if stock_code == code:
+            factor_write_started.set()
+            release_factor_write.wait(timeout=5)
+        return original_write_adjust_factor(self, stock_code, df)
+
+    def observing_calculate_adjusted(unadjusted, adjust_factors, dataset, adjustflag):
+        adjusted_calculation_started.set()
+        factor_rows_seen.append(len(adjust_factors))
+        return original_calculate_adjusted(unadjusted, adjust_factors, dataset, adjustflag)
+
+    monkeypatch.setattr(ParquetStore, "write_adjust_factor", slow_write_adjust_factor)
+    monkeypatch.setattr(update_daily_worker_module, "calculate_adjusted_daily_k", observing_calculate_adjusted)
+
+    records = []
+    errors = []
+
+    def run_pipeline() -> None:
+        try:
+            records.extend(
+                update_daily_module.update_daily(
+                    dataset="daily_k_qfq",
+                    mode="full",
+                    start="2024-01-01",
+                    end="2024-01-31",
+                    code=code,
+                    root=tmp_path,
+                    build_views=False,
+                )
+            )
+        except Exception as exc:
+            errors.append(exc)
+
+    thread = threading.Thread(target=run_pipeline)
+    thread.start()
+    try:
+        assert factor_write_started.wait(timeout=2)
+        assert not adjusted_calculation_started.wait(timeout=0.2)
+    finally:
+        release_factor_write.set()
+        thread.join(timeout=5)
+
+    assert not thread.is_alive()
+    assert errors == []
+    assert [item["status"] for item in records if item["dataset"] == "daily_k_qfq"] == ["success"]
+    assert factor_rows_seen == [1]
+    assert ParquetStore(root=tmp_path).read_daily_k("daily_k_qfq", code).loc[0, "close"] == 16.4
+
+
+def test_update_daily_parallel_metadata_writes_do_not_drop_rows(
+    tmp_path,
+    monkeypatch,
+    daily_sample,
+    stock_basic_sample,
+) -> None:
+    _write_settings(tmp_path, metadata_flush_size=1)
+    codes = tuple(f"sh.60000{index}" for index in range(8))
+    provider_factory, _state = _fake_provider_factory(stock_basic_sample(), daily_sample())
+    monkeypatch.setattr(update_daily_module, "create_provider", provider_factory)
+
+    records = update_daily_module.update_daily(
+        dataset="daily_k_qfq",
+        mode="full",
+        start="2024-01-01",
+        end="2024-01-31",
+        code=codes,
+        root=tmp_path,
+        build_views=False,
+    )
+
+    store = ParquetStore(root=tmp_path)
+    update_runs = pd.read_parquet(store.metadata_path("update_runs"))
+    update_status = pd.read_parquet(store.metadata_path("update_status"))
+    checkpoints = store.read_pipeline_checkpoints()
+    expected_pairs = {(ADJUST_FACTOR_DATASET, code) for code in codes} | {("daily_k_qfq", code) for code in codes}
+
+    assert {(item["dataset"], item["code"]) for item in records} == expected_pairs
+    assert len(update_runs.loc[update_runs["dataset"].isin({ADJUST_FACTOR_DATASET, "daily_k_qfq"})]) == 16
+    assert set(zip(update_status["dataset"].astype(str), update_status["code"].astype(str))) >= expected_pairs
+    assert set(zip(checkpoints["dataset"].astype(str), checkpoints["code"].astype(str))) >= expected_pairs
 
 
 def test_update_daily_full_resolves_non_trading_end_to_trading_bound(

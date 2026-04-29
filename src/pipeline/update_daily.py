@@ -3,8 +3,7 @@
 from __future__ import annotations
 
 import traceback
-from collections import deque
-from concurrent.futures import Future, ThreadPoolExecutor
+from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from datetime import datetime
 from pathlib import Path
 
@@ -190,10 +189,19 @@ def update_daily(
             end_date=end_date,
             metadata_batch=metadata_batch,
         )
-        pending: deque[Future[BackgroundTaskResult]] = deque()
+        pending: set[Future[BackgroundTaskResult]] = set()
+        future_sequences: dict[Future[BackgroundTaskResult], int] = {}
+        completed_results: dict[int, BackgroundTaskResult] = {}
+        next_submit_sequence = 0
+        next_record_sequence = 0
 
-        def submit_background(action) -> None:
-            pending.append(executor.submit(action))
+        def submit_background(action) -> Future[BackgroundTaskResult]:
+            nonlocal next_submit_sequence
+            future = executor.submit(action)
+            future_sequences[future] = next_submit_sequence
+            next_submit_sequence += 1
+            pending.add(future)
+            return future
 
         def dispatch_api_request(request: ApiFetchRequest) -> None:
             if request.kind != "daily_k_full_refetch":
@@ -227,14 +235,52 @@ def update_daily(
                 )
 
         def drain_completed(block: bool = False) -> None:
-            while pending and (block or pending[0].done()):
-                result = pending.popleft().result()
-                run_records.extend(result.run_records)
-                for request in result.api_requests:
-                    dispatch_api_request(request)
+            if not pending:
+                return
+            if block:
+                done, _ = wait(pending, return_when=FIRST_COMPLETED)
+            else:
+                done = {future for future in pending if future.done()}
+            for future in sorted(done, key=lambda item: future_sequences[item]):
+                pending.remove(future)
+                collect_completed(future)
 
-        with ThreadPoolExecutor(max_workers=1, thread_name_prefix="update-daily-background") as executor:
+        def collect_completed(future: Future[BackgroundTaskResult]) -> None:
+            sequence = future_sequences.pop(future)
+            result = future.result()
+            completed_results[sequence] = result
+            for request in result.api_requests:
+                dispatch_api_request(request)
+            flush_ordered_run_records()
+
+        def flush_ordered_run_records() -> None:
+            nonlocal next_record_sequence
+            while next_record_sequence in completed_results:
+                result = completed_results.pop(next_record_sequence)
+                run_records.extend(result.run_records)
+                next_record_sequence += 1
+
+        def process_daily_after_factor(
+            factor_future: Future[BackgroundTaskResult] | None,
+            stock_code: str,
+            plans: list[DailyTargetPlan],
+            initial_start_date: str,
+            daily_df: pd.DataFrame,
+            error_stack: str | None,
+        ) -> BackgroundTaskResult:
+            if factor_future is not None:
+                factor_future.result()
+            return background.process_daily_initial(
+                stock_code,
+                plans,
+                initial_start_date,
+                daily_df,
+                error_stack,
+            )
+
+        with ThreadPoolExecutor(max_workers=4, thread_name_prefix="update-daily-background") as executor:
             for stock_code in codes:
+                factor_future: Future[BackgroundTaskResult] | None = None
                 if needs_adjust_factor_api:
                     factor_start_time = datetime.now()
                     factor_output_path = checkpoint_output_path(store, ADJUST_FACTOR_DATASET, stock_code, end_date)
@@ -246,7 +292,7 @@ def update_daily(
                             end_date,
                         )
                         log_api_fetch(ADJUST_FACTOR_DATASET, stock_code, FULL_HISTORY_START_DATE, end_date, factor_df)
-                        submit_background(
+                        factor_future = submit_background(
                             lambda stock_code=stock_code,
                             factor_df=factor_df,
                             factor_start_time=factor_start_time,
@@ -260,7 +306,7 @@ def update_daily(
                     except Exception:
                         error_stack = traceback.format_exc()
                         logger.exception("Adjust factor API failed for {}", stock_code)
-                        submit_background(
+                        factor_future = submit_background(
                             lambda stock_code=stock_code,
                             factor_start_time=factor_start_time,
                             factor_output_path=factor_output_path,
@@ -296,7 +342,9 @@ def update_daily(
                             lambda stock_code=stock_code,
                             plans=plans,
                             initial_start_date=initial_start_date,
-                            daily_df=daily_df: background.process_daily_initial(
+                            daily_df=daily_df,
+                            factor_future=factor_future: process_daily_after_factor(
+                                factor_future,
                                 stock_code,
                                 plans,
                                 initial_start_date,
@@ -311,7 +359,9 @@ def update_daily(
                             lambda stock_code=stock_code,
                             plans=plans,
                             initial_start_date=initial_start_date,
-                            error_stack=error_stack: background.process_daily_initial(
+                            error_stack=error_stack,
+                            factor_future=factor_future: process_daily_after_factor(
+                                factor_future,
                                 stock_code,
                                 plans,
                                 initial_start_date,
