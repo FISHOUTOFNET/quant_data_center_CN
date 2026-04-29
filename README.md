@@ -501,7 +501,7 @@ pytest
 - Baostock 客户端（`test_baostock_client.py`）
 - 数据源 provider 抽象（`test_market_data_provider.py`）
 - CLI provider 参数传递（`test_cli_provider.py`）
-- Pipeline 续传机制（`test_pipeline_resume.py`）
+- Pipeline 续传机制（`test_update_daily_full_resume.py`、`test_update_daily_partial_resume.py`、`test_update_daily_refetch.py`）
 - 代码池解析（`test_code_pool.py`）
 - 交易日历处理（`test_trading_dates.py`）
 - 数据修复工具（`test_repair_tool.py`）

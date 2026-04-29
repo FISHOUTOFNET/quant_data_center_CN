@@ -296,7 +296,13 @@ quant_data_center/
 │   │   ├── common.py             # 共享工具函数
 │   │   ├── repair_tool.py        # 数据修复管道
 │   │   ├── services.py           # provider 拉取与元数据批处理服务
-│   │   ├── update_daily.py       # 日常更新与历史初始化管道
+│   │   ├── update_daily.py       # 日常更新与历史初始化管道入口
+│   │   ├── update_daily_calendar.py  # 更新日历窗口与写入
+│   │   ├── update_daily_frames.py    # 日线 DataFrame 处理辅助
+│   │   ├── update_daily_metadata.py  # 更新元数据写入辅助
+│   │   ├── update_daily_targets.py   # 更新目标与断点预过滤
+│   │   ├── update_daily_types.py     # 日更管道共享类型
+│   │   ├── update_daily_worker.py    # 日更后台写入 worker
 │   │   └── write_queue.py        # 异步写入队列
 │   ├── quality/
 │   │   └── validators.py         # 数据验证器
@@ -316,7 +322,9 @@ quant_data_center/
 │   ├── test_duckdb_store.py
 │   ├── test_market_data_provider.py
 │   ├── test_parquet_store.py
-│   ├── test_pipeline_resume.py
+│   ├── test_update_daily_full_resume.py
+│   ├── test_update_daily_partial_resume.py
+│   ├── test_update_daily_refetch.py
 │   ├── test_repair_tool.py
 │   ├── test_schema.py
 │   ├── test_trading_dates.py
