@@ -5,6 +5,7 @@ from datetime import datetime
 import pandas as pd
 
 from src.pipeline.common import PipelineCheckpointLookup, should_skip_checkpoint
+import src.storage.parquet_store as parquet_store_module
 from src.storage.parquet_store import ParquetStore
 
 
@@ -71,6 +72,66 @@ def test_adjust_factor_write_and_read(tmp_path, adjust_factor_sample) -> None:
     loaded = store.read_adjust_factor("sh.600000")
     assert len(loaded) == 1
     assert loaded.loc[0, "foreAdjustFactor"] == 1.0
+
+
+def test_daily_k_write_logs_parquet_success(tmp_path, daily_sample, monkeypatch) -> None:
+    logs = []
+
+    class FakeLogger:
+        def info(self, message, *args, **kwargs) -> None:
+            logs.append((message, args))
+
+        def warning(self, message, *args, **kwargs) -> None:
+            return None
+
+    monkeypatch.setattr(parquet_store_module, "logger", FakeLogger())
+    store = ParquetStore(root=tmp_path)
+    store.ensure_layout()
+
+    path = store.write_daily_k("daily_k_qfq", "sh.600000", daily_sample())
+
+    assert logs == [
+        (
+            "Daily Parquet stored dataset={} code={} rows={} path={}",
+            ("daily_k_qfq", "sh.600000", 2, path),
+        )
+    ]
+
+
+def test_checkpoint_write_does_not_log_parquet_success(tmp_path, monkeypatch) -> None:
+    logs = []
+
+    class FakeLogger:
+        def info(self, message, *args, **kwargs) -> None:
+            logs.append((message, args))
+
+        def warning(self, message, *args, **kwargs) -> None:
+            return None
+
+    monkeypatch.setattr(parquet_store_module, "logger", FakeLogger())
+    store = ParquetStore(root=tmp_path)
+    store.ensure_layout()
+
+    store.upsert_pipeline_checkpoints(
+        pd.DataFrame(
+            [
+                {
+                    "pipeline": "update_daily",
+                    "dataset": "daily_k_qfq",
+                    "code": "sh.600000",
+                    "start_date": "2024-01-01",
+                    "end_date": "2024-01-31",
+                    "status": "success",
+                    "row_count": 2,
+                    "output_path": "daily_k_qfq/code=sh.600000/data.parquet",
+                    "updated_at": datetime(2024, 1, 31, 16, 0),
+                    "error_stack": "",
+                }
+            ]
+        )
+    )
+
+    assert logs == []
 
 
 def test_pipeline_checkpoint_requires_success_and_output_file(tmp_path, daily_sample) -> None:

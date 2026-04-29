@@ -264,42 +264,15 @@ class _DailyUpdateBackgroundWorker:
                 )
             return result
 
-        full_plans: list[DailyTargetPlan] = []
-        full_reasons: dict[str, str] = {}
-        remaining_plans: list[DailyTargetPlan] = []
-
-        for plan in active_plans:
-            if is_adjusted_daily_dataset(plan.dataset) and factor_state.changed:
-                self._log_full_refetch(plan, "adjust_factor_changed")
-                full_plans.append(plan)
-                full_reasons[plan.dataset] = "adjust_factor_changed"
-            else:
-                remaining_plans.append(plan)
-
         if api_error_stack is not None:
-            result.run_records.extend(self._write_daily_failures(remaining_plans, api_error_stack))
-        else:
-            for plan in remaining_plans:
-                fresh = self._daily_frame_from_unadjusted(plan.dataset, plan.code, unadjusted, factor_state.frame)
-                _log_daily_frame(plan.dataset, plan.code, fetch_start_date or self._start_date, self._end_date, fresh)
-                existing = self._store.read_daily_k(plan.dataset, plan.code)
-                if not _has_data_in_range(existing, self._start_date, self._end_date):
-                    self._log_full_refetch(plan, "empty_lookback")
-                    full_plans.append(plan)
-                    full_reasons[plan.dataset] = "empty_lookback"
-                elif daily_frames_differ_on_overlap(self._store, existing, fresh, self._start_date, self._end_date):
-                    self._log_full_refetch(plan, "lookback_mismatch")
-                    full_plans.append(plan)
-                    full_reasons[plan.dataset] = "lookback_mismatch"
-                else:
-                    final_df = merge_daily_frames(self._store, existing, fresh)
-                    result.run_records.append(
-                        self._write_daily_success(plan, plan.checkpoint_start_date, final_df)
-                    )
+            result.run_records.extend(self._write_daily_failures(active_plans, api_error_stack))
+            return result
 
-        if full_plans:
-            datasets = tuple(dict.fromkeys(plan.dataset for plan in full_plans))
-            reason = ",".join(dict.fromkeys(full_reasons[dataset] for dataset in datasets))
+        unadjusted_base, refetch_reason = self._partial_unadjusted_base(code, unadjusted)
+        if refetch_reason is not None:
+            datasets = tuple(dict.fromkeys(plan.dataset for plan in active_plans))
+            for plan in active_plans:
+                self._log_full_refetch(plan, refetch_reason)
             result.api_requests.append(
                 ApiFetchRequest(
                     kind="daily_k_full_refetch",
@@ -307,10 +280,40 @@ class _DailyUpdateBackgroundWorker:
                     start_date=FULL_HISTORY_START_DATE,
                     end_date=self._end_date,
                     datasets=datasets,
-                    reason=reason,
+                    reason=refetch_reason,
                 )
             )
+            return result
+
+        if factor_state.changed and any(is_adjusted_daily_dataset(plan.dataset) for plan in active_plans):
+            logger.info(
+                "Adjust factors changed for {}; recalculating adjusted daily datasets from unadjusted history",
+                code,
+            )
+
+        for plan in active_plans:
+            fresh = self._daily_frame_from_unadjusted(plan.dataset, plan.code, unadjusted_base, factor_state.frame)
+            log_start_date = FULL_HISTORY_START_DATE if is_adjusted_daily_dataset(plan.dataset) else (
+                fetch_start_date or self._start_date
+            )
+            _log_daily_frame(plan.dataset, plan.code, log_start_date, self._end_date, fresh)
+            run_start_date = FULL_HISTORY_START_DATE if is_adjusted_daily_dataset(plan.dataset) else (
+                plan.checkpoint_start_date
+            )
+            result.run_records.append(self._write_daily_success(plan, run_start_date, fresh))
         return result
+
+    def _partial_unadjusted_base(
+        self,
+        code: str,
+        fresh_unadjusted: pd.DataFrame,
+    ) -> tuple[pd.DataFrame, str | None]:
+        existing = self._store.read_daily_k(UNADJUSTED_DAILY_DATASET, code)
+        if not _has_data_in_range(existing, self._start_date, self._end_date):
+            return pd.DataFrame(), "unadjusted_empty_lookback"
+        if daily_frames_differ_on_overlap(self._store, existing, fresh_unadjusted, self._start_date, self._end_date):
+            return pd.DataFrame(), "unadjusted_lookback_mismatch"
+        return merge_daily_frames(self._store, existing, fresh_unadjusted), None
 
     def _write_daily_frames(
         self,
@@ -392,15 +395,6 @@ class _DailyUpdateBackgroundWorker:
         raise ValueError(f"Unsupported async daily dataset: {dataset}")
 
     def _log_full_refetch(self, plan: DailyTargetPlan, reason: str) -> None:
-        if reason == "adjust_factor_changed":
-            logger.warning(
-                "Daily lookback {} for {} {}; recomputing from {}",
-                reason,
-                plan.dataset,
-                plan.code,
-                FULL_HISTORY_START_DATE,
-            )
-            return
         logger.warning(
             "Daily lookback {} for {} {} from {} to {}; refetching from {}",
             reason,

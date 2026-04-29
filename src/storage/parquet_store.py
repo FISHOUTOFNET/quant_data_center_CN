@@ -168,7 +168,6 @@ class ParquetStore:
             try:
                 pq.write_table(table, tmp_path)
                 os.replace(tmp_path, destination)
-                logger.info("Wrote Parquet file: {}", destination)
                 return
             except (PermissionError, OSError) as e:
                 last_error = e
@@ -211,6 +210,13 @@ class ParquetStore:
         definition.validator(cleaned)
         destination = self.daily_k_path(dataset, code)
         self.atomic_write(cleaned, definition.schema, destination)
+        logger.info(
+            "Daily Parquet stored dataset={} code={} rows={} path={}",
+            dataset,
+            code,
+            len(cleaned),
+            destination,
+        )
         return destination
 
     def read_daily_k(self, dataset: str, code: str) -> pd.DataFrame:
