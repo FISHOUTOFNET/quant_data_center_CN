@@ -8,6 +8,7 @@ import pandas as pd
 import pyarrow as pa
 
 from src.storage.schema import (
+    ADJUST_FACTOR_SCHEMA,
     CALENDAR_SCHEMA,
     DAILY_K_SCHEMA,
     STOCK_BASIC_SCHEMA,
@@ -119,3 +120,20 @@ def validate_calendar(df: pd.DataFrame, schema: pa.Schema = CALENDAR_SCHEMA) -> 
     if df["calendar_date"].duplicated(keep=False).any():
         sample = df.loc[df["calendar_date"].duplicated(keep=False), ["calendar_date"]].head(5).to_dict("records")
         raise ValidationError(f"Duplicate calendar_date rows found: {sample}")
+
+
+def validate_adjust_factor(df: pd.DataFrame, schema: pa.Schema = ADJUST_FACTOR_SCHEMA) -> None:
+    validate_schema_matches(df, schema)
+    duplicated = df.duplicated(["code", "dividOperateDate"], keep=False)
+    if duplicated.any():
+        sample = df.loc[duplicated, ["code", "dividOperateDate"]].head(5).to_dict("records")
+        raise ValidationError(f"Duplicate code/dividOperateDate rows found: {sample}")
+    if df.empty:
+        return
+    dates = pd.to_datetime(df["dividOperateDate"], errors="coerce")
+    if dates.isna().any():
+        raise ValidationError("dividOperateDate contains null or invalid values")
+    work = df.assign(_divid_operate_date=dates)
+    for code, group in work.groupby("code", dropna=False, sort=False):
+        if not group["_divid_operate_date"].is_monotonic_increasing:
+            raise ValidationError(f"dividOperateDate is not monotonically increasing for code={code}")

@@ -11,7 +11,7 @@ def test_repair_normalizes_non_trading_range_to_trading_bounds(
     daily_sample,
 ) -> None:
     _write_settings(tmp_path)
-    state: dict[str, list[dict[str, str]]] = {"history_params": []}
+    state: dict[str, list[dict[str, str]]] = {"history_params": [], "adjust_factor_params": []}
 
     class FakeProvider:
         name = "fake"
@@ -52,17 +52,38 @@ def test_repair_normalizes_non_trading_range_to_trading_bounds(
             self,
             request,
         ) -> pd.DataFrame:
+            adjustflag = {"daily_k_none": "3", "daily_k_qfq": "2", "daily_k_hfq": "1"}[request.dataset]
             state["history_params"].append(
                 {
                     "code": request.code,
                     "start_date": request.start_date,
                     "end_date": request.end_date,
-                    "adjustflag": {"daily_k_none": "3", "daily_k_qfq": "2", "daily_k_hfq": "1"}[request.dataset],
+                    "adjustflag": adjustflag,
                 }
             )
             return daily_sample().assign(
                 code=request.code,
-                adjustflag={"daily_k_none": "3", "daily_k_qfq": "2", "daily_k_hfq": "1"}[request.dataset],
+                adjustflag=adjustflag,
+            )
+
+        def query_adjust_factor(self, code: str, start_date: str, end_date: str) -> pd.DataFrame:
+            state["adjust_factor_params"].append(
+                {
+                    "code": code,
+                    "start_date": start_date,
+                    "end_date": end_date,
+                }
+            )
+            return pd.DataFrame(
+                [
+                    {
+                        "code": code,
+                        "dividOperateDate": "2024-01-08",
+                        "foreAdjustFactor": 1.0,
+                        "backAdjustFactor": 1.0,
+                        "adjustFactor": 1.0,
+                    }
+                ]
             )
 
     def create_provider(config, provider: str | None = None):
@@ -84,7 +105,14 @@ def test_repair_normalizes_non_trading_range_to_trading_bounds(
             "code": "sh.600000",
             "start_date": "2024-01-08",
             "end_date": "2024-01-12",
-            "adjustflag": "2",
+            "adjustflag": "3",
+        }
+    ]
+    assert state["adjust_factor_params"] == [
+        {
+            "code": "sh.600000",
+            "start_date": "1990-01-01",
+            "end_date": "2024-01-12",
         }
     ]
 

@@ -99,6 +99,26 @@ class BaostockClient:
         wait=wait_exponential(multiplier=1, min=1, max=8),
         reraise=True,
     )
+    def query_adjust_factor(
+        self,
+        code: str,
+        start_date: str,
+        end_date: str,
+    ) -> pd.DataFrame:
+        self._ensure_logged_in()
+        result = bs.query_adjust_factor(
+            code=code,
+            start_date=start_date,
+            end_date=end_date,
+        )
+        return _result_to_dataframe(result, "query_adjust_factor")
+
+    @retry(
+        retry=retry_if_exception_type(BaostockError),
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=1, min=1, max=8),
+        reraise=True,
+    )
     def query_stock_basic(self, code: str | None = None, code_name: str | None = None) -> pd.DataFrame:
         self._ensure_logged_in()
         kwargs: dict[str, str] = {}

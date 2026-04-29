@@ -59,6 +59,13 @@ class BaostockProvider:
             adjustflag=self._config.adjustflag_for_dataset(request.dataset),
         )
 
+    def query_adjust_factor(self, code: str, start_date: str, end_date: str) -> pd.DataFrame:
+        return self._require_client().query_adjust_factor(
+            code=code,
+            start_date=start_date,
+            end_date=end_date,
+        )
+
     def _require_client(self) -> BaostockClient:
         if self._client is None:
             raise RuntimeError("BaostockProvider must be used as a context manager")

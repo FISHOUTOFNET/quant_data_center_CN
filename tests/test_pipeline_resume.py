@@ -4,18 +4,19 @@ import threading
 
 import pandas as pd
 
-import src.pipeline.init_history as init_history_module
 import src.pipeline.update_daily as update_daily_module
+from src.pipeline.common import PIPELINE_UPDATE_DAILY, write_checkpoint
 from src.storage.parquet_store import ParquetStore
 
 
-def test_init_history_resumes_failed_code(tmp_path, monkeypatch, daily_sample, stock_basic_sample) -> None:
+def test_update_daily_full_resumes_failed_code(tmp_path, monkeypatch, daily_sample, stock_basic_sample) -> None:
     _write_settings(tmp_path)
     provider_factory, state = _fake_provider_factory(stock_basic_sample(), daily_sample(), fail_once={"sz.000001"})
-    monkeypatch.setattr(init_history_module, "create_provider", provider_factory)
+    monkeypatch.setattr(update_daily_module, "create_provider", provider_factory)
 
-    first = init_history_module.init_history(
+    first = update_daily_module.update_daily(
         dataset="daily_k_qfq",
+        mode="full",
         start="2024-01-01",
         end="2024-01-31",
         root=tmp_path,
@@ -23,8 +24,9 @@ def test_init_history_resumes_failed_code(tmp_path, monkeypatch, daily_sample, s
     )
     first_history_calls = list(state["history_calls"])
 
-    second = init_history_module.init_history(
+    second = update_daily_module.update_daily(
         dataset="daily_k_qfq",
+        mode="full",
         start="2024-01-01",
         end="2024-01-31",
         root=tmp_path,
@@ -39,16 +41,16 @@ def test_init_history_resumes_failed_code(tmp_path, monkeypatch, daily_sample, s
     assert first_history_calls == ["sh.000001", "sh.600000", "sz.000001"]
     assert state["history_calls"][len(first_history_calls) :] == ["sz.000001"]
     assert [item["status"] for item in second if item["dataset"] == "daily_k_qfq"] == [
-        "skipped",
-        "skipped",
+        "skipped_checkpoint",
+        "skipped_checkpoint",
         "success",
     ]
 
 
-def test_init_history_resumes_write_failure(tmp_path, monkeypatch, daily_sample, stock_basic_sample) -> None:
+def test_update_daily_full_resumes_write_failure(tmp_path, monkeypatch, daily_sample, stock_basic_sample) -> None:
     _write_settings(tmp_path)
     provider_factory, state = _fake_provider_factory(stock_basic_sample(), daily_sample())
-    monkeypatch.setattr(init_history_module, "create_provider", provider_factory)
+    monkeypatch.setattr(update_daily_module, "create_provider", provider_factory)
 
     original_write_daily_k = ParquetStore.write_daily_k
     failed_once = {"value": False}
@@ -61,16 +63,18 @@ def test_init_history_resumes_write_failure(tmp_path, monkeypatch, daily_sample,
 
     monkeypatch.setattr(ParquetStore, "write_daily_k", flaky_write_daily_k)
 
-    first = init_history_module.init_history(
+    first = update_daily_module.update_daily(
         dataset="daily_k_qfq",
+        mode="full",
         start="2024-01-01",
         end="2024-01-31",
         code=("sh.600000", "sz.000001"),
         root=tmp_path,
         build_views=False,
     )
-    second = init_history_module.init_history(
+    second = update_daily_module.update_daily(
         dataset="daily_k_qfq",
+        mode="full",
         start="2024-01-01",
         end="2024-01-31",
         code=("sh.600000", "sz.000001"),
@@ -79,11 +83,11 @@ def test_init_history_resumes_write_failure(tmp_path, monkeypatch, daily_sample,
     )
 
     assert [item["status"] for item in first if item["dataset"] == "daily_k_qfq"] == ["success", "failed"]
-    assert [item["status"] for item in second if item["dataset"] == "daily_k_qfq"] == ["skipped", "success"]
+    assert [item["status"] for item in second if item["dataset"] == "daily_k_qfq"] == ["skipped_checkpoint", "success"]
     assert state["history_calls"] == ["sh.600000", "sz.000001", "sz.000001"]
 
 
-def test_init_history_fetches_next_code_while_previous_write_is_pending(
+def test_update_daily_full_fetches_next_code_while_previous_write_is_pending(
     tmp_path,
     monkeypatch,
     daily_sample,
@@ -113,15 +117,16 @@ def test_init_history_fetches_next_code_while_previous_write_is_pending(
                 second_fetch_seen.set()
             return result
 
-    monkeypatch.setattr(init_history_module, "create_provider", _provider_factory_for(ObservingProvider))
+    monkeypatch.setattr(update_daily_module, "create_provider", _provider_factory_for(ObservingProvider))
     monkeypatch.setattr(ParquetStore, "write_daily_k", slow_first_write)
 
     errors = []
 
     def run_pipeline() -> None:
         try:
-            init_history_module.init_history(
+            update_daily_module.update_daily(
                 dataset="daily_k_qfq",
+                mode="full",
                 start="2024-01-01",
                 end="2024-01-31",
                 code=("sh.600000", "sz.000001"),
@@ -144,7 +149,7 @@ def test_init_history_fetches_next_code_while_previous_write_is_pending(
     assert errors == []
 
 
-def test_init_history_resolves_non_trading_end_to_trading_bound(
+def test_update_daily_full_resolves_non_trading_end_to_trading_bound(
     tmp_path,
     monkeypatch,
     daily_sample,
@@ -152,10 +157,11 @@ def test_init_history_resolves_non_trading_end_to_trading_bound(
 ) -> None:
     _write_settings(tmp_path)
     provider_factory, state = _fake_provider_factory(stock_basic_sample(), daily_sample())
-    monkeypatch.setattr(init_history_module, "create_provider", provider_factory)
+    monkeypatch.setattr(update_daily_module, "create_provider", provider_factory)
 
-    init_history_module.init_history(
+    update_daily_module.update_daily(
         dataset="daily_k_qfq",
+        mode="full",
         start="2024-01-01",
         end="2024-01-06",
         code="sh.600000",
@@ -168,12 +174,19 @@ def test_init_history_resolves_non_trading_end_to_trading_bound(
             "code": "sh.600000",
             "start_date": "1990-01-01",
             "end_date": "2024-01-05",
-            "adjustflag": "2",
+            "adjustflag": "3",
+        }
+    ]
+    assert state["adjust_factor_params"] == [
+        {
+            "code": "sh.600000",
+            "start_date": "1990-01-01",
+            "end_date": "2024-01-05",
         }
     ]
 
 
-def test_init_history_checkpoint_lookup_reads_checkpoints_once_per_run(
+def test_update_daily_full_checkpoint_lookup_reads_checkpoints_once_per_run(
     tmp_path,
     monkeypatch,
     daily_sample,
@@ -181,10 +194,11 @@ def test_init_history_checkpoint_lookup_reads_checkpoints_once_per_run(
 ) -> None:
     _write_settings(tmp_path)
     provider_factory, state = _fake_provider_factory(stock_basic_sample(), daily_sample())
-    monkeypatch.setattr(init_history_module, "create_provider", provider_factory)
+    monkeypatch.setattr(update_daily_module, "create_provider", provider_factory)
 
-    init_history_module.init_history(
+    update_daily_module.update_daily(
         dataset="daily_k_qfq",
+        mode="full",
         start="2024-01-01",
         end="2024-01-31",
         code="sh.600000",
@@ -202,8 +216,9 @@ def test_init_history_checkpoint_lookup_reads_checkpoints_once_per_run(
 
     monkeypatch.setattr(ParquetStore, "read_pipeline_checkpoints", counted_read_pipeline_checkpoints)
 
-    init_history_module.init_history(
+    update_daily_module.update_daily(
         dataset="daily_k_qfq",
+        mode="full",
         start="2024-01-01",
         end="2024-01-31",
         code="sh.600000",
@@ -215,7 +230,7 @@ def test_init_history_checkpoint_lookup_reads_checkpoints_once_per_run(
     assert state["history_calls"] == first_history_calls
 
 
-def test_init_history_batches_daily_checkpoints_by_flush_size(
+def test_update_daily_full_batches_daily_checkpoints_by_flush_size(
     tmp_path,
     monkeypatch,
     daily_sample,
@@ -223,7 +238,7 @@ def test_init_history_batches_daily_checkpoints_by_flush_size(
 ) -> None:
     _write_settings(tmp_path, metadata_flush_size=2)
     provider_factory, state = _fake_provider_factory(stock_basic_sample(), daily_sample())
-    monkeypatch.setattr(init_history_module, "create_provider", provider_factory)
+    monkeypatch.setattr(update_daily_module, "create_provider", provider_factory)
 
     flush_sizes = []
     original_persist_update_metadata = ParquetStore.persist_update_metadata
@@ -234,8 +249,9 @@ def test_init_history_batches_daily_checkpoints_by_flush_size(
 
     monkeypatch.setattr(ParquetStore, "persist_update_metadata", counted_persist_update_metadata)
 
-    records = init_history_module.init_history(
+    records = update_daily_module.update_daily(
         dataset="daily_k_qfq",
+        mode="full",
         start="2024-01-01",
         end="2024-01-31",
         code=("sh.000001", "sh.600000", "sz.000001"),
@@ -277,7 +293,7 @@ def test_update_daily_uses_active_stock_basic_codes_and_resumes(
         build_views=False,
     )
 
-    assert first_history_calls == ["sh.600000", "sh.600000", "sh.600000"]
+    assert first_history_calls == ["sh.600000", "sh.600000"]
     assert "sz.000001" not in first_history_calls
     assert state["history_calls"] == first_history_calls
     assert state["stock_basic_calls"] == 1
@@ -348,7 +364,7 @@ def test_update_daily_resolves_weekend_end_to_previous_trading_day(
         build_views=False,
     )
 
-    assert {item["start_date"] for item in first_history_params} == {"1990-01-01"}
+    assert [item["start_date"] for item in first_history_params] == ["2024-01-04", "1990-01-01"]
     assert {item["end_date"] for item in first_history_params} == {"2024-01-05"}
     assert state["history_params"] == first_history_params
     assert state["stock_basic_calls"] == 1
@@ -390,11 +406,8 @@ def test_update_daily_refetches_full_history_on_lookback_mismatch(
     assert history_starts == [
         "2024-01-02",
         "1990-01-01",
-        "2024-01-02",
-        "1990-01-01",
-        "2024-01-02",
-        "1990-01-01",
     ]
+    assert {item["adjustflag"] for item in state["history_params"]} == {"3"}
     daily_records = [item for item in records if item["dataset"].startswith("daily_k_")]
     assert [item["start_date"] for item in daily_records] == ["1990-01-01", "1990-01-01", "1990-01-01"]
     assert store.read_daily_k("daily_k_qfq", "sh.600000").loc[0, "close"] == 8.2
@@ -425,23 +438,138 @@ def test_update_daily_refetches_full_history_when_lookback_is_empty(
         build_views=False,
     )
 
-    assert [item["start_date"] for item in state["history_params"]] == [
-        "1990-01-01",
-        "1990-01-01",
-        "1990-01-01",
-    ]
+    assert [item["start_date"] for item in state["history_params"]] == ["2024-01-02", "1990-01-01"]
+    assert {item["adjustflag"] for item in state["history_params"]} == {"3"}
     daily_records = [item for item in records if item["dataset"].startswith("daily_k_")]
     assert [item["row_count"] for item in daily_records] == [2, 2, 2]
 
 
-def _fake_provider_factory(stock_basic_df: pd.DataFrame, daily_df: pd.DataFrame, fail_once: set[str] | None = None):
+def test_update_daily_adjust_factor_change_overrides_daily_checkpoint(
+    tmp_path,
+    monkeypatch,
+    daily_sample,
+    stock_basic_sample,
+) -> None:
+    _write_settings(tmp_path)
+    store = ParquetStore(root=tmp_path)
+    store.ensure_layout()
+    code = "sh.600000"
+    end_date = "2024-01-03"
+    checkpoint_start = "2024-01-02"
+
+    old_factors = pd.DataFrame(
+        [
+            {
+                "code": code,
+                "dividOperateDate": "2024-01-02",
+                "foreAdjustFactor": 1.0,
+                "backAdjustFactor": 1.0,
+                "adjustFactor": 1.0,
+            }
+        ]
+    )
+    new_factors = old_factors.assign(foreAdjustFactor=2.0, backAdjustFactor=3.0, adjustFactor=2.0)
+    store.write_adjust_factor(code, old_factors)
+    daily_path = store.write_daily_k("daily_k_qfq", code, daily_sample().assign(code=code, adjustflag="2"))
+    write_checkpoint(
+        store,
+        PIPELINE_UPDATE_DAILY,
+        "daily_k_qfq",
+        code,
+        checkpoint_start,
+        end_date,
+        "success",
+        len(daily_sample()),
+        daily_path,
+    )
+
+    provider_factory, state = _fake_provider_factory(
+        stock_basic_sample(),
+        daily_sample(),
+        adjust_factor_df=new_factors,
+    )
+    monkeypatch.setattr(update_daily_module, "create_provider", provider_factory)
+
+    records = update_daily_module.update_daily(
+        dataset="daily_k_qfq",
+        code=code,
+        end=end_date,
+        lookback_days=1,
+        root=tmp_path,
+        build_views=False,
+    )
+
+    qfq_records = [item for item in records if item["dataset"] == "daily_k_qfq"]
+    assert [item["status"] for item in qfq_records] == ["success"]
+    assert state["history_params"] == [
+        {
+            "code": code,
+            "start_date": "1990-01-01",
+            "end_date": end_date,
+            "adjustflag": "3",
+        }
+    ]
+    assert store.read_daily_k("daily_k_qfq", code).loc[0, "close"] == 16.4
+
+
+def test_update_daily_provider_calls_stay_on_main_thread(
+    tmp_path,
+    monkeypatch,
+    daily_sample,
+    stock_basic_sample,
+) -> None:
+    _write_settings(tmp_path)
+    provider_factory, _state = _fake_provider_factory(stock_basic_sample(), daily_sample())
+    main_thread_id = threading.get_ident()
+
+    class ObservingProvider(provider_factory.provider_cls):
+        def query_daily_k(self, request) -> pd.DataFrame:
+            assert threading.get_ident() == main_thread_id
+            return super().query_daily_k(request)
+
+        def query_adjust_factor(self, code: str, start_date: str, end_date: str) -> pd.DataFrame:
+            assert threading.get_ident() == main_thread_id
+            return super().query_adjust_factor(code, start_date, end_date)
+
+    monkeypatch.setattr(update_daily_module, "create_provider", _provider_factory_for(ObservingProvider))
+
+    update_daily_module.update_daily(
+        dataset="daily_k_qfq",
+        mode="full",
+        start="2024-01-01",
+        end="2024-01-31",
+        code="sh.600000",
+        root=tmp_path,
+        build_views=False,
+    )
+
+
+def _fake_provider_factory(
+    stock_basic_df: pd.DataFrame,
+    daily_df: pd.DataFrame,
+    fail_once: set[str] | None = None,
+    adjust_factor_df: pd.DataFrame | None = None,
+):
     state = {
         "history_calls": [],
         "history_params": [],
+        "adjust_factor_calls": [],
+        "adjust_factor_params": [],
         "calendar_params": [],
         "stock_basic_calls": 0,
         "fail_once": set(fail_once or set()),
     }
+    factors = adjust_factor_df if adjust_factor_df is not None else pd.DataFrame(
+        [
+            {
+                "code": "sh.600000",
+                "dividOperateDate": "2024-01-02",
+                "foreAdjustFactor": 1.0,
+                "backAdjustFactor": 1.0,
+                "adjustFactor": 1.0,
+            }
+        ]
+    )
 
     class FakeProvider:
         name = "fake"
@@ -507,6 +635,22 @@ def _fake_provider_factory(stock_basic_df: pd.DataFrame, daily_df: pd.DataFrame,
                 adjustflag=adjustflag,
             ) if callable(daily_df) else daily_df
             return source.assign(code=code, adjustflag=adjustflag).copy()
+
+        def query_adjust_factor(self, code: str, start_date: str, end_date: str) -> pd.DataFrame:
+            state["adjust_factor_calls"].append(code)
+            state["adjust_factor_params"].append(
+                {
+                    "code": code,
+                    "start_date": start_date,
+                    "end_date": end_date,
+                }
+            )
+            source = factors(
+                code=code,
+                start_date=start_date,
+                end_date=end_date,
+            ) if callable(factors) else factors
+            return source.assign(code=code).copy()
 
     factory = _provider_factory_for(FakeProvider)
     factory.provider_cls = FakeProvider

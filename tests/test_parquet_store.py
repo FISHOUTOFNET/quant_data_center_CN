@@ -61,6 +61,18 @@ def test_write_calendar_merges_existing_dates(tmp_path) -> None:
     ]
 
 
+def test_adjust_factor_write_and_read(tmp_path, adjust_factor_sample) -> None:
+    store = ParquetStore(root=tmp_path)
+    store.ensure_layout()
+
+    path = store.write_adjust_factor("sh.600000", adjust_factor_sample().astype({"foreAdjustFactor": "string"}))
+
+    assert path.exists()
+    loaded = store.read_adjust_factor("sh.600000")
+    assert len(loaded) == 1
+    assert loaded.loc[0, "foreAdjustFactor"] == 1.0
+
+
 def test_pipeline_checkpoint_requires_success_and_output_file(tmp_path, daily_sample) -> None:
     store = ParquetStore(root=tmp_path)
     store.ensure_layout()
@@ -69,7 +81,7 @@ def test_pipeline_checkpoint_requires_success_and_output_file(tmp_path, daily_sa
     checkpoint = pd.DataFrame(
         [
             {
-                "pipeline": "init_history",
+                "pipeline": "update_daily",
                 "dataset": "daily_k_qfq",
                 "code": "sh.600000",
                 "start_date": "2024-01-01",
@@ -85,11 +97,11 @@ def test_pipeline_checkpoint_requires_success_and_output_file(tmp_path, daily_sa
     store.upsert_pipeline_checkpoints(checkpoint)
 
     assert store.pipeline_checkpoint_succeeded(
-        "init_history", "daily_k_qfq", "sh.600000", "2024-01-01", "2024-01-31", output_path
+        "update_daily", "daily_k_qfq", "sh.600000", "2024-01-01", "2024-01-31", output_path
     )
     assert should_skip_checkpoint(
         store,
-        "init_history",
+        "update_daily",
         "daily_k_qfq",
         "sh.600000",
         "2024-01-01",
@@ -100,7 +112,7 @@ def test_pipeline_checkpoint_requires_success_and_output_file(tmp_path, daily_sa
     )
     assert not should_skip_checkpoint(
         store,
-        "init_history",
+        "update_daily",
         "daily_k_qfq",
         "sh.600000",
         "2024-01-01",
@@ -111,7 +123,7 @@ def test_pipeline_checkpoint_requires_success_and_output_file(tmp_path, daily_sa
     )
     assert not should_skip_checkpoint(
         store,
-        "init_history",
+        "update_daily",
         "daily_k_qfq",
         "sh.600000",
         "2024-01-01",
@@ -124,12 +136,12 @@ def test_pipeline_checkpoint_requires_success_and_output_file(tmp_path, daily_sa
     output_path.unlink()
 
     assert not store.pipeline_checkpoint_succeeded(
-        "init_history", "daily_k_qfq", "sh.600000", "2024-01-01", "2024-01-31", output_path
+        "update_daily", "daily_k_qfq", "sh.600000", "2024-01-01", "2024-01-31", output_path
     )
 
 
-def test_checkpoint_date_resume_is_scoped_to_pipeline(tmp_path, daily_sample) -> None:
-    def store_with_checkpoint(root, pipeline: str, start_date: str):
+def test_checkpoint_date_resume_matches_update_daily_end_date(tmp_path, daily_sample) -> None:
+    def store_with_checkpoint(root, start_date: str):
         store = ParquetStore(root=root)
         store.ensure_layout()
         output_path = store.write_daily_k("daily_k_qfq", "sh.600000", daily_sample())
@@ -137,7 +149,7 @@ def test_checkpoint_date_resume_is_scoped_to_pipeline(tmp_path, daily_sample) ->
             pd.DataFrame(
                 [
                     {
-                        "pipeline": pipeline,
+                        "pipeline": "update_daily",
                         "dataset": "daily_k_qfq",
                         "code": "sh.600000",
                         "start_date": start_date,
@@ -153,10 +165,10 @@ def test_checkpoint_date_resume_is_scoped_to_pipeline(tmp_path, daily_sample) ->
         )
         return store, output_path, PipelineCheckpointLookup.from_store(store)
 
-    def assert_skip(store, output_path, lookup, pipeline: str, expected: bool) -> None:
+    def assert_skip(store, output_path, lookup, expected: bool) -> None:
         args = (
             store,
-            pipeline,
+            "update_daily",
             "daily_k_qfq",
             "sh.600000",
             "2024-01-15",
@@ -166,17 +178,8 @@ def test_checkpoint_date_resume_is_scoped_to_pipeline(tmp_path, daily_sample) ->
         assert should_skip_checkpoint(*args, resume=True, force=False) == expected
         assert should_skip_checkpoint(*args, resume=True, force=False, checkpoint_lookup=lookup) == expected
 
-    init_store, init_output_path, init_lookup = store_with_checkpoint(
-        tmp_path / "init_only", "init_history", "1990-01-01"
-    )
-    assert_skip(init_store, init_output_path, init_lookup, "init_history", True)
-    assert_skip(init_store, init_output_path, init_lookup, "update_daily", False)
-
-    update_store, update_output_path, update_lookup = store_with_checkpoint(
-        tmp_path / "update_only", "update_daily", "2024-01-01"
-    )
-    assert_skip(update_store, update_output_path, update_lookup, "update_daily", True)
-    assert_skip(update_store, update_output_path, update_lookup, "init_history", False)
+    update_store, update_output_path, update_lookup = store_with_checkpoint(tmp_path / "update_only", "2024-01-01")
+    assert_skip(update_store, update_output_path, update_lookup, True)
 
 
 def test_checkpoint_lookup_matches_store_resume_semantics(tmp_path, daily_sample) -> None:
@@ -188,18 +191,6 @@ def test_checkpoint_lookup_matches_store_resume_semantics(tmp_path, daily_sample
     store.upsert_pipeline_checkpoints(
         pd.DataFrame(
             [
-                {
-                    "pipeline": "init_history",
-                    "dataset": "daily_k_qfq",
-                    "code": "sh.600000",
-                    "start_date": "1990-01-01",
-                    "end_date": "2024-01-31",
-                    "status": "success",
-                    "row_count": 2,
-                    "output_path": str(output_path),
-                    "updated_at": datetime(2024, 1, 31, 16, 0),
-                    "error_stack": "",
-                },
                 {
                     "pipeline": "update_daily",
                     "dataset": "daily_k_qfq",

@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import pandas as pd
 import pytest
 
-from src.quality.validators import ValidationError, validate_daily_k, validate_non_negative
+from src.quality.validators import ValidationError, validate_adjust_factor, validate_daily_k, validate_non_negative
 
 
 def test_validate_daily_k_accepts_valid_data(daily_sample) -> None:
@@ -51,3 +52,9 @@ def test_validate_non_negative_warns_on_negative_values(daily_sample) -> None:
     df = daily_sample()
     df.loc[0, "volume"] = -1000000
     validate_non_negative(df, "volume")
+
+
+def test_validate_adjust_factor_rejects_duplicate_code_date(adjust_factor_sample) -> None:
+    df = pd.concat([adjust_factor_sample(), adjust_factor_sample()], ignore_index=True)
+    with pytest.raises(ValidationError, match="Duplicate"):
+        validate_adjust_factor(df)

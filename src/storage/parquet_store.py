@@ -14,6 +14,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from src.storage.dataset_catalog import (
+    ADJUST_FACTOR_DATASET,
     CALENDAR_DATASET,
     STOCK_BASIC_DATASET,
     daily_k_definition,
@@ -79,6 +80,7 @@ class ParquetStore:
         daily_k_dirs = [self.parquet_dir / definition.name for definition in daily_k_definitions()]
         for directory in [
             *daily_k_dirs,
+            self.parquet_dir / ADJUST_FACTOR_DATASET.name,
             self.parquet_dir / "stock_basic",
             self.parquet_dir / "calendar",
             self.metadata_dir,
@@ -90,6 +92,9 @@ class ParquetStore:
 
     def daily_k_path(self, dataset: str, code: str) -> Path:
         return self.parquet_dir / dataset / f"code={code}" / "data.parquet"
+
+    def adjust_factor_path(self, code: str) -> Path:
+        return self.parquet_dir / ADJUST_FACTOR_DATASET.name / f"code={code}" / "data.parquet"
 
     def stock_basic_path(self) -> Path:
         return self.parquet_dir / "stock_basic" / "data.parquet"
@@ -214,6 +219,25 @@ class ParquetStore:
         if not path.exists():
             return pd.DataFrame(columns=field_names(definition.schema))
         return self._safe_read_parquet(path)
+
+    def write_adjust_factor(self, code: str, df: pd.DataFrame) -> Path:
+        cleaned = self.clean_dataframe_for_schema(df, ADJUST_FACTOR_DATASET.schema)
+        if not cleaned.empty:
+            cleaned["code"] = cleaned["code"].fillna(code)
+            codes = set(cleaned["code"].dropna().astype(str))
+            if codes != {code}:
+                raise ValueError(f"Adjust factor file code mismatch for {code}: {sorted(codes)}")
+            cleaned = cleaned.sort_values(["code", "dividOperateDate"]).reset_index(drop=True)
+        ADJUST_FACTOR_DATASET.validator(cleaned)
+        destination = self.adjust_factor_path(code)
+        self.atomic_write(cleaned, ADJUST_FACTOR_DATASET.schema, destination)
+        return destination
+
+    def read_adjust_factor(self, code: str) -> pd.DataFrame:
+        path = self.adjust_factor_path(code)
+        if not path.exists():
+            return pd.DataFrame(columns=field_names(ADJUST_FACTOR_DATASET.schema))
+        return self.clean_dataframe_for_schema(self._safe_read_parquet(path), ADJUST_FACTOR_DATASET.schema)
 
     def read_stock_basic(self) -> pd.DataFrame:
         path = self.stock_basic_path()

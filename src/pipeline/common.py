@@ -15,13 +15,13 @@ from src.storage.dataset_catalog import (
     expand_daily_k_selection,
     is_daily_k_dataset,
 )
+from src.pipeline.adjustments import ADJUST_FACTOR_DATASET
 from src.utils.config_mgr import ConfigManager
 from src.utils.logging import logger
 
 
 DAILY_K_DATASETS = daily_k_dataset_names()
 FULL_HISTORY_START_DATE = "1990-01-01"
-PIPELINE_INIT_HISTORY = "init_history"
 PIPELINE_UPDATE_DAILY = "update_daily"
 MARKET_DATE_CUTOFF = time(18, 0)
 
@@ -239,6 +239,8 @@ def _calendar_with_keys(calendar_df: pd.DataFrame) -> pd.DataFrame:
 def checkpoint_output_path(store: ParquetStore, dataset: str, code: str, end_date: str) -> Path:
     if is_daily_k_dataset(dataset):
         return store.daily_k_path(dataset, code)
+    if dataset == ADJUST_FACTOR_DATASET:
+        return store.adjust_factor_path(code)
     if dataset == "stock_basic":
         return store.stock_basic_path()
     if dataset == "calendar":

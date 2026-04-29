@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from pathlib import Path
-
 import pandas as pd
 
 from src.api.market_data import DailyKRequest, MarketDataProvider
@@ -90,6 +88,15 @@ def fetch_stock_basic(provider: MarketDataProvider) -> pd.DataFrame:
     return df
 
 
+def fetch_adjust_factor(
+    provider: MarketDataProvider,
+    code: str,
+    start_date: str,
+    end_date: str,
+) -> pd.DataFrame:
+    return provider.query_adjust_factor(code=code, start_date=start_date, end_date=end_date)
+
+
 def fetch_daily_k(
     provider: MarketDataProvider,
     config: ConfigManager,
@@ -125,7 +132,3 @@ def log_api_fetch(
         end_date,
         len(df),
     )
-
-
-def path_result(dataset: str, code: str, rows: int, path: Path, status: str) -> dict[str, object]:
-    return {"dataset": dataset, "code": code, "rows": rows, "path": str(path), "status": status}

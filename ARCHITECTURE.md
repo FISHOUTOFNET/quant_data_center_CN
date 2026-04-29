@@ -14,8 +14,9 @@
 
 数据源接入通过 `MarketDataProvider` 接口解耦。管道只依赖标准化后的 DataFrame、`DailyKRequest` 请求对象和 `create_provider` 工厂，不直接依赖具体 SDK。
 
-当前内置 provider 为 `baostock`，封装以下 3 个 Baostock API：
+当前内置 provider 为 `baostock`，封装以下 4 个 Baostock API：
 - `query_history_k_data_plus`：历史行情数据
+- `query_adjust_factor`：复权因子
 - `query_stock_basic`：股票基础信息
 - `query_trade_dates`：交易日历
 
@@ -43,23 +44,24 @@ class MarketDataProvider(Protocol):
     def query_trade_dates(self, start_date: str | None = None, end_date: str | None = None) -> pd.DataFrame: ...
     def query_stock_basic(self, code: str | None = None, code_name: str | None = None) -> pd.DataFrame: ...
     def query_daily_k(self, request: DailyKRequest) -> pd.DataFrame: ...
+    def query_adjust_factor(self, code: str, start_date: str, end_date: str) -> pd.DataFrame: ...
 ```
 
 Provider 注册与创建：
 - `register_provider(name, factory)`：注册 provider factory
 - `registered_provider_names()`：列出已注册 provider
 - `create_provider(config, provider=None)`：优先使用 CLI `--provider`，否则使用 `api.provider`，默认回退 `baostock`
-- `BaostockProvider`：将标准请求映射到 `BaostockClient`，并根据数据集映射 `adjustflag`
+- `BaostockProvider`：将标准请求映射到 `BaostockClient`；日线 API 只在管道中用于未复权数据，前/后复权由本地因子计算
 
 ### 2.2 历史行情数据（daily_k）
 
-通过 adjustflag 拆分为 3 套完全隔离的数据集：
+本地物化 3 套互相隔离的日线数据集：
 
 | 数据集 | 含义 | adjustflag |
 |--------|------|------------|
-| daily_k_none | 不复权 | "3" |
-| daily_k_qfq | 前复权 | "2" |
-| daily_k_hfq | 后复权 | "1" |
+| daily_k_none | BaoStock 未复权日线 API 获取 | "3" |
+| daily_k_qfq | 未复权日线 × foreAdjustFactor 本地计算 | "2" |
+| daily_k_hfq | 未复权日线 × backAdjustFactor 本地计算 | "1" |
 
 📂 存储结构（Hive 分区）
 
@@ -83,7 +85,27 @@ data/parquet/daily_k_qfq/code=sh.600000/data.parquet
 - isST (string)
 ```
 
-### 2.3 股票基础信息（stock_basic）
+### 2.3 复权因子（adjust_factor）
+
+按代码保存 BaoStock 全量复权因子，前/后复权日线均由该数据集计算。
+
+📂 存储结构（Hive 分区）
+
+```
+data/parquet/adjust_factor/code=sh.600000/data.parquet
+```
+
+📊 Schema
+
+```
+- code (string)
+- dividOperateDate (date32)
+- foreAdjustFactor (float64)
+- backAdjustFactor (float64)
+- adjustFactor (float64)
+```
+
+### 2.4 股票基础信息（stock_basic）
 
 采用单文件存储模式，每次更新覆盖整个文件。
 
@@ -109,7 +131,7 @@ data/parquet/stock_basic/data.parquet
 - 每次更新会删除历史分区目录（如 `snapshot_date=YYYY-MM-DD/`）
 - 单文件模式简化了数据管理，避免了多快照的复杂性
 
-### 2.4 交易日历（calendar）
+### 2.5 交易日历（calendar）
 
 📂 存储结构
 
@@ -207,6 +229,8 @@ datasets:
     fields: "code,code_name,ipoDate,outDate,type,status"
   calendar:
     fields: "calendar_date,is_trading_day"
+  adjust_factor:
+    fields: "code,dividOperateDate,foreAdjustFactor,backAdjustFactor,adjustFactor"
 
 pipeline:
   lookback_days: 30      # 交易日数量
@@ -236,6 +260,7 @@ quant_data_center/
 │   │   ├── daily_k_none/      # 不复权日线数据
 │   │   ├── daily_k_qfq/       # 前复权日线数据
 │   │   ├── daily_k_hfq/       # 后复权日线数据
+│   │   ├── adjust_factor/     # 复权因子
 │   │   ├── stock_basic/       # 股票基础信息快照
 │   │   └── calendar/          # 交易日历
 │   │
@@ -267,11 +292,11 @@ quant_data_center/
 │   │   ├── parquet_store.py      # Parquet 存储层
 │   │   └── schema.py             # PyArrow Schema 定义
 │   ├── pipeline/
+│   │   ├── adjustments.py        # 本地复权计算
 │   │   ├── common.py             # 共享工具函数
-│   │   ├── init_history.py       # 历史初始化管道
 │   │   ├── repair_tool.py        # 数据修复管道
 │   │   ├── services.py           # provider 拉取与元数据批处理服务
-│   │   ├── update_daily.py       # 日常更新管道
+│   │   ├── update_daily.py       # 日常更新与历史初始化管道
 │   │   └── write_queue.py        # 异步写入队列
 │   ├── quality/
 │   │   └── validators.py         # 数据验证器
@@ -284,6 +309,7 @@ quant_data_center/
 ├── tests/                    # 测试文件
 │   ├── conftest.py
 │   ├── test_baostock_client.py
+│   ├── test_adjustments.py
 │   ├── test_cli_provider.py
 │   ├── test_code_pool.py
 │   ├── test_dataset_catalog.py
@@ -339,6 +365,10 @@ quant_data_center/
    - 回看窗口内的数据与本地数据不一致
    - 复权因子发生变化
    - 数据源修正历史数据
+
+3. **复权因子变化**：`adjust_factor_changed`
+   - 本地 `adjust_factor` 文件与新拉取全量因子不同
+   - 前/后复权日线从 `1990-01-01` 开始用未复权历史数据重算
 
 这种机制确保了数据的完整性和一致性，避免部分历史数据被遗漏或错误。
 
@@ -436,7 +466,7 @@ def validate_daily_k(df: pd.DataFrame, schema: pa.Schema = DAILY_K_SCHEMA) -> No
 **checkpoint 记录**：
 
 存储在 `data/metadata/pipeline_checkpoints.parquet`，包含：
-- pipeline 名称（`init_history` / `update_daily`）
+- pipeline 名称（`update_daily`）
 - dataset 名称
 - code 股票代码
 - start_date / end_date（解析后的交易日）
@@ -559,44 +589,29 @@ AND date > '2023-01-01';
 
 ## 6. CLI 指令体系
 
-### 6.1 qdc init-history
+### 6.1 qdc update-daily
 
-初始化历史数据。
-
-```bash
-qdc init-history --dataset all --start 2024-01-01 --end 2024-04-26 --code sh.600000
-```
-
-**参数**：
-- `--dataset`：数据集选择（`all` / `daily_k_none` / `daily_k_qfq` / `daily_k_hfq` / `stock_basic` / `calendar`）
-- `--start`：开始日期（默认 `1990-01-01`）
-- `--end`：结束日期（默认按 18:00 cutoff 规则）
-- `--code`：股票代码（可重复，默认使用最新 stock_basic 快照）
-- `--universe`：已弃用的股票池名称，读取 `config/universe.yaml`
-- `--provider`：数据源名称，默认使用 `api.provider`
-- `--resume/--no-resume`：启用续传（默认启用）
-- `--force`：强制重新拉取
-- `--build-views/--no-build-views`：完成后构建视图（默认启用）
-
-### 6.2 qdc update-daily
-
-日常增量更新。
+日常增量更新与历史初始化统一入口。
 
 ```bash
 qdc update-daily
+qdc update-daily --mode full --dataset all --start 1990-01-01
 ```
 
 **参数**：
-- `--code`：股票代码（可重复，默认使用最新 stock_basic 快照中 type=1 且 status=1 的代码）
+- `--dataset`：数据集选择（`all` / `daily_k_all` / `daily_k_none` / `daily_k_qfq` / `daily_k_hfq` / `adjust_factor` / `stock_basic` / `calendar`）
+- `--start`：full 模式开始日期（默认 `1990-01-01`）
+- `--code`：股票代码（可重复；partial 默认使用 active 代码，full 默认使用全部 stock_basic 代码）
 - `--universe`：已弃用的股票池名称，读取 `config/universe.yaml`
 - `--lookback-days`：回看交易日数量（默认 30）
 - `--end`：目标日期（默认按 18:00 cutoff 规则）
+- `--mode`：更新模式（`partial` / `full`，默认 `partial`）
 - `--provider`：数据源名称，默认使用 `api.provider`
 - `--resume/--no-resume`：启用续传（默认启用）
 - `--force`：强制重新拉取
 - `--build-views/--no-build-views`：完成后构建视图（默认启用）
 
-### 6.3 qdc repair
+### 6.2 qdc repair
 
 数据修复。
 
@@ -612,7 +627,7 @@ qdc repair --code sh.600000 --start 2024-01-01 --end 2024-04-26 --dataset daily_
 - `--provider`：数据源名称，默认使用 `api.provider`
 - `--build-views/--no-build-views`：完成后构建视图（默认启用）
 
-### 6.4 qdc build-views
+### 6.3 qdc build-views
 
 手动构建 DuckDB 视图。
 
@@ -662,12 +677,12 @@ def default_candidate_date(config: ConfigManager, now: datetime | None = None) -
 
 ### 8.1 代码池来源
 
-**init-history**：
+**update-daily full 模式**：
 - 默认：最新 stock_basic 快照中的全部非空 code
 - 可选：通过 `--code` 参数指定
 - 兼容：`--universe` 参数（已弃用）
 
-**update-daily**：
+**update-daily partial 模式**：
 - 默认：最新 stock_basic 快照中 type=1 且 status=1 的上市股票代码
 - 可选：通过 `--code` 参数指定
 - 兼容：`--universe` 参数（已弃用）
@@ -914,7 +929,6 @@ endlocal
 
 ```powershell
 pytest -q
-python -m src.cli init-history --help
 python -m src.cli update-daily --help
 python -m src.cli repair --help
 python -m src.cli build-views --help

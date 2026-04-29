@@ -7,7 +7,6 @@ from pathlib import Path
 
 import click
 
-from src.pipeline.init_history import init_history as run_init_history
 from src.pipeline.repair_tool import repair as run_repair
 from src.pipeline.update_daily import update_daily as run_update_daily
 from src.storage.duckdb_store import DuckDBStore
@@ -31,73 +30,41 @@ def cli() -> None:
     configure_logging()
 
 
-@cli.command("init-history")
-@click.option("--dataset", default="all", show_default=True, help="daily_k_none/daily_k_qfq/daily_k_hfq/all.")
-@click.option("--start", default="1990-01-01", show_default=True, help="Start date, YYYY-MM-DD.")
-@click.option("--end", default=None, show_default=True, help="End date, YYYY-MM-DD. Defaults through 18:00 trading-day resolution.")
-@click.option("--code", multiple=True, help="Stock code. Can be repeated. Defaults to latest stock_basic snapshot.")
-@click.option("--universe", default=None, help="Deprecated universe name in config/universe.yaml.")
-@click.option("--provider", default=None, help="Data provider name. Defaults to api.provider.")
-@click.option("--resume/--no-resume", default=True, show_default=True, help="Resume from successful checkpoints.")
-@click.option("--force", is_flag=True, help="Ignore checkpoints and re-fetch all selected tasks.")
-@click.option("--build-views/--no-build-views", default=True, show_default=True)
-def init_history(
-    dataset: str,
-    start: str,
-    end: str | None,
-    code: tuple[str, ...],
-    universe: str | None,
-    provider: str | None,
-    resume: bool,
-    force: bool,
-    build_views: bool,
-) -> None:
-    """Initialize historical data."""
-
-    results = run_init_history(
-        dataset=dataset,
-        start=start,
-        end=end,
-        code=code,
-        universe=universe,
-        provider=provider,
-        build_views=build_views,
-        resume=resume,
-        force=force,
-    )
-    for item in results:
-        click.echo(
-            f"{item['dataset']} {item['code']} status={item.get('status', 'success')} "
-            f"rows={item.get('rows', item.get('total_rows', 0))} path={item['path']}"
-        )
-
-
 @cli.command("update-daily")
+@click.option("--dataset", default="all", show_default=True, help="daily_k_none/daily_k_qfq/daily_k_hfq/daily_k_all/adjust_factor/all/stock_basic/calendar.")
+@click.option("--start", default="1990-01-01", show_default=True, help="Full-mode start date, YYYY-MM-DD.")
 @click.option("--code", multiple=True, help="Stock code. Can be repeated. Defaults to active latest stock_basic snapshot.")
 @click.option("--universe", default=None, help="Deprecated universe name in config/universe.yaml.")
 @click.option("--lookback-days", type=int, default=None, help="Trading-day lookback count. Defaults to settings.yaml.")
 @click.option("--end", default=None, help="Target date, YYYY-MM-DD. Defaults through 18:00 trading-day resolution.")
+@click.option("--mode", type=click.Choice(["partial", "full"]), default="partial", show_default=True, help="Update mode.")
 @click.option("--provider", default=None, help="Data provider name. Defaults to api.provider.")
 @click.option("--resume/--no-resume", default=True, show_default=True, help="Resume from successful checkpoints.")
 @click.option("--force", is_flag=True, help="Ignore checkpoints and re-fetch all selected tasks.")
 @click.option("--build-views/--no-build-views", default=True, show_default=True)
 def update_daily(
+    dataset: str,
+    start: str,
     code: tuple[str, ...],
     universe: str | None,
     lookback_days: int | None,
     end: str | None,
+    mode: str,
     provider: str | None,
     resume: bool,
     force: bool,
     build_views: bool,
 ) -> None:
-    """Run daily lookback update."""
+    """Run daily lookback update or full historical initialization."""
 
     records = run_update_daily(
+        dataset=dataset,
+        start=start,
         code=code,
         universe=universe,
         lookback_days=lookback_days,
         end=end,
+        mode=mode,
         provider=provider,
         build_views=build_views,
         resume=resume,
@@ -111,7 +78,7 @@ def update_daily(
 @click.option("--code", required=True, help="Stock code, e.g. sh.600000.")
 @click.option("--start", required=True, help="Start date, YYYY-MM-DD.")
 @click.option("--end", required=True, help="End date, YYYY-MM-DD.")
-@click.option("--dataset", required=True, help="daily_k_none/daily_k_qfq/daily_k_hfq/daily_k_all.")
+@click.option("--dataset", required=True, help="daily_k_none/daily_k_qfq/daily_k_hfq/daily_k_all/adjust_factor.")
 @click.option("--provider", default=None, help="Data provider name. Defaults to api.provider.")
 @click.option("--build-views/--no-build-views", default=True, show_default=True)
 def repair(code: str, start: str, end: str, dataset: str, provider: str | None, build_views: bool) -> None:

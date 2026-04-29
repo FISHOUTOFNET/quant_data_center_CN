@@ -30,6 +30,8 @@ datasets:
     fields: "code,code_name,ipoDate,outDate,type,status"
   calendar:
     fields: "calendar_date,is_trading_day"
+  adjust_factor:
+    fields: "code,dividOperateDate,foreAdjustFactor,backAdjustFactor,adjustFactor"
 
 pipeline:
   lookback_days: 30

@@ -16,6 +16,11 @@ def stock_basic_sample():
     return _stock_basic_sample
 
 
+@pytest.fixture
+def adjust_factor_sample():
+    return _adjust_factor_sample
+
+
 def _daily_sample() -> pd.DataFrame:
     return pd.DataFrame(
         [
@@ -90,5 +95,19 @@ def _stock_basic_sample() -> pd.DataFrame:
                 "type": "2",
                 "status": "1",
             },
+        ]
+    )
+
+
+def _adjust_factor_sample() -> pd.DataFrame:
+    return pd.DataFrame(
+        [
+            {
+                "code": "sh.600000",
+                "dividOperateDate": date(2024, 1, 2),
+                "foreAdjustFactor": 1.0,
+                "backAdjustFactor": 1.0,
+                "adjustFactor": 1.0,
+            }
         ]
     )

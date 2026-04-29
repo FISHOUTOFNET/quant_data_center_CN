@@ -8,8 +8,8 @@ from dataclasses import dataclass
 import pandas as pd
 import pyarrow as pa
 
-from src.quality.validators import validate_calendar, validate_daily_k, validate_stock_basic
-from src.storage.schema import CALENDAR_SCHEMA, DAILY_K_SCHEMA, STOCK_BASIC_SCHEMA
+from src.quality.validators import validate_adjust_factor, validate_calendar, validate_daily_k, validate_stock_basic
+from src.storage.schema import ADJUST_FACTOR_SCHEMA, CALENDAR_SCHEMA, DAILY_K_SCHEMA, STOCK_BASIC_SCHEMA
 
 
 Validator = Callable[[pd.DataFrame], None]
@@ -51,12 +51,21 @@ CALENDAR_DATASET = DatasetDefinition(
     view_name="v_calendar",
 )
 
+ADJUST_FACTOR_DATASET = DatasetDefinition(
+    name="adjust_factor",
+    schema=ADJUST_FACTOR_SCHEMA,
+    validator=validate_adjust_factor,
+    view_name="v_adjust_factor",
+    partitioned_by_code=True,
+)
+
 DATASET_CATALOG = {
     definition.name: definition
     for definition in (
         *DAILY_K_DATASETS,
         STOCK_BASIC_DATASET,
         CALENDAR_DATASET,
+        ADJUST_FACTOR_DATASET,
     )
 }
 

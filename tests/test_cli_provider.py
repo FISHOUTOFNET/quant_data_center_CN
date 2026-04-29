@@ -5,22 +5,24 @@ from click.testing import CliRunner
 import src.cli as cli_module
 
 
-def test_init_history_cli_passes_explicit_provider(monkeypatch) -> None:
+def test_update_daily_full_cli_passes_explicit_provider(monkeypatch) -> None:
     captured: dict[str, object] = {}
 
-    def fake_init_history(**kwargs):
+    def fake_update_daily(**kwargs):
         captured.update(kwargs)
-        return [{"dataset": "calendar", "code": "*", "status": "success", "rows": 1, "path": "calendar.parquet"}]
+        return [{"dataset": "calendar", "code": "*", "status": "success", "row_count": 1}]
 
-    monkeypatch.setattr(cli_module, "run_init_history", fake_init_history)
+    monkeypatch.setattr(cli_module, "run_update_daily", fake_update_daily)
 
     result = CliRunner().invoke(
         cli_module.cli,
-        ["init-history", "--dataset", "calendar", "--provider", "baostock", "--no-build-views"],
+        ["update-daily", "--mode", "full", "--dataset", "calendar", "--provider", "baostock", "--no-build-views"],
     )
 
     assert result.exit_code == 0
     assert captured["provider"] == "baostock"
+    assert captured["mode"] == "full"
+    assert captured["dataset"] == "calendar"
 
 
 def test_update_daily_cli_keeps_provider_optional(monkeypatch) -> None:
@@ -39,3 +41,5 @@ def test_update_daily_cli_keeps_provider_optional(monkeypatch) -> None:
 
     assert result.exit_code == 0
     assert captured["provider"] is None
+    assert captured["mode"] == "partial"
+    assert captured["dataset"] == "all"

@@ -1,0 +1,333 @@
+================================================================================
+PERFORMANCE TEST REPORT FOR update_daily.py
+================================================================================
+Generated: 2026-04-29T14:51:51.967914
+Test Codes: ['sh.600000', 'sh.600036', 'sz.000001', 'sz.000002']
+
+------------------------------------------------------------
+Test: fetch_adjust_factor
+Duration: 0.245s
+
+Function Timing Breakdown:
+Function                                 Total(s)     Calls    Avg(ms)      Min(ms)      Max(ms)     
+------------------------------------------------------------------------------------------------
+fetch_adjust_factor_sh.600000            0.122        1        122.12       122.12       122.12      
+fetch_adjust_factor_sz.000002            0.043        1        43.37        43.37        43.37       
+fetch_adjust_factor_sh.600036            0.041        1        40.89        40.89        40.89       
+fetch_adjust_factor_sz.000001            0.037        1        36.78        36.78        36.78       
+
+Top Functions by Cumulative Time:
+  ncalls  tottime  percall  cumtime  percall filename:lineno(function)
+  1    0.000    0.000    0.244    0.244 C:\PycharmProjects\quant_data_center\tests\performance\test_update_daily_performance.py:279(test_func)
+  4    0.000    0.000    0.243    0.061 C:\PycharmProjects\quant_data_center\src\pipeline\services.py:91(fetch_adjust_factor)
+  4    0.000    0.000    0.243    0.061 C:\PycharmProjects\quant_data_center\src\api\baostock_provider.py:62(query_adjust_factor)
+  4    0.000    0.000    0.243    0.061 C:\Users\孙弈 Sun Yi\AppData\Local\Python\pythoncore-3.14-64\Lib\site-packages\tenacity\__init__.py:323(wrapped_f)
+  4    0.000    0.000    0.242    0.060 C:\Users\孙弈 Sun Yi\AppData\Local\Python\pythoncore-3.14-64\Lib\site-packages\tenacity\__init__.py:460(__call__)
+  4    0.000    0.000    0.240    0.060 C:\PycharmProjects\quant_data_center\src\api\baostock_client.py:96(query_adjust_factor)
+  4    0.000    0.000    0.207    0.052 C:\Users\孙弈 Sun Yi\AppData\Local\Python\pythoncore-3.14-64\Lib\site-packages\baostock\evaluation\season_index.py:107(query_adjust_factor)
+  4    0.000    0.000    0.206    0.052 C:\Users\孙弈 Sun Yi\AppData\Local\Python\pythoncore-3.14-64\Lib\site-packages\baostock\util\socketutil.py:55(send_msg)
+  4    0.206    0.051    0.206    0.051 {method 'recv' of '_socket.socket' objects}
+  4    0.000    0.000    0.033    0.008 C:\PycharmProjects\quant_data_center\src\api\baostock_client.py:27(_result_to_dataframe)
+  4    0.000    0.000    0.032    0.008 C:\Users\孙弈 Sun Yi\AppData\Local\Python\pythoncore-3.14-64\Lib\site-packages\pandas\core\frame.py:702(__init__)
+  24    0.004    0.000    0.024    0.001 C:\Users\孙弈 Sun Yi\AppData\Local\Python\pythoncore-3.14-64\Lib\site-packages\pandas\core\arrays\string_arrow.py:195(_from_sequence)
+  16    0.000    0.000    0.023    0.001 C:\Users\孙弈 Sun Yi\AppData\Local\Python\pythoncore-3.14-64\Lib\site-packages\pandas\core\indexes\base.py:7919(ensure_index)
+  24    0.001    0.000    0.023    0.001 C:\Users\孙弈 Sun Yi\AppData\Local\Python\pythoncore-3.14-64\Lib\site-packages\pandas\core\construction.py:531(sanitize_array)
+
+------------------------------------------------------------
+Test: fetch_daily_k
+Duration: 25.401s
+
+Function Timing Breakdown:
+Function                                 Total(s)     Calls    Avg(ms)      Min(ms)      Max(ms)     
+------------------------------------------------------------------------------------------------
+fetch_daily_k_sh.600036                  7.780        1        7779.85      7779.85      7779.85     
+fetch_daily_k_sz.000001                  7.106        1        7106.27      7106.27      7106.27     
+fetch_daily_k_sz.000002                  6.171        1        6170.84      6170.84      6170.84     
+fetch_daily_k_sh.600000                  4.344        1        4343.63      4343.63      4343.63     
+
+Top Functions by Cumulative Time:
+  ncalls  tottime  percall  cumtime  percall filename:lineno(function)
+  1    0.001    0.001   25.401   25.401 C:\PycharmProjects\quant_data_center\tests\performance\test_update_daily_performance.py:287(test_func)
+  4    0.000    0.000   25.400    6.350 C:\PycharmProjects\quant_data_center\src\pipeline\services.py:100(fetch_daily_k)
+  4    0.000    0.000   25.400    6.350 C:\PycharmProjects\quant_data_center\src\api\baostock_provider.py:52(query_daily_k)
+  4    0.000    0.000   25.400    6.350 C:\Users\孙弈 Sun Yi\AppData\Local\Python\pythoncore-3.14-64\Lib\site-packages\tenacity\__init__.py:323(wrapped_f)
+  4    0.026    0.006   25.399    6.350 C:\Users\孙弈 Sun Yi\AppData\Local\Python\pythoncore-3.14-64\Lib\site-packages\tenacity\__init__.py:460(__call__)
+  4    0.001    0.000   25.357    6.339 C:\PycharmProjects\quant_data_center\src\api\baostock_client.py:70(query_history_k_data_plus)
+  4    0.002    0.001   24.875    6.219 C:\Users\孙弈 Sun Yi\AppData\Local\Python\pythoncore-3.14-64\Lib\site-packages\baostock\security\history.py:20(query_history_k_data_plus)
+  4    0.005    0.001   24.873    6.218 C:\Users\孙弈 Sun Yi\AppData\Local\Python\pythoncore-3.14-64\Lib\site-packages\baostock\security\history.py:27(__query_history_k_data_plus_page)
+  4    0.040    0.010   24.766    6.192 C:\Users\孙弈 Sun Yi\AppData\Local\Python\pythoncore-3.14-64\Lib\site-packages\baostock\util\socketutil.py:55(send_msg)
+  463   24.702    0.053   24.702    0.053 {method 'recv' of '_socket.socket' objects}
+  4    0.056    0.014    0.480    0.120 C:\PycharmProjects\quant_data_center\src\api\baostock_client.py:27(_result_to_dataframe)
+  4    0.000    0.000    0.310    0.077 C:\Users\孙弈 Sun Yi\AppData\Local\Python\pythoncore-3.14-64\Lib\site-packages\pandas\core\frame.py:702(__init__)
+  4    0.006    0.002    0.298    0.074 C:\Users\孙弈 Sun Yi\AppData\Local\Python\pythoncore-3.14-64\Lib\site-packages\pandas\core\internals\construction.py:463(nested_data_to_arrays)
+  4    0.000    0.000    0.291    0.073 C:\Users\孙弈 Sun Yi\AppData\Local\Python\pythoncore-3.14-64\Lib\site-packages\pandas\core\internals\construction.py:759(to_arrays)
+
+------------------------------------------------------------
+Test: calculate_adjusted_daily_k
+Duration: 1.566s
+
+Function Timing Breakdown:
+Function                                 Total(s)     Calls    Avg(ms)      Min(ms)      Max(ms)     
+------------------------------------------------------------------------------------------------
+calculate_qfq_sz.000002                  0.282        1        281.65       281.65       281.65      
+calculate_hfq_sh.600036                  0.279        1        278.73       278.73       278.73      
+calculate_hfq_sz.000002                  0.271        1        271.09       271.09       271.09      
+calculate_qfq_sz.000001                  0.216        1        215.99       215.99       215.99      
+calculate_hfq_sz.000001                  0.197        1        197.02       197.02       197.02      
+calculate_qfq_sh.600000                  0.148        1        148.09       148.09       148.09      
+calculate_qfq_sh.600036                  0.089        1        89.46        89.46        89.46       
+calculate_hfq_sh.600000                  0.083        1        83.38        83.38        83.38       
+
+Top Functions by Cumulative Time:
+  ncalls  tottime  percall  cumtime  percall filename:lineno(function)
+  1    0.003    0.003    1.566    1.566 C:\PycharmProjects\quant_data_center\tests\performance\test_update_daily_performance.py:316(test_func)
+  8    0.005    0.001    1.563    0.195 C:\PycharmProjects\quant_data_center\src\pipeline\adjustments.py:21(calculate_adjusted_daily_k)
+  48    0.399    0.008    0.465    0.010 C:\Users\孙弈 Sun Yi\AppData\Local\Python\pythoncore-3.14-64\Lib\site-packages\pandas\core\tools\numeric.py:50(to_numeric)
+  104    0.003    0.000    0.184    0.002 C:\Users\孙弈 Sun Yi\AppData\Local\Python\pythoncore-3.14-64\Lib\site-packages\pandas\core\frame.py:4559(__setitem__)
+  104    0.001    0.000    0.180    0.002 C:\Users\孙弈 Sun Yi\AppData\Local\Python\pythoncore-3.14-64\Lib\site-packages\pandas\core\frame.py:4862(_set_item)
+  8    0.002    0.000    0.180    0.022 C:\PycharmProjects\quant_data_center\src\pipeline\adjustments.py:80(_factor_values)
+  16    0.003    0.000    0.154    0.010 C:\Users\孙弈 Sun Yi\AppData\Local\Python\pythoncore-3.14-64\Lib\site-packages\pandas\core\tools\datetimes.py:687(to_datetime)
+  104    0.005    0.000    0.146    0.001 C:\Users\孙弈 Sun Yi\AppData\Local\Python\pythoncore-3.14-64\Lib\site-packages\pandas\core\frame.py:4846(_set_item_mgr)
+  16    0.003    0.000    0.137    0.009 C:\Users\孙弈 Sun Yi\AppData\Local\Python\pythoncore-3.14-64\Lib\site-packages\pandas\core\frame.py:7654(dropna)
+  56    0.002    0.000    0.130    0.002 C:\Users\孙弈 Sun Yi\AppData\Local\Python\pythoncore-3.14-64\Lib\site-packages\pandas\core\internals\managers.py:1523(insert)
+  216    0.005    0.000    0.124    0.001 C:\Users\孙弈 Sun Yi\AppData\Local\Python\pythoncore-3.14-64\Lib\site-packages\pandas\core\frame.py:4337(__getitem__)
+  16    0.000    0.000    0.110    0.007 C:\Users\孙弈 Sun Yi\AppData\Local\Python\pythoncore-3.14-64\Lib\site-packages\pandas\core\tools\datetimes.py:321(_convert_listlike_datetimes)
+  72/40    0.001    0.000    0.105    0.003 C:\Users\孙弈 Sun Yi\AppData\Local\Python\pythoncore-3.14-64\Lib\site-packages\pandas\core\indexing.py:1192(__getitem__)
+  200    0.006    0.000    0.101    0.001 C:\Users\孙弈 Sun Yi\AppData\Local\Python\pythoncore-3.14-64\Lib\site-packages\pandas\core\internals\managers.py:396(apply)
+
+------------------------------------------------------------
+Test: parquet_write
+Duration: 1.559s
+
+Function Timing Breakdown:
+Function                                 Total(s)     Calls    Avg(ms)      Min(ms)      Max(ms)     
+------------------------------------------------------------------------------------------------
+write_daily_k_sz.000001                  0.442        1        441.62       441.62       441.62      
+write_daily_k_sh.600036                  0.430        1        429.63       429.63       429.63      
+write_daily_k_sz.000002                  0.350        1        349.83       349.83       349.83      
+write_daily_k_sh.600000                  0.337        1        337.17       337.17       337.17      
+
+Top Functions by Cumulative Time:
+  ncalls  tottime  percall  cumtime  percall filename:lineno(function)
+  1    0.001    0.001    1.558    1.558 C:\PycharmProjects\quant_data_center\tests\performance\test_update_daily_performance.py:347(test_func)
+  4    0.015    0.004    1.557    0.389 C:\PycharmProjects\quant_data_center\src\storage\parquet_store.py:202(write_daily_k)
+  4    0.005    0.001    0.822    0.206 C:\PycharmProjects\quant_data_center\src\storage\parquet_store.py:108(clean_dataframe_for_schema)
+  72    0.002    0.000    0.652    0.009 C:\PycharmProjects\quant_data_center\src\storage\parquet_store.py:124(_coerce_series)
+  76    0.283    0.004    0.343    0.005 C:\Users\孙弈 Sun Yi\AppData\Local\Python\pythoncore-3.14-64\Lib\site-packages\pandas\core\tools\numeric.py:50(to_numeric)
+  4    0.001    0.000    0.303    0.076 C:\PycharmProjects\quant_data_center\src\storage\parquet_store.py:146(atomic_write)
+  256    0.005    0.000    0.253    0.001 C:\Users\孙弈 Sun Yi\AppData\Local\Python\pythoncore-3.14-64\Lib\site-packages\pandas\core\internals\managers.py:396(apply)
+  4    0.001    0.000    0.252    0.063 C:\PycharmProjects\quant_data_center\src\quality\validators.py:102(validate_daily_k)
+  112/56    0.003    0.000    0.220    0.004 C:\Users\孙弈 Sun Yi\AppData\Local\Python\pythoncore-3.14-64\Lib\site-packages\pandas\core\generic.py:7387(replace)
+  56    0.000    0.000    0.208    0.004 C:\Users\孙弈 Sun Yi\AppData\Local\Python\pythoncore-3.14-64\Lib\site-packages\pandas\core\internals\managers.py:516(replace_list)
+  56    0.011    0.000    0.204    0.004 C:\Users\孙弈 Sun Yi\AppData\Local\Python\pythoncore-3.14-64\Lib\site-packages\pandas\core\internals\blocks.py:789(replace_list)
+  8    0.002    0.000    0.174    0.022 C:\Users\孙弈 Sun Yi\AppData\Local\Python\pythoncore-3.14-64\Lib\site-packages\pyarrow\pandas_compat.py:599(dataframe_to_arrays)
+  4    0.000    0.000    0.146    0.036 C:\Users\孙弈 Sun Yi\AppData\Local\Python\pythoncore-3.14-64\Lib\site-packages\pyarrow\parquet\core.py:1958(write_table)
+  352/348    0.001    0.000    0.144    0.000 C:\Users\孙弈 Sun Yi\AppData\Local\Python\pythoncore-3.14-64\Lib\site-packages\pandas\core\ops\common.py:67(new_method)
+
+------------------------------------------------------------
+Test: parquet_read
+Duration: 0.212s
+
+Function Timing Breakdown:
+Function                                 Total(s)     Calls    Avg(ms)      Min(ms)      Max(ms)     
+------------------------------------------------------------------------------------------------
+read_daily_k_sh.600000                   0.121        1        121.36       121.36       121.36      
+read_adjust_factor_sh.600036             0.027        1        27.03        27.03        27.03       
+read_adjust_factor_sh.600000             0.025        1        24.56        24.56        24.56       
+read_daily_k_sz.000001                   0.012        1        12.21        12.21        12.21       
+read_daily_k_sz.000002                   0.011        1        11.28        11.28        11.28       
+read_daily_k_sh.600036                   0.010        1        9.84         9.84         9.84        
+read_adjust_factor_sz.000001             0.003        1        3.08         3.08         3.08        
+read_adjust_factor_sz.000002             0.002        1        2.48         2.48         2.48        
+
+Top Functions by Cumulative Time:
+  ncalls  tottime  percall  cumtime  percall filename:lineno(function)
+  1    0.001    0.001    0.212    0.212 C:\PycharmProjects\quant_data_center\tests\performance\test_update_daily_performance.py:355(test_func)
+  6    0.000    0.000    0.160    0.027 C:\PycharmProjects\quant_data_center\src\storage\parquet_store.py:54(_safe_read_parquet)
+  6    0.000    0.000    0.160    0.027 C:\Users\孙弈 Sun Yi\AppData\Local\Python\pythoncore-3.14-64\Lib\site-packages\pandas\io\parquet.py:508(read_parquet)
+  4    0.000    0.000    0.154    0.038 C:\PycharmProjects\quant_data_center\src\storage\parquet_store.py:216(read_daily_k)
+  6    0.000    0.000    0.150    0.025 C:\Users\孙弈 Sun Yi\AppData\Local\Python\pythoncore-3.14-64\Lib\site-packages\pandas\io\parquet.py:240(read)
+  6    0.000    0.000    0.115    0.019 C:\Users\孙弈 Sun Yi\AppData\Local\Python\pythoncore-3.14-64\Lib\site-packages\pyarrow\parquet\core.py:1846(read_table)
+  27/16    0.000    0.000    0.102    0.006 <frozen importlib._bootstrap>:1360(_find_and_load)
+  15/4    0.000    0.000    0.101    0.025 <frozen importlib._bootstrap>:1308(_find_and_load_unlocked)
+  6    0.009    0.001    0.097    0.016 C:\Users\孙弈 Sun Yi\AppData\Local\Python\pythoncore-3.14-64\Lib\site-packages\pyarrow\parquet\core.py:1351(__init__)
+  14/4    0.000    0.000    0.093    0.023 <frozen importlib._bootstrap>:914(_load_unlocked)
+  5/4    0.000    0.000    0.093    0.023 <frozen importlib._bootstrap_external>:753(exec_module)
+  38/8    0.000    0.000    0.085    0.011 <frozen importlib._bootstrap>:483(_call_with_frames_removed)
+  5/4    0.000    0.000    0.085    0.021 {built-in method builtins.exec}
+  1    0.000    0.000    0.082    0.082 C:\Users\孙弈 Sun Yi\AppData\Local\Python\pythoncore-3.14-64\Lib\site-packages\pyarrow\dataset.py:1(<module>)
+
+------------------------------------------------------------
+Test: full_pipeline_single_code
+Duration: 5.962s
+
+Function Timing Breakdown:
+Function                                 Total(s)     Calls    Avg(ms)      Min(ms)      Max(ms)     
+------------------------------------------------------------------------------------------------
+fetch_daily_k                            4.698        1        4697.92      4697.92      4697.92     
+write_unadjusted                         0.387        1        386.98       386.98       386.98      
+write_qfq                                0.270        1        270.32       270.32       270.32      
+write_hfq                                0.249        1        248.91       248.91       248.91      
+fetch_adjust_factor                      0.197        1        197.12       197.12       197.12      
+calculate_hfq                            0.085        1        84.61        84.61        84.61       
+calculate_qfq                            0.075        1        75.24        75.24        75.24       
+
+Top Functions by Cumulative Time:
+  ncalls  tottime  percall  cumtime  percall filename:lineno(function)
+  1    0.001    0.001    5.961    5.961 C:\PycharmProjects\quant_data_center\tests\performance\test_update_daily_performance.py:367(test_func)
+  2    0.000    0.000    4.895    2.447 C:\Users\孙弈 Sun Yi\AppData\Local\Python\pythoncore-3.14-64\Lib\site-packages\tenacity\__init__.py:323(wrapped_f)
+  2    0.002    0.001    4.895    2.447 C:\Users\孙弈 Sun Yi\AppData\Local\Python\pythoncore-3.14-64\Lib\site-packages\tenacity\__init__.py:460(__call__)
+  2    0.005    0.003    4.829    2.414 C:\Users\孙弈 Sun Yi\AppData\Local\Python\pythoncore-3.14-64\Lib\site-packages\baostock\util\socketutil.py:55(send_msg)
+  93    4.820    0.052    4.820    0.052 {method 'recv' of '_socket.socket' objects}
+  1    0.000    0.000    4.698    4.698 C:\PycharmProjects\quant_data_center\src\pipeline\services.py:100(fetch_daily_k)
+  1    0.000    0.000    4.698    4.698 C:\PycharmProjects\quant_data_center\src\api\baostock_provider.py:52(query_daily_k)
+  1    0.000    0.000    4.695    4.695 C:\PycharmProjects\quant_data_center\src\api\baostock_client.py:70(query_history_k_data_plus)
+  1    0.000    0.000    4.648    4.648 C:\Users\孙弈 Sun Yi\AppData\Local\Python\pythoncore-3.14-64\Lib\site-packages\baostock\security\history.py:20(query_history_k_data_plus)
+  1    0.001    0.001    4.648    4.648 C:\Users\孙弈 Sun Yi\AppData\Local\Python\pythoncore-3.14-64\Lib\site-packages\baostock\security\history.py:27(__query_history_k_data_plus_page)
+  3    0.009    0.003    0.905    0.302 C:\PycharmProjects\quant_data_center\src\storage\parquet_store.py:202(write_daily_k)
+  3    0.003    0.001    0.550    0.183 C:\PycharmProjects\quant_data_center\src\storage\parquet_store.py:108(clean_dataframe_for_schema)
+  54    0.001    0.000    0.415    0.008 C:\PycharmProjects\quant_data_center\src\storage\parquet_store.py:124(_coerce_series)
+  69    0.205    0.003    0.255    0.004 C:\Users\孙弈 Sun Yi\AppData\Local\Python\pythoncore-3.14-64\Lib\site-packages\pandas\core\tools\numeric.py:50(to_numeric)
+
+------------------------------------------------------------
+Test: merge_daily_frames
+Duration: 1.234s
+
+Function Timing Breakdown:
+Function                                 Total(s)     Calls    Avg(ms)      Min(ms)      Max(ms)     
+------------------------------------------------------------------------------------------------
+merge_frames_sz.000002                   0.380        1        380.04       380.04       380.04      
+merge_frames_sh.600036                   0.273        1        272.68       272.68       272.68      
+merge_frames_sz.000001                   0.246        1        246.29       246.29       246.29      
+merge_frames_sh.600000                   0.245        1        245.08       245.08       245.08      
+
+Top Functions by Cumulative Time:
+  ncalls  tottime  percall  cumtime  percall filename:lineno(function)
+  1    0.005    0.005    1.233    1.233 C:\PycharmProjects\quant_data_center\tests\performance\test_update_daily_performance.py:413(test_func)
+  4    0.002    0.001    1.141    0.285 C:\PycharmProjects\quant_data_center\src\pipeline\common.py:336(merge_daily_frames)
+  8    0.010    0.001    0.906    0.113 C:\PycharmProjects\quant_data_center\src\storage\parquet_store.py:108(clean_dataframe_for_schema)
+  144    0.004    0.000    0.478    0.003 C:\PycharmProjects\quant_data_center\src\storage\parquet_store.py:124(_coerce_series)
+  148    0.004    0.000    0.345    0.002 C:\Users\孙弈 Sun Yi\AppData\Local\Python\pythoncore-3.14-64\Lib\site-packages\pandas\core\frame.py:4559(__setitem__)
+  372    0.008    0.000    0.294    0.001 C:\Users\孙弈 Sun Yi\AppData\Local\Python\pythoncore-3.14-64\Lib\site-packages\pandas\core\internals\managers.py:396(apply)
+  224/112    0.007    0.000    0.285    0.003 C:\Users\孙弈 Sun Yi\AppData\Local\Python\pythoncore-3.14-64\Lib\site-packages\pandas\core\generic.py:7387(replace)
+  148    0.002    0.000    0.264    0.002 C:\Users\孙弈 Sun Yi\AppData\Local\Python\pythoncore-3.14-64\Lib\site-packages\pandas\core\frame.py:4862(_set_item)
+  148    0.005    0.000    0.253    0.002 C:\Users\孙弈 Sun Yi\AppData\Local\Python\pythoncore-3.14-64\Lib\site-packages\pandas\core\frame.py:4846(_set_item_mgr)
+  112    0.001    0.000    0.247    0.002 C:\Users\孙弈 Sun Yi\AppData\Local\Python\pythoncore-3.14-64\Lib\site-packages\pandas\core\internals\managers.py:516(replace_list)
+  148    0.004    0.000    0.240    0.002 C:\Users\孙弈 Sun Yi\AppData\Local\Python\pythoncore-3.14-64\Lib\site-packages\pandas\core\internals\managers.py:1523(insert)
+  112    0.012    0.000    0.240    0.002 C:\Users\孙弈 Sun Yi\AppData\Local\Python\pythoncore-3.14-64\Lib\site-packages\pandas\core\internals\blocks.py:789(replace_list)
+  272    0.001    0.000    0.111    0.000 C:\Users\孙弈 Sun Yi\AppData\Local\Python\pythoncore-3.14-64\Lib\site-packages\pandas\_config\config.py:143(get_option)
+  360    0.003    0.000    0.108    0.000 C:\Users\孙弈 Sun Yi\AppData\Local\Python\pythoncore-3.14-64\Lib\site-packages\pandas\core\internals\blocks.py:817(<genexpr>)
+
+------------------------------------------------------------
+Test: adjust_factor_diff
+Duration: 0.382s
+
+Function Timing Breakdown:
+Function                                 Total(s)     Calls    Avg(ms)      Min(ms)      Max(ms)     
+------------------------------------------------------------------------------------------------
+adjust_factor_diff_sh.600036             0.109        1        108.98       108.98       108.98      
+adjust_factor_diff_sh.600000             0.092        1        92.02        92.02        92.02       
+adjust_factor_diff_sz.000001             0.092        1        91.59        91.59        91.59       
+adjust_factor_diff_sz.000002             0.089        1        88.66        88.66        88.66       
+
+Top Functions by Cumulative Time:
+  ncalls  tottime  percall  cumtime  percall filename:lineno(function)
+  1    0.000    0.000    0.381    0.381 C:\PycharmProjects\quant_data_center\tests\performance\test_update_daily_performance.py:429(test_func)
+  4    0.000    0.000    0.379    0.095 C:\PycharmProjects\quant_data_center\src\pipeline\update_daily.py:751(_adjust_factor_frames_differ)
+  8    0.003    0.000    0.335    0.042 C:\PycharmProjects\quant_data_center\src\storage\parquet_store.py:108(clean_dataframe_for_schema)
+  40    0.001    0.000    0.218    0.005 C:\PycharmProjects\quant_data_center\src\storage\parquet_store.py:124(_coerce_series)
+  164    0.003    0.000    0.152    0.001 C:\Users\孙弈 Sun Yi\AppData\Local\Python\pythoncore-3.14-64\Lib\site-packages\pandas\core\internals\managers.py:396(apply)
+  64/32    0.004    0.000    0.142    0.004 C:\Users\孙弈 Sun Yi\AppData\Local\Python\pythoncore-3.14-64\Lib\site-packages\pandas\core\generic.py:7387(replace)
+  32    0.000    0.000    0.132    0.004 C:\Users\孙弈 Sun Yi\AppData\Local\Python\pythoncore-3.14-64\Lib\site-packages\pandas\core\internals\managers.py:516(replace_list)
+  32    0.007    0.000    0.128    0.004 C:\Users\孙弈 Sun Yi\AppData\Local\Python\pythoncore-3.14-64\Lib\site-packages\pandas\core\internals\blocks.py:789(replace_list)
+  40    0.001    0.000    0.087    0.002 C:\Users\孙弈 Sun Yi\AppData\Local\Python\pythoncore-3.14-64\Lib\site-packages\pandas\core\frame.py:4559(__setitem__)
+  40    0.000    0.000    0.072    0.002 C:\Users\孙弈 Sun Yi\AppData\Local\Python\pythoncore-3.14-64\Lib\site-packages\pandas\core\frame.py:4862(_set_item)
+  40    0.001    0.000    0.069    0.002 C:\Users\孙弈 Sun Yi\AppData\Local\Python\pythoncore-3.14-64\Lib\site-packages\pandas\core\frame.py:4846(_set_item_mgr)
+  40    0.001    0.000    0.066    0.002 C:\Users\孙弈 Sun Yi\AppData\Local\Python\pythoncore-3.14-64\Lib\site-packages\pandas\core\internals\managers.py:1523(insert)
+  192    0.001    0.000    0.063    0.000 C:\Users\孙弈 Sun Yi\AppData\Local\Python\pythoncore-3.14-64\Lib\site-packages\pandas\core\internals\blocks.py:817(<genexpr>)
+  160    0.001    0.000    0.061    0.000 C:\Users\孙弈 Sun Yi\AppData\Local\Python\pythoncore-3.14-64\Lib\site-packages\pandas\core\array_algos\replace.py:46(compare_or_regex_search)
+
+------------------------------------------------------------
+Test: metadata_batch
+Duration: 2.413s
+
+Function Timing Breakdown:
+Function                                 Total(s)     Calls    Avg(ms)      Min(ms)      Max(ms)     
+------------------------------------------------------------------------------------------------
+metadata_batch_add                       1.701        500      3.40         0.00         927.80      
+metadata_batch_flush                     0.699        1        699.13       699.13       699.13      
+
+Top Functions by Cumulative Time:
+  ncalls  tottime  percall  cumtime  percall filename:lineno(function)
+  1    0.006    0.006    2.413    2.413 C:\PycharmProjects\quant_data_center\tests\performance\test_update_daily_performance.py:439(test_func)
+  3    0.000    0.000    2.394    0.798 C:\PycharmProjects\quant_data_center\src\pipeline\services.py:42(flush)
+  3    0.019    0.006    2.394    0.798 C:\PycharmProjects\quant_data_center\src\storage\parquet_store.py:336(persist_update_metadata)
+  3    0.003    0.001    1.812    0.604 C:\PycharmProjects\quant_data_center\src\storage\parquet_store.py:298(append_update_runs)
+  500    0.001    0.000    1.697    0.003 C:\PycharmProjects\quant_data_center\src\pipeline\services.py:27(add)
+  12    0.008    0.001    1.427    0.119 C:\PycharmProjects\quant_data_center\src\storage\parquet_store.py:108(clean_dataframe_for_schema)
+  102    0.005    0.000    1.062    0.010 C:\PycharmProjects\quant_data_center\src\storage\parquet_store.py:124(_coerce_series)
+  6    0.002    0.000    0.616    0.103 C:\PycharmProjects\quant_data_center\src\storage\parquet_store.py:146(atomic_write)
+  3    0.001    0.000    0.534    0.178 C:\PycharmProjects\quant_data_center\src\storage\parquet_store.py:308(upsert_update_status)
+  6    0.000    0.000    0.458    0.076 C:\Users\孙弈 Sun Yi\AppData\Local\Python\pythoncore-3.14-64\Lib\site-packages\pyarrow\parquet\core.py:1958(write_table)
+  6    0.442    0.074    0.442    0.074 C:\Users\孙弈 Sun Yi\AppData\Local\Python\pythoncore-3.14-64\Lib\site-packages\pyarrow\parquet\core.py:1155(write_table)
+  378    0.023    0.000    0.383    0.001 C:\Users\孙弈 Sun Yi\AppData\Local\Python\pythoncore-3.14-64\Lib\site-packages\pandas\core\internals\managers.py:396(apply)
+  36    0.001    0.000    0.345    0.010 C:\Users\孙弈 Sun Yi\AppData\Local\Python\pythoncore-3.14-64\Lib\site-packages\pandas\core\tools\datetimes.py:687(to_datetime)
+  96/48    0.005    0.000    0.315    0.007 C:\Users\孙弈 Sun Yi\AppData\Local\Python\pythoncore-3.14-64\Lib\site-packages\pandas\core\generic.py:7387(replace)
+
+================================================================================
+BOTTLENECK ANALYSIS
+================================================================================
+
+Time Distribution by Operation Type:
+  fetch                            30.539s ( 78.6%) - 10 calls
+  write                             2.464s (  6.3%) - 7 calls
+  metadata                          2.400s (  6.2%) - 501 calls
+  calculate                         1.725s (  4.4%) - 10 calls
+  merge                             1.144s (  2.9%) - 4 calls
+  adjust                            0.381s (  1.0%) - 4 calls
+  read                              0.212s (  0.5%) - 8 calls
+
+Time Distribution by Category:
+  API Fetching:      30.539s ( 78.6%)
+  Calculations:       1.725s (  4.4%)
+  I/O Operations:     3.820s (  9.8%)
+
+================================================================================
+OPTIMIZATION RECOMMENDATIONS
+================================================================================
+
+1. API FETCHING OPTIMIZATION
+   - Current: Sequential API calls per stock code
+   - Issue: Network latency accumulates linearly with stock count
+   - Recommendation: Implement concurrent API fetching using ThreadPoolExecutor
+   - Expected improvement: 3-5x speedup for large stock pools
+
+2. PARALLEL PROCESSING
+   - Current: Sequential processing of stock codes
+   - Issue: Single-threaded processing underutilizes multi-core CPUs
+   - Recommendation: Use ProcessPoolExecutor for CPU-bound calculations
+   - Expected improvement: 2-4x speedup on multi-core systems
+
+3. CACHING IMPROVEMENTS
+   - Current: In-memory cache for unadjusted K-line data
+   - Issue: Cache key includes start/end date, reducing hit rate
+   - Recommendation: Cache full history and slice on demand
+   - Expected improvement: Reduced API calls and memory usage
+
+4. I/O OPTIMIZATION
+   - Current: Individual parquet file writes per stock
+   - Issue: Many small file operations
+   - Recommendation: Batch writes or use async I/O
+   - Expected improvement: 20-30% reduction in I/O time
+
+5. DATAFRAME OPERATIONS
+   - Current: Multiple DataFrame copies during adjustment calculation
+   - Issue: Memory allocation overhead
+   - Recommendation: Use in-place operations where possible
+   - Expected improvement: 10-20% faster calculations
+
+6. METADATA BATCHING
+   - Current: Batch size of 200 for metadata writes
+   - Issue: May cause memory buildup for large updates
+   - Recommendation: Implement streaming writes with smaller batches
+   - Expected improvement: Lower memory footprint

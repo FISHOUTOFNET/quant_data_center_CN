@@ -48,6 +48,16 @@ CALENDAR_SCHEMA = pa.schema(
     ]
 )
 
+ADJUST_FACTOR_SCHEMA = pa.schema(
+    [
+        pa.field("code", pa.string()),
+        pa.field("dividOperateDate", pa.date32()),
+        pa.field("foreAdjustFactor", pa.float64()),
+        pa.field("backAdjustFactor", pa.float64()),
+        pa.field("adjustFactor", pa.float64()),
+    ]
+)
+
 UPDATE_RUNS_SCHEMA = pa.schema(
     [
         pa.field("task_id", pa.string()),
@@ -102,6 +112,7 @@ DATASET_SCHEMAS: Mapping[str, pa.Schema] = {
     "daily_k_hfq": DAILY_K_SCHEMA,
     "stock_basic": STOCK_BASIC_SCHEMA,
     "calendar": CALENDAR_SCHEMA,
+    "adjust_factor": ADJUST_FACTOR_SCHEMA,
     **METADATA_SCHEMAS,
 }
 

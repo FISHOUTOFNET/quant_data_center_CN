@@ -51,6 +51,9 @@ class MarketDataProvider(Protocol):
     def query_daily_k(self, request: DailyKRequest) -> pd.DataFrame:
         ...
 
+    def query_adjust_factor(self, code: str, start_date: str, end_date: str) -> pd.DataFrame:
+        ...
+
 
 ProviderFactory = Callable[[ConfigManager], MarketDataProvider]
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 import pytest
 
 from src.storage.dataset_catalog import (
+    ADJUST_FACTOR_DATASET,
     daily_k_dataset_names,
     daily_k_definitions,
     daily_k_definition,
@@ -29,6 +30,7 @@ def test_storage_layout_uses_daily_k_catalog(tmp_path) -> None:
 
     for definition in daily_k_definitions():
         assert (tmp_path / "data" / "parquet" / definition.name).is_dir()
+    assert (tmp_path / "data" / "parquet" / ADJUST_FACTOR_DATASET.name).is_dir()
 
 
 def test_duckdb_views_use_daily_k_catalog(tmp_path) -> None:
@@ -36,3 +38,4 @@ def test_duckdb_views_use_daily_k_catalog(tmp_path) -> None:
 
     for definition in daily_k_definitions():
         assert any((definition.view_name or f"v_{definition.name}") in sql for sql in sqls)
+    assert any((ADJUST_FACTOR_DATASET.view_name or "v_adjust_factor") in sql for sql in sqls)

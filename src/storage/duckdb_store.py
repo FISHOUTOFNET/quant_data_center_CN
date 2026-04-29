@@ -7,7 +7,7 @@ from pathlib import Path
 import duckdb
 import pyarrow as pa
 
-from src.storage.dataset_catalog import CALENDAR_DATASET, STOCK_BASIC_DATASET, daily_k_definitions
+from src.storage.dataset_catalog import ADJUST_FACTOR_DATASET, CALENDAR_DATASET, STOCK_BASIC_DATASET, daily_k_definitions
 from src.utils import paths
 from src.utils.logging import logger
 
@@ -38,6 +38,7 @@ class DuckDBStore:
                 self._daily_view_sql(definition.view_name or f"v_{definition.name}", definition.name)
                 for definition in daily_k_definitions()
             ],
+            self._adjust_factor_view_sql(),
             self._stock_basic_view_sql(),
             self._calendar_view_sql(),
         ]
@@ -52,6 +53,17 @@ class DuckDBStore:
             )
         definition = next(item for item in daily_k_definitions() if item.name == dataset)
         return self._empty_view_sql(view_name, definition.schema)
+
+    def _adjust_factor_view_sql(self) -> str:
+        dataset_dir = self.parquet_dir / ADJUST_FACTOR_DATASET.name
+        view_name = ADJUST_FACTOR_DATASET.view_name or "v_adjust_factor"
+        if self._has_parquet_files(dataset_dir):
+            pattern = self._duckdb_path(dataset_dir / "**" / "*.parquet")
+            return (
+                f"CREATE OR REPLACE VIEW {view_name} AS\n"
+                f"SELECT * FROM read_parquet('{pattern}', hive_partitioning = true, union_by_name = true);"
+            )
+        return self._empty_view_sql(view_name, ADJUST_FACTOR_DATASET.schema)
 
     def _stock_basic_view_sql(self) -> str:
         dataset_dir = self.parquet_dir / STOCK_BASIC_DATASET.name
