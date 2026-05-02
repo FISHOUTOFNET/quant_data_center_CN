@@ -185,6 +185,36 @@ def test_akshare_client_opens_endpoint_circuit(stock_basic_sample) -> None:
     assert calls["count"] == 2
 
 
+def test_akshare_client_handles_none_type_subscript_error(stock_basic_sample) -> None:
+    class FakeAk:
+        __version__ = "fake-1"
+
+        def stock_value_em(self, symbol: str) -> pd.DataFrame:
+            raise TypeError("'NoneType' object is not subscriptable")
+
+    client = AkShareClient(config=FakeConfig(), stock_basic_df=stock_basic_sample(), ak_module=FakeAk())
+
+    df = client.query_stock_value("sh.600000")
+
+    assert df.empty
+    assert list(df.columns) == [
+        "date",
+        "code",
+        "close",
+        "pct_chg",
+        "total_market_cap",
+        "float_market_cap",
+        "total_shares",
+        "float_shares",
+        "pe_ttm",
+        "pe_static",
+        "pb",
+        "peg",
+        "pcf",
+        "ps",
+    ]
+
+
 def _stock_value_raw() -> pd.DataFrame:
     return pd.DataFrame(
         [

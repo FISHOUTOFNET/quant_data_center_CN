@@ -19,6 +19,7 @@ api:
       hfq: "1"
   akshare:
     max_retries: 3
+    workers: 3
     jitter_seconds: [2, 8]
     lookback_quarters: 8
     endpoints:

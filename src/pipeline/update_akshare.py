@@ -6,7 +6,10 @@ import json
 import os
 import traceback
 import uuid
+from collections import deque
 from collections.abc import Callable
+from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -15,8 +18,10 @@ import pandas as pd
 
 from src.api.akshare_client import (
     AkShareClient,
+    AkShareCircuitOpen,
     AkShareEmptyDataError,
     AkShareError,
+    AkShareNetworkError,
     AkShareResponse,
     dataframe_hash,
     report_period_to_akshare_quarter,
@@ -47,6 +52,7 @@ def update_akshare(
     resume: bool = True,
     force: bool = False,
     build_views: bool = True,
+    workers: int | None = None,
     client: Any | None = None,
     client_factory: Callable[[ConfigManager, pd.DataFrame], Any] | None = None,
 ) -> list[dict[str, object]]:
@@ -73,12 +79,27 @@ def update_akshare(
         if client_factory is not None
         else AkShareClient(config=config, stock_basic_df=stock_basic_df)
     )
+    resolved_workers = _resolve_akshare_workers(config, workers)
     metadata_batch = PipelineMetadataBatch(
         store,
         int(config.get("pipeline.metadata_flush_size", 200)),
         count_by="run",
     )
     run_records: list[dict[str, object]] = []
+    concurrent_stock_value_tasks: list[AkShareTask] = []
+
+    def flush_concurrent_stock_value_tasks() -> None:
+        if not concurrent_stock_value_tasks:
+            return
+        _execute_stock_value_tasks_concurrently(
+            store,
+            ak_client,
+            list(concurrent_stock_value_tasks),
+            metadata_batch,
+            run_records,
+            resolved_workers,
+        )
+        concurrent_stock_value_tasks.clear()
 
     for task in tasks:
         if should_skip_checkpoint(
@@ -108,6 +129,11 @@ def update_akshare(
             run_records.append(row)
             continue
 
+        if task.dataset == STOCK_VALUE_EM_DATASET.name and resolved_workers > 1:
+            concurrent_stock_value_tasks.append(task)
+            continue
+
+        flush_concurrent_stock_value_tasks()
         row = _execute_task(store, ak_client, task, run_records)
         metadata_batch.add(
             run_row=row["run_row"],
@@ -115,11 +141,174 @@ def update_akshare(
             checkpoint=row.get("checkpoint_row"),
         )
 
+    flush_concurrent_stock_value_tasks()
     metadata_batch.flush()
     store.close()
     if build_views:
         DuckDBStore(root=config.root).build_views()
     return run_records
+
+
+@dataclass(frozen=True)
+class _TaskFetchResult:
+    task: AkShareTask
+    started_at: datetime
+    ended_at: datetime
+    response: AkShareResponse | None = None
+    error: Exception | None = None
+    error_stack: str = ""
+
+
+class _AdaptiveConcurrencyController:
+    """Conservative fetch concurrency control for crawler-style AkShare endpoints."""
+
+    def __init__(
+        self,
+        max_workers: int,
+        window_size: int = 20,
+        failure_rate_threshold: float = 0.15,
+        recovery_successes: int = 50,
+        consecutive_failure_threshold: int = 3,
+    ) -> None:
+        self.max_workers = max(int(max_workers), 1)
+        self.target_workers = self.max_workers
+        self._window_size = max(int(window_size), 1)
+        self._failure_rate_threshold = float(failure_rate_threshold)
+        self._recovery_successes = max(int(recovery_successes), 1)
+        self._consecutive_failure_threshold = max(int(consecutive_failure_threshold), 1)
+        self._recent_successes: deque[bool] = deque(maxlen=self._window_size)
+        self._consecutive_successes = 0
+        self._consecutive_failures = 0
+
+    def record_fetch_result(self, success: bool) -> None:
+        self._recent_successes.append(success)
+        if success:
+            self._consecutive_successes += 1
+            self._consecutive_failures = 0
+        else:
+            self._consecutive_failures += 1
+            self._consecutive_successes = 0
+
+        if not success and self._consecutive_failures >= self._consecutive_failure_threshold:
+            self._decrease()
+            self._consecutive_failures = 0
+            self._recent_successes.clear()
+            return
+
+        if len(self._recent_successes) == self._window_size:
+            failures = sum(1 for item in self._recent_successes if not item)
+            if failures / self._window_size > self._failure_rate_threshold:
+                self._decrease()
+                self._recent_successes.clear()
+                return
+
+        if success and self._consecutive_successes >= self._recovery_successes:
+            self._increase()
+            self._consecutive_successes = 0
+            self._recent_successes.clear()
+
+    def _decrease(self) -> None:
+        self._consecutive_successes = 0
+        if self.target_workers > 1:
+            self.target_workers -= 1
+            logger.warning("AkShare stock_value_em fetch concurrency reduced to {}", self.target_workers)
+
+    def _increase(self) -> None:
+        if self.target_workers < self.max_workers:
+            self.target_workers += 1
+            logger.info("AkShare stock_value_em fetch concurrency restored to {}", self.target_workers)
+
+
+def _resolve_akshare_workers(config: ConfigManager, workers: int | None) -> int:
+    raw_workers = workers if workers is not None else config.get("api.akshare.workers", 3)
+    try:
+        return max(int(raw_workers), 1)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"Invalid AkShare workers value: {raw_workers!r}") from exc
+
+
+def _execute_stock_value_tasks_concurrently(
+    store: ParquetStore,
+    client: Any,
+    tasks: list[AkShareTask],
+    metadata_batch: PipelineMetadataBatch,
+    run_records: list[dict[str, object]],
+    workers: int,
+) -> None:
+    if not tasks:
+        return
+
+    controller = _AdaptiveConcurrencyController(workers)
+    pending: set[Future[_TaskFetchResult]] = set()
+    future_tasks: dict[Future[_TaskFetchResult], AkShareTask] = {}
+    task_index = 0
+    stop_submitting = False
+
+    def submit_until_target(executor: ThreadPoolExecutor) -> None:
+        nonlocal task_index
+        while (
+            not stop_submitting
+            and task_index < len(tasks)
+            and len(pending) < controller.target_workers
+        ):
+            task = tasks[task_index]
+            task_index += 1
+            future = executor.submit(_fetch_task_result, client, task)
+            pending.add(future)
+            future_tasks[future] = task
+
+    with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="update-akshare-fetch") as executor:
+        submit_until_target(executor)
+        while pending:
+            done, _ = wait(pending, return_when=FIRST_COMPLETED)
+            for future in done:
+                pending.remove(future)
+                task = future_tasks.pop(future)
+                try:
+                    result = future.result()
+                except Exception as exc:
+                    result = _TaskFetchResult(
+                        task=task,
+                        started_at=datetime.now(),
+                        ended_at=datetime.now(),
+                        error=exc,
+                        error_stack=traceback.format_exc(),
+                    )
+                row = _record_fetched_task_result(store, client, result, run_records)
+                metadata_batch.add(
+                    run_row=row["run_row"],
+                    status_row=row.get("status_row"),
+                    checkpoint=row.get("checkpoint_row"),
+                )
+                fetch_success = result.error is None
+                controller.record_fetch_result(fetch_success)
+                if isinstance(result.error, AkShareCircuitOpen):
+                    stop_submitting = True
+                    logger.warning(
+                        "AkShare stock_value_em circuit opened; stopping new submissions after {} attempted tasks",
+                        task_index,
+                    )
+            submit_until_target(executor)
+
+
+def _fetch_task_result(client: Any, task: AkShareTask) -> _TaskFetchResult:
+    started_at = datetime.now()
+    try:
+        response = _fetch_task(client, task)
+        return _TaskFetchResult(
+            task=task,
+            started_at=started_at,
+            ended_at=datetime.now(),
+            response=response,
+        )
+    except Exception as exc:
+        return _TaskFetchResult(
+            task=task,
+            started_at=started_at,
+            ended_at=datetime.now(),
+            error=exc,
+            error_stack=traceback.format_exc(),
+        )
 
 
 def _execute_task(
@@ -128,22 +317,64 @@ def _execute_task(
     task: AkShareTask,
     run_records: list[dict[str, object]],
 ) -> dict[str, dict[str, object] | None]:
-    start_time = datetime.now()
-    response: AkShareResponse | None = None
+    return _record_fetched_task_result(store, client, _fetch_task_result(client, task), run_records)
+
+
+def _record_fetched_task_result(
+    store: ParquetStore,
+    client: Any,
+    result: _TaskFetchResult,
+    run_records: list[dict[str, object]],
+) -> dict[str, dict[str, object] | None]:
+    task = result.task
+    response = result.response
     raw_path: Path | None = None
+    if result.error is not None:
+        error_type = _error_type(result.error)
+        error_message = str(result.error)
+        error_stack = result.error_stack
+        logger.error("AkShare task failed dataset={} key={}: {}", task.dataset, task.key, error_message)
+        _append_failed_manifest(store, client, task, error_type, error_message, result.started_at, result.ended_at)
+        run_row = _run_row(
+            task.dataset,
+            task.key,
+            "failed",
+            task.start_date,
+            task.end_date,
+            result.started_at,
+            result.ended_at,
+            0,
+            error_stack,
+        )
+        status_row = _status_row(task.dataset, task.key, None, 0, "failed", error_stack)
+        checkpoint = checkpoint_row(
+            PIPELINE_UPDATE_AKSHARE,
+            task.dataset,
+            task.key,
+            task.start_date,
+            task.end_date,
+            "failed",
+            0,
+            task.output_path,
+            error_stack,
+        )
+        run_records.append(run_row)
+        return {"run_row": run_row, "status_row": status_row, "checkpoint_row": checkpoint}
+
     try:
-        response = _fetch_task(client, task)
-        raw_path = _write_raw_response(store.root, response, start_time)
+        if response is None:
+            raise AkShareNetworkError(f"{task.dataset} returned no response")
+        raw_path = _write_raw_response(store.root, response, result.started_at)
         output_path, row_count, last_success_date = _write_task_data(store, task, response.data)
         end_time = datetime.now()
-        _append_manifest(store, task, response, raw_path, "success", "", "", start_time, end_time)
+        _append_manifest(store, task, response, raw_path, "success", "", "", result.started_at, end_time)
         run_row = _run_row(
             task.dataset,
             task.key,
             "success",
             task.start_date,
             task.end_date,
-            start_time,
+            result.started_at,
             end_time,
             row_count,
             "",
@@ -169,17 +400,27 @@ def _execute_task(
         logger.exception("AkShare task failed dataset={} key={}", task.dataset, task.key)
         if response is not None:
             if raw_path is None:
-                raw_path = _write_raw_response(store.root, response, start_time)
-            _append_manifest(store, task, response, raw_path, "failed", error_type, error_message, start_time, end_time)
+                raw_path = _write_raw_response(store.root, response, result.started_at)
+            _append_manifest(
+                store,
+                task,
+                response,
+                raw_path,
+                "failed",
+                error_type,
+                error_message,
+                result.started_at,
+                end_time,
+            )
         else:
-            _append_failed_manifest(store, client, task, error_type, error_message, start_time, end_time)
+            _append_failed_manifest(store, client, task, error_type, error_message, result.started_at, end_time)
         run_row = _run_row(
             task.dataset,
             task.key,
             "failed",
             task.start_date,
             task.end_date,
-            start_time,
+            result.started_at,
             end_time,
             0,
             error_stack,

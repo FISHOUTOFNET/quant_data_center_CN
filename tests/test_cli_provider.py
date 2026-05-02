@@ -69,6 +69,8 @@ def test_update_akshare_cli_passes_arguments(monkeypatch) -> None:
             "--include-inactive",
             "--max-tasks",
             "10",
+            "--workers",
+            "3",
             "--no-resume",
             "--force",
             "--no-build-views",
@@ -81,6 +83,7 @@ def test_update_akshare_cli_passes_arguments(monkeypatch) -> None:
     assert captured["code"] == ("sh.600000", "sz.000001")
     assert captured["include_inactive"] is True
     assert captured["max_tasks"] == 10
+    assert captured["workers"] == 3
     assert captured["resume"] is False
     assert captured["force"] is True
     assert captured["build_views"] is False

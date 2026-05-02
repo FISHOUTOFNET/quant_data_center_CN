@@ -1,23 +1,24 @@
 # Quant Data Center
 
-Windows 单机低频量化数据中心，使用 Python 拉取 A 股低频数据，使用 Parquet 做本地存储，使用 DuckDB 做零拷贝查询。当前内置 Baostock 数据源，并通过 provider 接口保留后续接入其他数据源的扩展点。
+Windows 单机低频量化数据中心，使用 Python 拉取 A 股低频数据，使用 Parquet 做本地存储，使用 DuckDB 做零拷贝查询。当前内置 Baostock 数据源（日线行情、复权因子、股票基础信息、交易日历），并通过 provider 接口保留后续接入其他数据源的扩展点；同时集成 AkShare 爬虫数据源（机构持股、估值指标），通过独立的 `update-akshare` 管道拉取。
 
 ## 功能特性
 
 - **多复权模式支持**：同时支持不复权、前复权、后复权三种日线数据；前/后复权由本地复权因子计算生成
 - **统一更新入口**：`qdc update-daily` 支持 `partial`（日常增量）和 `full`（历史全量）两种模式
+- **AkShare 爬虫数据**：`qdc update-akshare` 支持机构持股（按季度）和估值指标（按股票）两种数据集
 - **续传机制**：通过 checkpoint 记录任务状态，支持断点续传；跨 pipeline 识别避免重复执行
 - **数据验证**：写入前自动验证 OHLC 逻辑、volume/amount 非负等约束
 - **原子写入**：使用临时文件确保数据完整性，Windows 文件锁定自动重试
-- **自动重试**：Baostock API 调用失败时自动重试（指数退避）
+- **自动重试**：Baostock API 调用失败时自动重试（指数退避）；AkShare 端点级别熔断保护
 - **数据源抽象**：通过 MarketDataProvider 接口隔离数据源实现，CLI 可用 `--provider` 选择数据源
 - **交易日历**：默认日期按 18:00 cutoff 生成候选日，并通过 calendar 回退到最近交易日
 - **回看自愈**：日常更新发现回看窗口数据冲突或窗口为空时，自动从 `1990-01-01` 重拉该代码历史数据
-- **AkShare 扩展数据集**：`qdc update-akshare` 独立采集机构持股和个股估值历史
-- **源数据格式保真**：存储层不做业务标准化，不修改数据源字段值格式或内容
 - **后台处理池**：使用 `ThreadPoolExecutor` 与 `_DailyUpdateBackgroundWorker` 并行处理清洗、复权计算、写入和元数据落库，默认 4 个后台 worker
 - **内存索引优化**：PipelineCheckpointLookup 内存索引减少批量任务中的重复元数据读取
 - **批量元数据写入**：PipelineMetadataBatch 批量写入 DuckDB 元数据表，减少小事务开销
+- **AkShare 熔断与重试**：端点级别连续失败计数、熔断冷却、请求间随机抖动，防止被源站限流
+- **AkShare 原始数据归档**：每次 AkShare API 调用的原始响应和元数据写入 `data/raw/akshare/` 归档，附带 JSONL manifest
 
 ## 环境要求
 
@@ -33,7 +34,7 @@ python -m pip install -U pip
 python -m pip install -e .
 ```
 
-依赖在 `pyproject.toml` 中声明：`pandas`、`pyarrow`、`duckdb`、`baostock`、`pydantic`、`pyyaml`、`loguru`、`tenacity`、`click`、`pytest`。
+依赖在 `pyproject.toml` 中声明：`pandas`、`pyarrow`、`duckdb`、`akshare`、`baostock`、`pydantic`、`pyyaml`、`loguru`、`tenacity`、`click`、`pytest`。
 
 ## CLI 命令
 
@@ -50,7 +51,7 @@ qdc update-daily --mode full --dataset all --start 1990-01-01 --end 2024-04-26 -
 
 | 参数 | 默认值 | 说明 |
 |------|--------|------|
-| `--dataset` | `all` | 数据集：`daily_k_none`/`daily_k_qfq`/`daily_k_hfq`/`daily_k_all`/`adjust_factor`/`all`/`stock_basic`/`calendar` |
+| `--dataset` | `all` | 数据集：`daily_k_none`/`daily_k_qfq`/`daily_k_hfq`/`daily_k_all`/`daily_k`（别名）/`adjust_factor`/`all`/`stock_basic`/`calendar` |
 | `--start` | `1990-01-01` | full 模式的开始日期，格式 `YYYY-MM-DD`；非交易日时顺延到区间内首个交易日 |
 | `--code` | partial：最新 `stock_basic` 中 active 代码；full：最新 `stock_basic` 中全部代码 | 股票代码，可重复指定多个 |
 | `--universe` | 无 | 已弃用的股票池名称，读取 `config/universe.yaml`，仅用于兼容旧流程 |
@@ -70,23 +71,43 @@ qdc update-daily --mode full --dataset all --start 1990-01-01 --end 2024-04-26 -
 4. 按代码拉取未复权日线和全量复权因子；前/后复权日线由本地因子计算生成
 5. 若回看窗口为空，自动改为从 `1990-01-01` 到目标交易日重拉该代码数据
 6. 若回看窗口与本地同日期数据存在差异，自动改为从 `1990-01-01` 到目标交易日重拉该代码数据，防止更早历史数据也已变化
-7. 若回看窗口无冲突，则按 `code + date` 合并覆盖回看区间内的新数据
-8. full 模式按 `--start`/`--end` 解析交易区间，但 daily_k 文件始终从 `1990-01-01` 拉到目标交易日，保证本地单代码文件为完整历史
+7. full 模式按 `--start`/`--end` 解析交易区间，但 daily_k 文件始终从 `1990-01-01` 拉到目标交易日，保证本地单代码文件为完整历史
 
 ### qdc update-akshare
 
-AkShare 爬虫型数据集更新入口，独立于 `update-daily`。
+AkShare 爬虫数据集更新入口。支持机构持股和估值指标两种数据集。
 
 ```powershell
+qdc update-akshare
 qdc update-akshare --dataset stock_institute_hold --mode full --start-quarter 2005Q1
-qdc update-akshare --dataset stock_value_em --mode partial --code sh.600000
+qdc update-akshare --dataset stock_value_em --code sh.600000 --code sh.600001
+qdc update-akshare --dataset stock_value_em --include-inactive
+qdc update-akshare --max-tasks 50
 ```
 
-**代码格式说明**：
+**参数说明**：
 
-- `--code sh.600000` 仍可作为输入；管道只在请求 AkShare 前转为 `symbol=600000`
-- AkShare 数据入库后保存源侧 6 位代码，例如 `stock_value_em/code=600000/data.parquet`
-- Baostock/daily/adjust_factor/stock_basic 继续保存 Baostock 返回的 `sh.600000` 格式
+| 参数 | 默认值 | 说明 |
+|------|--------|------|
+| `--dataset` | `all` | 数据集：`all`/`stock_institute_hold`/`stock_value_em` |
+| `--mode` | `partial` | `partial` 为日常增量更新；`full` 为历史全量初始化 |
+| `--start-quarter` | full 模式：`config/settings.yaml` 中的 `datasets.stock_institute_hold.start_quarter`（默认 `2005Q1`）；partial 模式：当前可披露季度前推 `api.akshare.lookback_quarters`（默认 8）个季度 | stock_institute_hold 的起始季度，格式 `YYYYQN` |
+| `--end-quarter` | 当前可披露季度（当前季度的上一季度） | stock_institute_hold 的结束季度，格式 `YYYYQN` |
+| `--code` | stock_value_em：最新 `stock_basic` 中 active 代码（`datasets.stock_value_em.active_only` 为 true 时） | 股票代码，可重复指定多个；仅对 stock_value_em 生效 |
+| `--include-inactive` | 否 | 在 partial 模式的 stock_value_em 中包含非活跃/非普通股票 |
+| `--max-tasks` | 无 | 本次运行最多执行的任务数 |
+| `--resume/--no-resume` | `--resume` | 启用续传 |
+| `--force` | 否 | 强制重新拉取 |
+| `--build-views/--no-build-views` | `--build-views` | 完成后构建 DuckDB 视图 |
+
+**行为说明**：
+
+1. AkShare 管道独立于 Baostock 管道，不经过 `MarketDataProvider` 接口
+2. `stock_institute_hold` 按季度拉取，每个季度一个 Parquet 文件
+3. `stock_value_em` 按股票代码拉取，每个代码一个 Parquet 文件
+4. 每次调用自动归档原始响应到 `data/raw/akshare/`，并写入 JSONL manifest
+5. 内置端点级别熔断机制：连续失败超过阈值后暂停请求，冷却期后自动恢复
+6. 请求间自动添加随机抖动延迟，防止被源站限流
 
 ### qdc repair
 
@@ -138,28 +159,33 @@ data/
 │   ├── adjust_factor/          # 复权因子
 │   │   └── code=sh.600000/
 │   │       └── data.parquet
-│   ├── stock_institute_hold/   # AkShare 机构持股一览
-│   │   └── report_period=2024Q1/
-│   │       └── data.parquet
-│   ├── stock_value_em/         # AkShare 个股估值历史，保留 AkShare 6 位代码
-│   │   └── code=600000/
-│   │       └── data.parquet
 │   ├── stock_basic/            # 股票基础信息（单文件存储）
 │   │   └── data.parquet
-│   └── calendar/               # 交易日历
-│       └── data.parquet
+│   ├── calendar/               # 交易日历
+│   │   └── data.parquet
+│   ├── stock_institute_hold/   # 机构持股（按季度分区）
+│   │   └── report_period=2024Q1/
+│   │       └── data.parquet
+│   └── stock_value_em/         # 估值指标（按股票代码分区）
+│       └── code=sh.600000/
+│           └── data.parquet
 ├── duckdb/
 │   └── quant.duckdb            # DuckDB 数据库文件，包含查询视图和运行元数据表
+├── raw/
+│   └── akshare/                # AkShare 原始响应归档
+│       ├── stock_institute_hold/
+│       │   └── YYYYMMDD/
+│       │       └── HHMMSSFFFF_hash_prefix_uuid.parquet
+│       ├── stock_value_em/
+│       │   └── YYYYMMDD/
+│       │       └── HHMMSSFFFF_hash_prefix_uuid.parquet
+│       └── manifest/
+│           └── fetch_runs.jsonl  # AkShare 调用 manifest
 ├── metadata/                   # 旧版 Parquet 元数据兼容目录；存在时会迁移到 DuckDB
-└── raw/                        # 原始数据缓存
-    └── akshare/
-        └── manifest/
-            └── fetch_runs.jsonl
+└── logs/                       # 日志文件（实际位于项目根目录 logs/）
 ```
 
-**注意**：`stock_basic` 采用单文件存储模式，每次更新会覆盖整个文件。历史分区目录（如 `snapshot_date=YYYY-MM-DD/`）会在更新时自动清理。`update_runs`、`update_status`、`pipeline_checkpoints` 当前保存在 `data/duckdb/quant.duckdb` 的 DuckDB 表中；旧版 `data/metadata/*.parquet` 文件仅作为一次性迁移来源。
-
-**存储层格式规则**：存储层只做 schema 类型适配、分区键一致性校验、排序和原子写入；不得给股票代码添加/删除市场前缀，不得补写缺失的 `code/report_period`，也不得修改数据源字段值的格式或内容。数据标准化应在采集前的请求参数转换或后续分析层处理。
+**注意**：日志文件实际存储在项目根目录的 `logs/` 目录下（`logs/qdc.log`），而非 `data/logs/`。`stock_basic` 采用单文件存储模式，每次更新会覆盖整个文件。历史分区目录（如 `snapshot_date=YYYY-MM-DD/`）会在更新时自动清理。`update_runs`、`update_status`、`pipeline_checkpoints` 当前保存在 `data/duckdb/quant.duckdb` 的 DuckDB 表中；旧版 `data/metadata/*.parquet` 文件仅作为一次性迁移来源。
 
 ## 数据 Schema
 
@@ -214,27 +240,27 @@ data/
 | backAdjustFactor | float64 | 后复权因子 |
 | adjustFactor | float64 | BaoStock 原始复权因子 |
 
-### stock_institute_hold（AkShare 机构持股）
+### stock_institute_hold（机构持股）
 
 | 字段 | 类型 | 说明 |
 |------|------|------|
-| report_period | string | 财报季度，如 `2024Q1` |
-| period_end_date | date32 | 季度结束日期 |
-| code | string | AkShare 源侧证券代码，如 `600000` |
-| code_name | string | 股票简称 |
+| report_period | string | 报告期（如 `2024Q1`） |
+| period_end_date | date32 | 报告期截止日期 |
+| code | string | 股票代码 |
+| code_name | string | 股票名称 |
 | institution_count | int64 | 机构数 |
 | institution_count_change | int64 | 机构数变化 |
 | holding_ratio | float64 | 持股比例 |
-| holding_ratio_change | float64 | 持股比例变化 |
+| holding_ratio_change | float64 | 持股比例增幅 |
 | float_holding_ratio | float64 | 占流通股比例 |
-| float_holding_ratio_change | float64 | 占流通股比例变化 |
+| float_holding_ratio_change | float64 | 占流通股比例增幅 |
 
-### stock_value_em（AkShare 个股估值历史）
+### stock_value_em（估值指标）
 
 | 字段 | 类型 | 说明 |
 |------|------|------|
-| date | date32 | 数据日期 |
-| code | string | AkShare 源侧证券代码，如 `600000` |
+| date | date32 | 日期 |
+| code | string | 股票代码 |
 | close | float64 | 当日收盘价 |
 | pct_chg | float64 | 当日涨跌幅 |
 | total_market_cap | float64 | 总市值 |
@@ -244,7 +270,7 @@ data/
 | pe_ttm | float64 | PE(TTM) |
 | pe_static | float64 | PE(静) |
 | pb | float64 | 市净率 |
-| peg | float64 | PEG 值 |
+| peg | float64 | PEG值 |
 | pcf | float64 | 市现率 |
 | ps | float64 | 市销率 |
 
@@ -256,10 +282,10 @@ data/
 | `v_daily_k_qfq` | 前复权日线数据 |
 | `v_daily_k_hfq` | 后复权日线数据 |
 | `v_adjust_factor` | 复权因子 |
-| `v_stock_institute_hold` | AkShare 机构持股一览 |
-| `v_stock_value_em` | AkShare 个股估值历史 |
 | `v_stock_basic` | 股票基础信息 |
 | `v_calendar` | 交易日历 |
+| `v_stock_institute_hold` | 机构持股数据 |
+| `v_stock_value_em` | 估值指标数据 |
 
 ## 查询示例
 
@@ -294,7 +320,6 @@ import duckdb
 
 con = duckdb.connect('data/duckdb/quant.duckdb')
 
-# 查询多只股票的最新数据
 df = con.execute("""
     select code, date, close, volume, pctChg
     from v_daily_k_qfq
@@ -312,13 +337,46 @@ import duckdb
 
 con = duckdb.connect('data/duckdb/quant.duckdb')
 
-# 查询指定时间范围的数据
 df = con.execute("""
     select date, code, close, volume
     from v_daily_k_qfq
     where code = 'sh.600000'
     and date between '2024-01-01' and '2024-04-30'
     order by date
+""").fetchdf()
+print(df)
+```
+
+### 机构持股查询
+
+```python
+import duckdb
+
+con = duckdb.connect('data/duckdb/quant.duckdb')
+
+df = con.execute("""
+    select report_period, code, code_name, institution_count, holding_ratio
+    from v_stock_institute_hold
+    where code = 'sh.600000'
+    order by report_period desc
+    limit 10
+""").fetchdf()
+print(df)
+```
+
+### 估值指标查询
+
+```python
+import duckdb
+
+con = duckdb.connect('data/duckdb/quant.duckdb')
+
+df = con.execute("""
+    select date, code, close, pe_ttm, pb, ps, total_market_cap
+    from v_stock_value_em
+    where code = 'sh.600000'
+    order by date desc
+    limit 10
 """).fetchdf()
 print(df)
 ```
@@ -330,7 +388,6 @@ import duckdb
 
 con = duckdb.connect('data/duckdb/quant.duckdb')
 
-# 查询最新股票基础信息
 df = con.execute("""
     select code, code_name, ipoDate, status
     from v_stock_basic
@@ -348,7 +405,6 @@ import duckdb
 
 con = duckdb.connect('data/duckdb/quant.duckdb')
 
-# 查询最近30个交易日
 df = con.execute("""
     select calendar_date
     from v_calendar
@@ -386,6 +442,19 @@ api:
       none: "3"    # 不复权
       qfq: "2"     # 前复权
       hfq: "1"     # 后复权
+  akshare:
+    max_retries: 3
+    jitter_seconds: [2, 8]
+    lookback_quarters: 8
+    endpoints:
+      stock_institute_hold:
+        source: sina
+        failure_threshold: 5
+        cooldown_minutes: 30
+      stock_value_em:
+        source: eastmoney
+        failure_threshold: 5
+        cooldown_minutes: 30
 
 datasets:
   daily_k:
@@ -401,6 +470,10 @@ datasets:
     fields: "calendar_date,is_trading_day"
   adjust_factor:
     fields: "code,dividOperateDate,foreAdjustFactor,backAdjustFactor,adjustFactor"
+  stock_institute_hold:
+    start_quarter: 2005Q1
+  stock_value_em:
+    active_only: true
 
 pipeline:
   lookback_days: 10      # update-daily 默认回看交易日数量
@@ -408,7 +481,8 @@ pipeline:
   max_retries: 3         # API 调用最大重试次数
   default_code: sh.600000
   metadata_flush_size: 200  # 元数据批量写入阈值
-  background_workers: 4      # 后台处理线程数；background_max_pending 未配置时默认为该值的 4 倍
+  background_workers: 3      # 后台处理线程数；background_max_pending 未配置时默认为该值的 4 倍
+  # background_max_pending: 16  # 后台待处理任务上限（默认 background_workers * 4）
 
 storage:
   duckdb_file: data/duckdb/quant.duckdb
@@ -432,6 +506,19 @@ universe:
 - `api.provider` 是默认数据源名称，当前内置值为 `baostock`
 - `qdc update-daily`、`qdc repair` 都支持用 `--provider` 覆盖默认数据源
 - Provider 通过 `src/api/market_data.py` 中的 `MarketDataProvider` 接口注册和创建，Baostock 适配器位于 `src/api/baostock_provider.py`
+- AkShare 数据源不经过 `MarketDataProvider` 接口，而是通过独立的 `AkShareClient` 和 `update_akshare` 管道处理
+
+### AkShare 配置说明
+
+| 配置项 | 默认值 | 说明 |
+|--------|--------|------|
+| `api.akshare.max_retries` | 3 | AkShare API 最大重试次数 |
+| `api.akshare.jitter_seconds` | [2, 8] | 请求间随机抖动延迟范围（秒） |
+| `api.akshare.lookback_quarters` | 8 | partial 模式下 stock_institute_hold 回看季度数 |
+| `api.akshare.endpoints.<name>.failure_threshold` | 5 | 端点连续失败熔断阈值 |
+| `api.akshare.endpoints.<name>.cooldown_minutes` | 30 | 端点熔断冷却时间（分钟） |
+| `datasets.stock_institute_hold.start_quarter` | 2005Q1 | full 模式下 stock_institute_hold 起始季度 |
+| `datasets.stock_value_em.active_only` | true | partial 模式下仅拉取活跃股票的估值数据 |
 
 ## 定时任务
 
@@ -449,16 +536,32 @@ scripts\run_update_daily.bat
 - 重复间隔：每天
 - 持续时间：无限期
 
+**AkShare 定时更新**：
+
+可创建类似的定时任务执行 AkShare 数据更新：
+
+```powershell
+python -m src.cli update-akshare
+```
+
+建议在交易日 18:30 后执行，与 Baostock 更新错开。
+
 ## 代码池与续传机制
 
 ### 代码池来源
 
+**update-daily**：
+
 - `qdc update-daily --mode full` 默认使用最新本地 `stock_basic` 快照中的全部非空 `code`
 - `qdc update-daily` 默认使用最新 `stock_basic` 快照中 `type=1` 且 `status=1` 的上市股票代码
-- `qdc update-akshare --dataset stock_value_em` 默认只使用 `type=1` 普通股票；`partial` 默认再限制 `status=1`，`--include-inactive` 和 `full` 会包含 `status=0` 的普通股票
-- `stock_value_em` 默认任务池不会包含 `type=2` 指数等非普通股票
 - 显式传入 `--code` 时优先使用指定代码
 - `--universe` 仅保留向后兼容，默认不再读取 `config/universe.yaml`
+
+**update-akshare**：
+
+- `stock_institute_hold`：按季度范围生成任务，不涉及代码池
+- `stock_value_em`：默认使用最新 `stock_basic` 中 active 代码（`datasets.stock_value_em.active_only` 为 true 时）；`--include-inactive` 或 `--mode full` 时使用全部代码
+- 显式传入 `--code` 时优先使用指定代码
 
 ### 续传机制
 
@@ -468,7 +571,8 @@ scripts\run_update_daily.bat
 - 旧版 `data/metadata/pipeline_checkpoints.parquet` 若存在，会在元数据层初始化时迁移到 DuckDB
 - 续传检查会优先加载 `PipelineCheckpointLookup` 内存索引，减少批量任务中的重复元数据读取
 - `pipeline.metadata_flush_size` 控制运行记录、状态和 checkpoint 的批量写入阈值
-- `pipeline.background_workers` 默认 4；`pipeline.background_max_pending` 未配置时默认为 `background_workers * 4`
+- `pipeline.background_workers` 默认 3；`pipeline.background_max_pending` 未配置时默认为 `background_workers * 4`
+- AkShare 管道使用独立的 `update_akshare` pipeline 名称，与 `update_daily` 的 checkpoint 互不干扰
 
 ## 数据验证
 
@@ -481,6 +585,19 @@ scripts\run_update_daily.bat
 - `date` 单调递增
 - OHLC 逻辑检查（`high >= low`，`open/close` 在 `[low, high]` 范围内，异常时记录警告但不阻止写入）
 - `volume`、`amount` 非负检查（发现空值、非数值或负值时记录警告但不阻止写入）
+
+### stock_institute_hold 数据验证
+
+- Schema 列类型匹配
+- `report_period` + `code` 唯一性
+- `report_period`、`period_end_date`、`code` 不允许空值
+
+### stock_value_em 数据验证
+
+- Schema 列类型匹配
+- `code` + `date` 唯一性
+- `date` 单调递增
+- `total_market_cap`、`float_market_cap`、`total_shares`、`float_shares` 非负检查
 
 ### validate_non_negative 函数说明
 
@@ -519,6 +636,12 @@ validate_non_negative(df, 'amount')
 - 该函数仅记录警告，不会抛出异常或阻止数据写入
 - 警告日志包含问题数据的样本（最多5条），便于定位问题
 - 建议在数据写入后检查日志，确认数据质量
+
+### adjust_factor 数据验证
+
+- Schema 列类型匹配
+- `code` + `dividOperateDate` 唯一性
+- `dividOperateDate` 单调递增
 
 ### stock_basic 数据验证
 
@@ -568,6 +691,8 @@ pytest
 - Schema 定义（`test_schema.py`）
 - 数据验证器（`test_validators.py`）
 - Baostock 客户端（`test_baostock_client.py`）
+- AkShare 客户端（`test_akshare_client.py`）
+- AkShare 契约测试（`test_akshare_contract.py`）
 - 数据源 provider 抽象（`test_market_data_provider.py`）
 - CLI provider 参数传递（`test_cli_provider.py`）
 - Pipeline 续传机制（`test_update_daily_full_resume.py`、`test_update_daily_partial_resume.py`、`test_update_daily_refetch.py`）
@@ -575,7 +700,31 @@ pytest
 - 交易日历处理（`test_trading_dates.py`）
 - 数据修复工具（`test_repair_tool.py`）
 - 本地复权计算（`test_adjustments.py`）
-- AkShare client 和管道（`test_akshare_client.py`、`test_update_akshare.py`）
+- AkShare 管道（`test_update_akshare.py`）
+
+## 性能基准测试
+
+项目包含完整的性能基准测试套件，位于 `benchmarks/` 目录。
+
+### 运行基准测试
+
+```powershell
+# 运行所有基准测试
+python benchmarks/run_all_benchmarks.py --output-dir benchmark_results
+
+# 跳过长时间测试
+python benchmarks/run_all_benchmarks.py --skip-long-tests
+```
+
+### 基准测试内容
+
+- **API 调用性能**: Baostock API 延迟和吞吐量
+- **I/O 操作性能**: Parquet 文件读写性能
+- **数据处理性能**: 数据清洗、复权计算性能
+- **并发性能**: 线程池性能和锁竞争
+- **端到端性能**: 完整管道性能
+
+详细说明见 [benchmarks/BENCHMARK_README.md](benchmarks/BENCHMARK_README.md)，最新测试报告见 [benchmark_results/performance_test_report.md](benchmark_results/performance_test_report.md)。
 
 ## 常见问题
 
@@ -612,6 +761,7 @@ pytest
 
 ```powershell
 qdc update-daily --code sh.600000 --code sh.600001
+qdc update-akshare --dataset stock_value_em --code sh.600000
 ```
 
 ### 5. 如何查看数据更新状态？
@@ -664,6 +814,21 @@ Copy-Item -Path data -Destination data_backup -Recurse
 Copy-Item -Path data_backup -Destination data -Recurse -Force
 ```
 
+### 9. AkShare 熔断后如何处理？
+
+系统会自动处理 AkShare 端点熔断：
+- 连续失败超过阈值（默认 5 次）后，端点进入熔断状态
+- 熔断期间该端点的请求会被直接拒绝
+- 冷却时间（默认 30 分钟）后自动恢复
+- 可通过 `config/settings.yaml` 调整 `failure_threshold` 和 `cooldown_minutes`
+- 使用 `--force` 参数可绕过 checkpoint 但不会绕过熔断
+
+### 10. AkShare 数据为空怎么办？
+
+- `stock_institute_hold`：某些季度可能确实没有数据（如新上市股票），系统会抛出 `AkShareEmptyDataError` 并记录失败
+- `stock_value_em`：非活跃股票可能返回空数据，系统仅对活跃股票（`task.active=True`）抛出异常
+- 使用 `--force` 重新拉取可验证数据是否恢复
+
 ## 性能优化建议
 
 ### 1. 存储优化
@@ -687,7 +852,14 @@ Copy-Item -Path data_backup -Destination data -Recurse -Force
 - 内存索引优化减少元数据读取次数
 - 批量元数据写入减少 DuckDB 元数据事务
 
-### 4. 内存优化
+### 4. AkShare 优化
+
+- 使用 `--max-tasks` 限制单次运行任务数，避免长时间运行
+- 使用 `--resume` 避免重复拉取已成功的季度/股票
+- 调整 `jitter_seconds` 控制请求频率
+- 调整 `failure_threshold` 和 `cooldown_minutes` 适应网络环境
+
+### 5. 内存优化
 
 - DuckDB 会自动管理内存
 - 大查询时考虑分批处理
@@ -696,10 +868,12 @@ Copy-Item -Path data_backup -Destination data -Recurse -Force
 ## 当前限制
 
 - 当前唯一内置数据源为 `baostock`，接口需要联网，可用性受交易所日历和服务状态影响
+- AkShare 数据源通过独立管道接入，不经过 `MarketDataProvider` 接口
 - Provider 抽象已经就位，但其他数据源适配器尚未实现
-- 当前版本聚焦低频日线、股票基础信息和交易日历
+- 当前版本聚焦低频日线、股票基础信息、交易日历、机构持股和估值指标
 - `update-daily` 默认将非交易日候选日回退到最近交易日，避免周末/节假日产生自然日 checkpoint
-- 暂未实现 raw API 缓存
+- 暂未实现 raw API 缓存（Baostock 管道）；AkShare 管道已实现原始响应归档
+- AkShare 数据源依赖外部网站，可用性和数据格式可能随网站变更而变化
 
 ## 项目结构
 
@@ -711,10 +885,13 @@ quant_data_center/
 ├── data/                  # 数据目录
 │   ├── parquet/          # Parquet 数据文件
 │   ├── duckdb/           # DuckDB 数据库、查询视图和运行元数据表
+│   ├── raw/              # 原始数据缓存
+│   │   └── akshare/     # AkShare 原始响应归档和 manifest
 │   ├── metadata/         # 旧版 Parquet 元数据迁移兼容目录
-│   └── raw/              # 原始数据缓存（预留）
-├── logs/                  # 日志文件
+│   └── logs/             # 日志文件
 ├── benchmark_results/     # 性能基准报告输出
+├── benchmarks/            # 性能基准测试套件
+├── references/            # BaoStock 等数据源参考文档
 ├── scripts/
 │   └── run_update_daily.bat  # 定时任务脚本
 ├── src/
@@ -722,13 +899,16 @@ quant_data_center/
 │   │   ├── __init__.py
 │   │   ├── market_data.py      # provider 接口与注册表
 │   │   ├── baostock_provider.py # Baostock provider 适配器
-│   │   └── baostock_client.py  # Baostock API 封装
+│   │   ├── baostock_client.py  # Baostock API 封装
+│   │   └── akshare_client.py   # AkShare API 封装（熔断、重试、字段映射）
 │   ├── pipeline/
 │   │   ├── __init__.py
 │   │   ├── adjustments.py      # 本地复权计算
+│   │   ├── akshare_tasks.py    # AkShare 任务规划
 │   │   ├── common.py          # 共享工具函数
 │   │   ├── repair_tool.py     # 数据修复管道
 │   │   ├── services.py        # provider 拉取与元数据批处理服务
+│   │   ├── update_akshare.py  # AkShare 爬虫数据更新管道
 │   │   ├── update_daily.py    # 日常更新与历史初始化管道入口
 │   │   ├── update_daily_calendar.py  # 更新日历窗口与写入
 │   │   ├── update_daily_frames.py    # 日线 DataFrame 处理辅助
@@ -744,13 +924,15 @@ quant_data_center/
 │   │   ├── __init__.py
 │   │   ├── dataset_catalog.py # 数据集目录
 │   │   ├── duckdb_store.py    # DuckDB 存储层
+│   │   ├── metadata_store.py  # DuckDB 元数据存储层
 │   │   ├── parquet_store.py   # Parquet 存储层
 │   │   └── schema.py          # PyArrow Schema 定义
 │   ├── utils/
 │   │   ├── __init__.py
 │   │   ├── config_mgr.py      # 配置管理
 │   │   ├── logging.py         # 日志配置
-│   │   └── paths.py           # 路径管理
+│   │   ├── paths.py           # 路径管理
+│   │   └── performance.py     # 性能监控工具
 │   ├── __init__.py
 │   └── cli.py                 # CLI 入口
 ├── tests/                  # 测试文件
@@ -775,6 +957,11 @@ quant_data_center/
 - 实现批量元数据写入（PipelineMetadataBatch + DuckDBMetadataStore）
 - 实现 Windows 文件锁定自动重试机制
 - 实现后台处理池（_DailyUpdateBackgroundWorker + ThreadPoolExecutor）
+- 集成 AkShare 数据源，支持机构持股（stock_institute_hold）和估值指标（stock_value_em）
+- 实现 AkShare 端点级别熔断与重试机制
+- 实现 AkShare 原始响应归档和 JSONL manifest
+- 新增 `qdc update-akshare` CLI 命令
+- 新增 stock_institute_hold 和 stock_value_em 数据集的 Schema、Validator 和 DuckDB 视图
 
 ## 许可证
 

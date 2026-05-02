@@ -83,6 +83,7 @@ def update_daily(
 @click.option("--code", multiple=True, help="Stock code for stock_value_em. Can be repeated.")
 @click.option("--include-inactive", is_flag=True, help="Include inactive common stocks in stock_value_em partial mode.")
 @click.option("--max-tasks", type=int, default=None, help="Maximum AkShare tasks to execute in this run.")
+@click.option("--workers", type=int, default=None, help="Concurrent fetch workers for stock_value_em. Defaults to api.akshare.workers.")
 @click.option("--resume/--no-resume", default=True, show_default=True, help="Resume from successful checkpoints.")
 @click.option("--force", is_flag=True, help="Ignore checkpoints and re-fetch all selected tasks.")
 @click.option("--build-views/--no-build-views", default=True, show_default=True)
@@ -94,6 +95,7 @@ def update_akshare(
     code: tuple[str, ...],
     include_inactive: bool,
     max_tasks: int | None,
+    workers: int | None,
     resume: bool,
     force: bool,
     build_views: bool,
@@ -108,6 +110,7 @@ def update_akshare(
         code=code,
         include_inactive=include_inactive,
         max_tasks=max_tasks,
+        workers=workers,
         resume=resume,
         force=force,
         build_views=build_views,

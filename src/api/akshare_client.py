@@ -8,6 +8,7 @@ import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
+from threading import RLock
 from typing import Any
 
 import pandas as pd
@@ -204,6 +205,8 @@ class AkShareClient:
         self._now = now or datetime.now
         self._code_maps = build_code_maps(stock_basic_df)
         self._states: dict[str, _EndpointState] = {}
+        self._state_lock = RLock()
+        self._ak_lock = RLock()
 
     @property
     def code_maps(self) -> CodeMaps:
@@ -265,6 +268,30 @@ class AkShareClient:
             except (AkShareSchemaDriftError, AkShareEmptyDataError):
                 self._record_failure(endpoint, runtime)
                 raise
+            except TypeError as exc:
+                if "'NoneType' object is not subscriptable" in str(exc):
+                    raw_df = pd.DataFrame()
+                    normalized = normalizer(raw_df)
+                    self._record_success(endpoint)
+                    return AkShareResponse(
+                        endpoint=endpoint,
+                        params=params,
+                        akshare_version=self._akshare_version(),
+                        raw_df=raw_df,
+                        data=normalized,
+                        data_hash=dataframe_hash(raw_df),
+                    )
+                last_error = AkShareNetworkError(f"{endpoint} failed on attempt {attempt}/{attempts}: {exc}")
+                if attempt < attempts:
+                    logger.warning(
+                        "AkShare endpoint={} attempt={}/{} failed: {}",
+                        endpoint,
+                        attempt,
+                        attempts,
+                        exc,
+                    )
+                    continue
+                self._record_failure(endpoint, runtime)
             except Exception as exc:
                 last_error = AkShareNetworkError(f"{endpoint} failed on attempt {attempt}/{attempts}: {exc}")
                 if attempt < attempts:
@@ -314,31 +341,34 @@ class AkShareClient:
         )
 
     def _raise_if_circuit_open(self, endpoint: str) -> None:
-        state = self._states.setdefault(endpoint, _EndpointState())
-        if state.circuit_open_until is None:
-            return
-        now = self._now()
-        if now < state.circuit_open_until:
-            raise AkShareCircuitOpen(
-                f"AkShare endpoint {endpoint} circuit is open until {state.circuit_open_until.isoformat()}"
-            )
-        state.circuit_open_until = None
-        state.consecutive_failures = 0
+        with self._state_lock:
+            state = self._states.setdefault(endpoint, _EndpointState())
+            if state.circuit_open_until is None:
+                return
+            now = self._now()
+            if now < state.circuit_open_until:
+                raise AkShareCircuitOpen(
+                    f"AkShare endpoint {endpoint} circuit is open until {state.circuit_open_until.isoformat()}"
+                )
+            state.circuit_open_until = None
+            state.consecutive_failures = 0
 
     def _record_success(self, endpoint: str) -> None:
-        self._states[endpoint] = _EndpointState()
+        with self._state_lock:
+            self._states[endpoint] = _EndpointState()
 
     def _record_failure(self, endpoint: str, runtime: _EndpointRuntimeConfig) -> None:
-        state = self._states.setdefault(endpoint, _EndpointState())
-        state.consecutive_failures += 1
-        if state.consecutive_failures >= runtime.failure_threshold:
-            state.circuit_open_until = self._now() + runtime.cooldown
-            logger.warning(
-                "AkShare endpoint={} circuit opened after {} consecutive failures until {}",
-                endpoint,
-                state.consecutive_failures,
-                state.circuit_open_until,
-            )
+        with self._state_lock:
+            state = self._states.setdefault(endpoint, _EndpointState())
+            state.consecutive_failures += 1
+            if state.consecutive_failures >= runtime.failure_threshold:
+                state.circuit_open_until = self._now() + runtime.cooldown
+                logger.warning(
+                    "AkShare endpoint={} circuit opened after {} consecutive failures until {}",
+                    endpoint,
+                    state.consecutive_failures,
+                    state.circuit_open_until,
+                )
 
     def _sleep_jitter(self, runtime: _EndpointRuntimeConfig) -> None:
         low, high = runtime.jitter_seconds
@@ -350,11 +380,13 @@ class AkShareClient:
 
     def _ak(self) -> Any:
         if self._ak_module is None:
-            try:
-                import akshare as ak  # type: ignore
-            except ModuleNotFoundError as exc:
-                raise AkShareNetworkError("akshare is not installed") from exc
-            self._ak_module = ak
+            with self._ak_lock:
+                if self._ak_module is None:
+                    try:
+                        import akshare as ak  # type: ignore
+                    except ModuleNotFoundError as exc:
+                        raise AkShareNetworkError("akshare is not installed") from exc
+                    self._ak_module = ak
         return self._ak_module
 
     def _akshare_version(self) -> str:
@@ -388,6 +420,8 @@ def _parse_jitter(raw_jitter: object) -> tuple[float, float]:
 
 
 def _as_dataframe(value: object) -> pd.DataFrame:
+    if value is None:
+        return pd.DataFrame()
     if isinstance(value, pd.DataFrame):
         return value.copy()
     return pd.DataFrame(value)
