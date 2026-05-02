@@ -1,0 +1,35 @@
+{
+  "first_full_update": {
+    "elapsed": 79.4550739999977,
+    "records_count": 10,
+    "codes_processed": 10,
+    "memory_diff_mb": 0.15861797332763672
+  },
+  "incremental_update": {
+    "elapsed": 12.271285099966917,
+    "records_count": 10,
+    "codes_processed": 10
+  },
+  "resume_mode": {
+    "elapsed": 0.7723116999841295,
+    "records_count": 0,
+    "codes_processed": 10,
+    "codes_skipped": 5
+  },
+  "profiled_update": {
+    "elapsed": 8.695469800033607,
+    "records_count": 5
+  },
+  "all_datasets_update": {
+    "elapsed": 26.188018699991517,
+    "records_count": 22,
+    "codes_processed": 5
+  },
+  "large_scale_update": {
+    "elapsed": 297.7752796999994,
+    "records_count": 50,
+    "codes_processed": 50,
+    "memory_diff_mb": -0.060357093811035156,
+    "throughput": 0.16791185638503525
+  }
+}

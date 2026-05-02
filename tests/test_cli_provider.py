@@ -43,3 +43,44 @@ def test_update_daily_cli_keeps_provider_optional(monkeypatch) -> None:
     assert captured["provider"] is None
     assert captured["mode"] == "partial"
     assert captured["dataset"] == "all"
+
+
+def test_update_akshare_cli_passes_arguments(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_update_akshare(**kwargs):
+        captured.update(kwargs)
+        return [{"dataset": "stock_value_em", "code": "sh.600000", "status": "success", "row_count": 2}]
+
+    monkeypatch.setattr(cli_module, "run_update_akshare", fake_update_akshare)
+
+    result = CliRunner().invoke(
+        cli_module.cli,
+        [
+            "update-akshare",
+            "--dataset",
+            "stock_value_em",
+            "--mode",
+            "full",
+            "--code",
+            "sh.600000",
+            "--code",
+            "sz.000001",
+            "--include-inactive",
+            "--max-tasks",
+            "10",
+            "--no-resume",
+            "--force",
+            "--no-build-views",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert captured["dataset"] == "stock_value_em"
+    assert captured["mode"] == "full"
+    assert captured["code"] == ("sh.600000", "sz.000001")
+    assert captured["include_inactive"] is True
+    assert captured["max_tasks"] == 10
+    assert captured["resume"] is False
+    assert captured["force"] is True
+    assert captured["build_views"] is False

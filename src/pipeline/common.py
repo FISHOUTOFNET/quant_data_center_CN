@@ -11,6 +11,8 @@ import pandas as pd
 from src.storage.parquet_store import ParquetStore
 from src.storage.schema import DAILY_K_SCHEMA
 from src.storage.dataset_catalog import (
+    STOCK_INSTITUTE_HOLD_DATASET,
+    STOCK_VALUE_EM_DATASET,
     daily_k_dataset_names,
     expand_daily_k_selection,
     is_daily_k_dataset,
@@ -245,6 +247,10 @@ def checkpoint_output_path(store: ParquetStore, dataset: str, code: str, end_dat
         return store.stock_basic_path()
     if dataset == "calendar":
         return store.calendar_path()
+    if dataset == STOCK_INSTITUTE_HOLD_DATASET.name:
+        return store.stock_institute_hold_path(code)
+    if dataset == STOCK_VALUE_EM_DATASET.name:
+        return store.stock_value_em_path(code)
     raise ValueError(f"Unsupported checkpoint dataset: {dataset}")
 
 
@@ -382,7 +388,15 @@ def daily_frames_differ_on_overlap(
     compare_columns = [name for name in DAILY_K_SCHEMA.names if name not in {"code", "date"}]
     existing_compare = existing_window.loc[common_index, compare_columns].sort_index()
     fresh_compare = fresh_window.loc[common_index, compare_columns].sort_index()
-    return not existing_compare.equals(fresh_compare)
+    return not _daily_values_equal(existing_compare, fresh_compare)
+
+
+def _daily_values_equal(left: pd.DataFrame, right: pd.DataFrame) -> bool:
+    try:
+        pd.testing.assert_frame_equal(left, right, check_dtype=False, check_exact=True)
+    except AssertionError:
+        return False
+    return True
 
 
 def _daily_window_by_key(

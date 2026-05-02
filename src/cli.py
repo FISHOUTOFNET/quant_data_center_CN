@@ -8,6 +8,7 @@ from pathlib import Path
 import click
 
 from src.pipeline.repair_tool import repair as run_repair
+from src.pipeline.update_akshare import update_akshare as run_update_akshare
 from src.pipeline.update_daily import update_daily as run_update_daily
 from src.storage.duckdb_store import DuckDBStore
 from src.utils import paths
@@ -69,6 +70,47 @@ def update_daily(
         build_views=build_views,
         resume=resume,
         force=force,
+    )
+    for item in records:
+        click.echo(f"{item['dataset']} {item['code']} status={item['status']} rows={item['row_count']}")
+
+
+@cli.command("update-akshare")
+@click.option("--dataset", default="all", show_default=True, help="all/stock_institute_hold/stock_value_em.")
+@click.option("--mode", type=click.Choice(["partial", "full"]), default="partial", show_default=True, help="Update mode.")
+@click.option("--start-quarter", default=None, help="Full-mode start quarter for stock_institute_hold, e.g. 2005Q1.")
+@click.option("--end-quarter", default=None, help="End quarter for stock_institute_hold, e.g. 2024Q4.")
+@click.option("--code", multiple=True, help="Stock code for stock_value_em. Can be repeated.")
+@click.option("--include-inactive", is_flag=True, help="Include inactive common stocks in stock_value_em partial mode.")
+@click.option("--max-tasks", type=int, default=None, help="Maximum AkShare tasks to execute in this run.")
+@click.option("--resume/--no-resume", default=True, show_default=True, help="Resume from successful checkpoints.")
+@click.option("--force", is_flag=True, help="Ignore checkpoints and re-fetch all selected tasks.")
+@click.option("--build-views/--no-build-views", default=True, show_default=True)
+def update_akshare(
+    dataset: str,
+    mode: str,
+    start_quarter: str | None,
+    end_quarter: str | None,
+    code: tuple[str, ...],
+    include_inactive: bool,
+    max_tasks: int | None,
+    resume: bool,
+    force: bool,
+    build_views: bool,
+) -> None:
+    """Run AkShare crawler dataset updates."""
+
+    records = run_update_akshare(
+        dataset=dataset,
+        mode=mode,
+        start_quarter=start_quarter,
+        end_quarter=end_quarter,
+        code=code,
+        include_inactive=include_inactive,
+        max_tasks=max_tasks,
+        resume=resume,
+        force=force,
+        build_views=build_views,
     )
     for item in records:
         click.echo(f"{item['dataset']} {item['code']} status={item['status']} rows={item['row_count']}")

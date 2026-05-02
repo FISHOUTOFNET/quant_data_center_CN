@@ -17,6 +17,19 @@ api:
       none: "3"
       qfq: "2"
       hfq: "1"
+  akshare:
+    max_retries: 3
+    jitter_seconds: [2, 8]
+    lookback_quarters: 8
+    endpoints:
+      stock_institute_hold:
+        source: sina
+        failure_threshold: 5
+        cooldown_minutes: 30
+      stock_value_em:
+        source: eastmoney
+        failure_threshold: 5
+        cooldown_minutes: 30
 
 datasets:
   daily_k:
@@ -32,13 +45,18 @@ datasets:
     fields: "calendar_date,is_trading_day"
   adjust_factor:
     fields: "code,dividOperateDate,foreAdjustFactor,backAdjustFactor,adjustFactor"
+  stock_institute_hold:
+    start_quarter: 2005Q1
+  stock_value_em:
+    active_only: true
 
 pipeline:
-  lookback_days: 30
+  lookback_days: 10
   raw_cache_days: 7
   max_retries: 3
   default_code: sh.600000
   metadata_flush_size: 200
+  background_workers: 4
 
 storage:
   duckdb_file: data/duckdb/quant.duckdb

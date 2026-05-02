@@ -1,0 +1,382 @@
+"""DuckDB-backed update metadata storage."""
+
+from __future__ import annotations
+
+from contextlib import contextmanager, suppress
+from datetime import datetime
+from pathlib import Path
+from threading import RLock
+from typing import Iterator
+
+import duckdb
+import pandas as pd
+import pyarrow as pa
+
+from src.storage.schema import (
+    PIPELINE_CHECKPOINTS_SCHEMA,
+    UPDATE_RUNS_SCHEMA,
+    UPDATE_STATUS_SCHEMA,
+    field_names,
+)
+from src.utils import paths
+
+
+CHECKPOINT_KEY_COLUMNS = ["pipeline", "dataset", "code", "start_date", "end_date"]
+_MIGRATION_NAME = "parquet_metadata_v1"
+_DB_LOCKS: dict[Path, RLock] = {}
+_DB_LOCKS_GUARD = RLock()
+
+
+def _lock_for(path: Path) -> RLock:
+    resolved = path.resolve()
+    with _DB_LOCKS_GUARD:
+        lock = _DB_LOCKS.get(resolved)
+        if lock is None:
+            lock = RLock()
+            _DB_LOCKS[resolved] = lock
+        return lock
+
+
+class DuckDBMetadataStore:
+    """Persist update metadata in DuckDB while preserving ParquetStore APIs."""
+
+    def __init__(
+        self,
+        root: Path | None = None,
+        duckdb_file: Path | None = None,
+        parquet_metadata_dir: Path | None = None,
+    ) -> None:
+        self.root = (root or paths.ROOT).resolve()
+        self.duckdb_file = (duckdb_file or self.root / "data" / "duckdb" / "quant.duckdb").resolve()
+        self.parquet_metadata_dir = (parquet_metadata_dir or self.root / "data" / "metadata").resolve()
+        self._lock = _lock_for(self.duckdb_file)
+        self._initialized = False
+        self._conn: duckdb.DuckDBPyConnection | None = None
+
+    def append_update_runs(self, df: pd.DataFrame) -> None:
+        cleaned = _clean_dataframe_for_schema(df, UPDATE_RUNS_SCHEMA)
+        if cleaned.empty:
+            return
+        with self._connection() as conn:
+            self._register_and_execute(
+                conn,
+                cleaned,
+                "INSERT INTO update_runs SELECT * FROM incoming",
+            )
+
+    def upsert_update_status(self, df: pd.DataFrame) -> None:
+        incoming = _clean_dataframe_for_schema(df, UPDATE_STATUS_SCHEMA)
+        if incoming.empty:
+            return
+        with self._connection() as conn:
+            self._register_and_execute(
+                conn,
+                incoming,
+                """
+                DELETE FROM update_status
+                WHERE EXISTS (
+                    SELECT 1
+                    FROM incoming
+                    WHERE incoming.dataset = update_status.dataset
+                      AND incoming.code = update_status.code
+                )
+                """,
+                "INSERT INTO update_status SELECT * FROM incoming",
+            )
+
+    def upsert_pipeline_checkpoints(self, df: pd.DataFrame) -> None:
+        incoming = _clean_dataframe_for_schema(df, PIPELINE_CHECKPOINTS_SCHEMA)
+        if incoming.empty:
+            return
+        with self._connection() as conn:
+            self._register_and_execute(
+                conn,
+                incoming,
+                """
+                DELETE FROM pipeline_checkpoints
+                WHERE EXISTS (
+                    SELECT 1
+                    FROM incoming
+                    WHERE incoming.pipeline = pipeline_checkpoints.pipeline
+                      AND incoming.dataset = pipeline_checkpoints.dataset
+                      AND incoming.code = pipeline_checkpoints.code
+                      AND incoming.start_date = pipeline_checkpoints.start_date
+                      AND incoming.end_date = pipeline_checkpoints.end_date
+                )
+                """,
+                "INSERT INTO pipeline_checkpoints SELECT * FROM incoming",
+            )
+
+    def persist_update_metadata(
+        self,
+        run_rows: list[dict[str, object]],
+        status_rows: list[dict[str, object]],
+        checkpoint_rows: list[dict[str, object]],
+    ) -> None:
+        runs = _clean_dataframe_for_schema(pd.DataFrame(run_rows), UPDATE_RUNS_SCHEMA) if run_rows else None
+        statuses = _clean_dataframe_for_schema(pd.DataFrame(status_rows), UPDATE_STATUS_SCHEMA) if status_rows else None
+        checkpoints = (
+            _clean_dataframe_for_schema(pd.DataFrame(checkpoint_rows), PIPELINE_CHECKPOINTS_SCHEMA)
+            if checkpoint_rows
+            else None
+        )
+        with self._connection() as conn:
+            if runs is not None and not runs.empty:
+                self._register_and_execute(conn, runs, "INSERT INTO update_runs SELECT * FROM incoming")
+            if statuses is not None and not statuses.empty:
+                self._register_and_execute(
+                    conn,
+                    statuses,
+                    """
+                    DELETE FROM update_status
+                    WHERE EXISTS (
+                        SELECT 1
+                        FROM incoming
+                        WHERE incoming.dataset = update_status.dataset
+                          AND incoming.code = update_status.code
+                    )
+                    """,
+                    "INSERT INTO update_status SELECT * FROM incoming",
+                )
+            if checkpoints is not None and not checkpoints.empty:
+                self._register_and_execute(
+                    conn,
+                    checkpoints,
+                    """
+                    DELETE FROM pipeline_checkpoints
+                    WHERE EXISTS (
+                        SELECT 1
+                        FROM incoming
+                        WHERE incoming.pipeline = pipeline_checkpoints.pipeline
+                          AND incoming.dataset = pipeline_checkpoints.dataset
+                          AND incoming.code = pipeline_checkpoints.code
+                          AND incoming.start_date = pipeline_checkpoints.start_date
+                          AND incoming.end_date = pipeline_checkpoints.end_date
+                    )
+                    """,
+                    "INSERT INTO pipeline_checkpoints SELECT * FROM incoming",
+                )
+
+    def read_update_runs(self) -> pd.DataFrame:
+        with self._connection() as conn:
+            return _clean_dataframe_for_schema(
+                conn.execute("SELECT * FROM update_runs").df(),
+                UPDATE_RUNS_SCHEMA,
+            )
+
+    def read_update_status(self) -> pd.DataFrame:
+        with self._connection() as conn:
+            return _clean_dataframe_for_schema(
+                conn.execute("SELECT * FROM update_status").df(),
+                UPDATE_STATUS_SCHEMA,
+            )
+
+    def read_pipeline_checkpoints(self) -> pd.DataFrame:
+        with self._connection() as conn:
+            return _clean_dataframe_for_schema(
+                conn.execute("SELECT * FROM pipeline_checkpoints").df(),
+                PIPELINE_CHECKPOINTS_SCHEMA,
+            )
+
+    def initialize(self) -> None:
+        with self._connection():
+            return
+
+    def close(self) -> None:
+        with self._lock:
+            if self._conn is not None:
+                self._conn.close()
+                self._conn = None
+            self._initialized = False
+
+    def __del__(self) -> None:
+        with suppress(Exception):
+            self.close()
+
+    @contextmanager
+    def _connection(self) -> Iterator[duckdb.DuckDBPyConnection]:
+        with self._lock:
+            self.duckdb_file.parent.mkdir(parents=True, exist_ok=True)
+            if self._conn is None:
+                self._conn = duckdb.connect(str(self.duckdb_file))
+            self._ensure_initialized(self._conn)
+            yield self._conn
+
+    def _ensure_initialized(self, conn: duckdb.DuckDBPyConnection) -> None:
+        if not self._initialized:
+            self._create_tables(conn)
+            self._migrate_legacy_parquet(conn)
+            self._initialized = True
+
+    def _create_tables(self, conn: duckdb.DuckDBPyConnection) -> None:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS update_runs (
+                task_id VARCHAR,
+                dataset VARCHAR,
+                code VARCHAR,
+                status VARCHAR,
+                start_date DATE,
+                end_date DATE,
+                start_time TIMESTAMP,
+                end_time TIMESTAMP,
+                row_count BIGINT,
+                error_stack VARCHAR
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS update_status (
+                dataset VARCHAR,
+                code VARCHAR,
+                last_success_date DATE,
+                row_count BIGINT,
+                status VARCHAR,
+                updated_at TIMESTAMP,
+                error_stack VARCHAR
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS pipeline_checkpoints (
+                pipeline VARCHAR,
+                dataset VARCHAR,
+                code VARCHAR,
+                start_date DATE,
+                end_date DATE,
+                status VARCHAR,
+                row_count BIGINT,
+                output_path VARCHAR,
+                updated_at TIMESTAMP,
+                error_stack VARCHAR
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS metadata_migrations (
+                name VARCHAR PRIMARY KEY,
+                migrated_at TIMESTAMP
+            )
+            """
+        )
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_update_status_key ON update_status(dataset, code)")
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_pipeline_checkpoints_key
+            ON pipeline_checkpoints(pipeline, dataset, code, start_date, end_date)
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_pipeline_checkpoints_date
+            ON pipeline_checkpoints(pipeline, dataset, code, end_date)
+            """
+        )
+
+    def _migrate_legacy_parquet(self, conn: duckdb.DuckDBPyConnection) -> None:
+        migrated = conn.execute(
+            "SELECT 1 FROM metadata_migrations WHERE name = ?",
+            [_MIGRATION_NAME],
+        ).fetchone()
+        if migrated is not None:
+            return
+
+        self._migrate_legacy_table(conn, "update_runs", UPDATE_RUNS_SCHEMA)
+        self._migrate_legacy_table(conn, "update_status", UPDATE_STATUS_SCHEMA, upsert_keys=["dataset", "code"])
+        self._migrate_legacy_table(
+            conn,
+            "pipeline_checkpoints",
+            PIPELINE_CHECKPOINTS_SCHEMA,
+            upsert_keys=CHECKPOINT_KEY_COLUMNS,
+        )
+        conn.execute(
+            "INSERT INTO metadata_migrations VALUES (?, ?)",
+            [_MIGRATION_NAME, datetime.now()],
+        )
+
+    def _migrate_legacy_table(
+        self,
+        conn: duckdb.DuckDBPyConnection,
+        table_name: str,
+        schema: pa.Schema,
+        upsert_keys: list[str] | None = None,
+    ) -> None:
+        path = self.parquet_metadata_dir / f"{table_name}.parquet"
+        if not path.exists():
+            return
+
+        incoming = _clean_dataframe_for_schema(pd.read_parquet(path), schema)
+        if incoming.empty:
+            return
+
+        delete_sql = None
+        if upsert_keys:
+            predicates = " AND ".join(f"incoming.{column} = {table_name}.{column}" for column in upsert_keys)
+            delete_sql = f"""
+                DELETE FROM {table_name}
+                WHERE EXISTS (
+                    SELECT 1
+                    FROM incoming
+                    WHERE {predicates}
+                )
+            """
+        sqls = [sql for sql in [delete_sql, f"INSERT INTO {table_name} SELECT * FROM incoming"] if sql]
+        self._register_and_execute(conn, incoming, *sqls)
+
+    def _register_and_execute(
+        self,
+        conn: duckdb.DuckDBPyConnection,
+        incoming: pd.DataFrame,
+        *sqls: str,
+    ) -> None:
+        conn.register("incoming", incoming)
+        try:
+            conn.execute("BEGIN TRANSACTION")
+            try:
+                for sql in sqls:
+                    conn.execute(sql)
+            except Exception:
+                conn.execute("ROLLBACK")
+                raise
+            conn.execute("COMMIT")
+        finally:
+            conn.unregister("incoming")
+
+
+def _clean_dataframe_for_schema(df: pd.DataFrame, schema: pa.Schema) -> pd.DataFrame:
+    cleaned = pd.DataFrame(index=df.index)
+    for field in schema:
+        if field.name in df.columns:
+            series = df[field.name]
+        else:
+            series = pd.Series(pd.NA, index=df.index, name=field.name)
+        cleaned[field.name] = _coerce_series(series, field.type)
+    return cleaned.reset_index(drop=True)
+
+
+def _coerce_series(series: pd.Series, arrow_type: pa.DataType) -> pd.Series:
+    if pa.types.is_date32(arrow_type) or pa.types.is_date64(arrow_type):
+        dates = pd.to_datetime(_replace_null_like(series), errors="coerce")
+        return dates.dt.date.where(dates.notna(), None)
+    if pa.types.is_timestamp(arrow_type):
+        return pd.to_datetime(_replace_null_like(series), errors="coerce").dt.floor("ms")
+    if pa.types.is_integer(arrow_type):
+        return pd.to_numeric(_replace_null_like(series), errors="coerce").astype("Int64")
+    if pa.types.is_floating(arrow_type):
+        return pd.to_numeric(_replace_null_like(series), errors="coerce")
+    if pa.types.is_string(arrow_type):
+        return series.astype("string")
+    return series
+
+
+def _replace_null_like(series: pd.Series) -> pd.Series:
+    if series.empty or series.dtype.kind not in {"O", "U", "S"} and not pd.api.types.is_string_dtype(series.dtype):
+        return series
+    return series.replace({"": pd.NA, "None": pd.NA, "none": pd.NA, "NaN": pd.NA, "nan": pd.NA})
+
+
+def empty_metadata_frame(schema: pa.Schema) -> pd.DataFrame:
+    return pd.DataFrame(columns=field_names(schema))

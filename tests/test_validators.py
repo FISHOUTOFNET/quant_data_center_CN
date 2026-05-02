@@ -3,7 +3,14 @@ from __future__ import annotations
 import pandas as pd
 import pytest
 
-from src.quality.validators import ValidationError, validate_adjust_factor, validate_daily_k, validate_non_negative
+from src.quality.validators import (
+    ValidationError,
+    validate_adjust_factor,
+    validate_daily_k,
+    validate_non_negative,
+    validate_stock_institute_hold,
+    validate_stock_value_em,
+)
 
 
 def test_validate_daily_k_accepts_valid_data(daily_sample) -> None:
@@ -58,3 +65,24 @@ def test_validate_adjust_factor_rejects_duplicate_code_date(adjust_factor_sample
     df = pd.concat([adjust_factor_sample(), adjust_factor_sample()], ignore_index=True)
     with pytest.raises(ValidationError, match="Duplicate"):
         validate_adjust_factor(df)
+
+
+def test_validate_stock_institute_hold_rejects_duplicate_period_code(stock_institute_hold_sample) -> None:
+    df = stock_institute_hold_sample()
+    df.loc[1, "code"] = df.loc[0, "code"]
+    with pytest.raises(ValidationError, match="Duplicate"):
+        validate_stock_institute_hold(df)
+
+
+def test_validate_stock_value_em_rejects_duplicate_code_date(stock_value_em_sample) -> None:
+    df = stock_value_em_sample()
+    df.loc[1, "date"] = df.loc[0, "date"]
+    with pytest.raises(ValidationError, match="Duplicate"):
+        validate_stock_value_em(df)
+
+
+def test_validate_stock_value_em_rejects_non_monotonic_dates(stock_value_em_sample) -> None:
+    df = stock_value_em_sample()
+    df = df.iloc[::-1].reset_index(drop=True)
+    with pytest.raises(ValidationError, match="monotonically"):
+        validate_stock_value_em(df)

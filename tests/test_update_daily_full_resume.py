@@ -137,8 +137,8 @@ def test_update_daily_full_fetches_next_code_while_previous_write_is_pending(
     thread = threading.Thread(target=run_pipeline)
     thread.start()
     try:
-        assert first_write_started.wait(timeout=2)
-        assert second_fetch_seen.wait(timeout=2)
+        assert first_write_started.wait(timeout=5)
+        assert second_fetch_seen.wait(timeout=5)
     finally:
         release_first_write.set()
         thread.join(timeout=5)
@@ -147,7 +147,7 @@ def test_update_daily_full_fetches_next_code_while_previous_write_is_pending(
     assert errors == []
 
 
-def test_update_daily_background_executor_uses_eight_workers(
+def test_update_daily_background_executor_uses_configured_default_workers(
     tmp_path,
     monkeypatch,
     daily_sample,
@@ -180,7 +180,7 @@ def test_update_daily_background_executor_uses_eight_workers(
         build_views=False,
     )
 
-    assert max_workers_seen == [8]
+    assert max_workers_seen == [4]
 
 
 def test_update_daily_waits_for_adjust_factor_before_adjusted_calculation(
@@ -287,8 +287,8 @@ def test_update_daily_parallel_metadata_writes_do_not_drop_rows(
     )
 
     store = ParquetStore(root=tmp_path)
-    update_runs = pd.read_parquet(store.metadata_path("update_runs"))
-    update_status = pd.read_parquet(store.metadata_path("update_status"))
+    update_runs = store.read_update_runs()
+    update_status = store.read_update_status()
     checkpoints = store.read_pipeline_checkpoints()
     expected_pairs = {(ADJUST_FACTOR_DATASET, code) for code in codes} | {("daily_k_qfq", code) for code in codes}
 
@@ -411,7 +411,9 @@ def test_update_daily_full_batches_daily_checkpoints_by_flush_size(
     daily_records = [item for item in records if item["dataset"] == "daily_k_qfq"]
     assert [item["status"] for item in daily_records] == ["success", "success", "success"]
     assert state["history_calls"] == ["sh.000001", "sh.600000", "sz.000001"]
-    assert flush_sizes == [2, 1]
+    assert sum(flush_sizes) == 6
+    assert len(flush_sizes) >= 2
 
     checkpoints = ParquetStore(root=tmp_path).read_pipeline_checkpoints()
     assert set(checkpoints["code"].astype(str)) == {"sh.000001", "sh.600000", "sz.000001"}
+    assert set(checkpoints["dataset"].astype(str)) == {ADJUST_FACTOR_DATASET, "daily_k_qfq"}

@@ -1,5 +1,6 @@
 """Data source API clients and provider-neutral interfaces."""
 
+from src.api.akshare_client import AkShareClient
 from src.api.market_data import (
     DailyKRequest,
     MarketDataProvider,
@@ -9,6 +10,7 @@ from src.api.market_data import (
 )
 
 __all__ = [
+    "AkShareClient",
     "DailyKRequest",
     "MarketDataProvider",
     "create_provider",

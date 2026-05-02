@@ -1,0 +1,29 @@
+{
+  "metadata": {
+    "timestamp": "2026-04-30T17:59:13.949376",
+    "skip_long_tests": false
+  },
+  "benchmarks": {
+    "api": {
+      "elapsed": 55.54403019999154,
+      "status": "completed"
+    },
+    "io": {
+      "elapsed": 32.49471800000174,
+      "status": "completed"
+    },
+    "data_processing": {
+      "elapsed": 3.28172019997146,
+      "status": "completed"
+    },
+    "concurrency": {
+      "elapsed": 61.52964119997341,
+      "status": "completed"
+    },
+    "end_to_end": {
+      "elapsed": 433.0044675000245,
+      "status": "completed"
+    }
+  },
+  "total_elapsed": 585.8592300000018
+}

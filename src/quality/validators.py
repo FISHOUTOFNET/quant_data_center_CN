@@ -12,6 +12,8 @@ from src.storage.schema import (
     CALENDAR_SCHEMA,
     DAILY_K_SCHEMA,
     STOCK_BASIC_SCHEMA,
+    STOCK_INSTITUTE_HOLD_SCHEMA,
+    STOCK_VALUE_EM_SCHEMA,
     field_names,
 )
 from src.utils.logging import logger
@@ -137,3 +139,27 @@ def validate_adjust_factor(df: pd.DataFrame, schema: pa.Schema = ADJUST_FACTOR_S
     for code, group in work.groupby("code", dropna=False, sort=False):
         if not group["_divid_operate_date"].is_monotonic_increasing:
             raise ValidationError(f"dividOperateDate is not monotonically increasing for code={code}")
+
+
+def validate_stock_institute_hold(
+    df: pd.DataFrame,
+    schema: pa.Schema = STOCK_INSTITUTE_HOLD_SCHEMA,
+) -> None:
+    validate_schema_matches(df, schema)
+    duplicated = df.duplicated(["report_period", "code"], keep=False)
+    if duplicated.any():
+        sample = df.loc[duplicated, ["report_period", "code"]].head(5).to_dict("records")
+        raise ValidationError(f"Duplicate report_period/code rows found: {sample}")
+    if df.empty:
+        return
+    _require_columns_not_null(df, ["report_period", "period_end_date", "code"])
+
+
+def validate_stock_value_em(df: pd.DataFrame, schema: pa.Schema = STOCK_VALUE_EM_SCHEMA) -> None:
+    validate_schema_matches(df, schema)
+    validate_unique_code_date(df)
+    validate_date_monotonic(df)
+    validate_non_negative(df, "total_market_cap")
+    validate_non_negative(df, "float_market_cap")
+    validate_non_negative(df, "total_shares")
+    validate_non_negative(df, "float_shares")

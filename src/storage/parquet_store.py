@@ -8,6 +8,7 @@ import uuid
 from contextlib import suppress
 from datetime import date
 from pathlib import Path
+from threading import RLock
 
 import pandas as pd
 import pyarrow as pa
@@ -17,21 +18,18 @@ from src.storage.dataset_catalog import (
     ADJUST_FACTOR_DATASET,
     CALENDAR_DATASET,
     STOCK_BASIC_DATASET,
+    STOCK_INSTITUTE_HOLD_DATASET,
+    STOCK_VALUE_EM_DATASET,
     daily_k_definition,
     daily_k_definitions,
 )
-from src.storage.schema import (
-    PIPELINE_CHECKPOINTS_SCHEMA,
-    UPDATE_RUNS_SCHEMA,
-    UPDATE_STATUS_SCHEMA,
-    field_names,
-)
+from src.storage.schema import field_names
+from src.storage.metadata_store import DuckDBMetadataStore
 from src.utils import paths
 from src.utils.logging import logger
 
 
 NULL_LIKE_VALUES = {"": pd.NA, "None": pd.NA, "none": pd.NA, "NaN": pd.NA, "nan": pd.NA}
-CHECKPOINT_KEY_COLUMNS = ["pipeline", "dataset", "code", "start_date", "end_date"]
 PARQUET_READ_MAX_RETRIES = 3
 PARQUET_READ_RETRY_DELAY = 0.1
 PARQUET_WRITE_MAX_RETRIES = 3
@@ -50,6 +48,11 @@ class ParquetStore:
         self.root = (root or paths.ROOT).resolve()
         self.parquet_dir = (parquet_dir or self.root / "data" / "parquet").resolve()
         self.metadata_dir = (metadata_dir or self.root / "data" / "metadata").resolve()
+        self._parquet_write_lock = RLock()
+        self._metadata_store = DuckDBMetadataStore(
+            root=self.root,
+            parquet_metadata_dir=self.metadata_dir,
+        )
 
     def _safe_read_parquet(self, path: Path) -> pd.DataFrame:
         """Read parquet file with retry logic for transient permission errors.
@@ -81,11 +84,15 @@ class ParquetStore:
         for directory in [
             *daily_k_dirs,
             self.parquet_dir / ADJUST_FACTOR_DATASET.name,
+            self.parquet_dir / STOCK_INSTITUTE_HOLD_DATASET.name,
+            self.parquet_dir / STOCK_VALUE_EM_DATASET.name,
             self.parquet_dir / "stock_basic",
             self.parquet_dir / "calendar",
             self.metadata_dir,
             self.root / "data" / "duckdb",
             self.root / "data" / "raw",
+            self.root / "data" / "raw" / "akshare",
+            self.root / "data" / "raw" / "akshare" / "manifest",
             self.root / "logs",
         ]:
             directory.mkdir(parents=True, exist_ok=True)
@@ -102,8 +109,20 @@ class ParquetStore:
     def calendar_path(self) -> Path:
         return self.parquet_dir / "calendar" / "data.parquet"
 
+    def stock_institute_hold_path(self, report_period: str) -> Path:
+        return self.parquet_dir / STOCK_INSTITUTE_HOLD_DATASET.name / f"report_period={report_period}" / "data.parquet"
+
+    def stock_value_em_path(self, code: str) -> Path:
+        return self.parquet_dir / STOCK_VALUE_EM_DATASET.name / f"code={code}" / "data.parquet"
+
+    def akshare_manifest_path(self) -> Path:
+        return self.root / "data" / "raw" / "akshare" / "manifest" / "fetch_runs.jsonl"
+
     def metadata_path(self, name: str) -> Path:
         return self.metadata_dir / f"{name}.parquet"
+
+    def close(self) -> None:
+        self._metadata_store.close()
 
     def clean_dataframe_for_schema(self, df: pd.DataFrame, schema: pa.Schema) -> pd.DataFrame:
         """Return a dataframe with exactly schema columns and compatible values.
@@ -115,7 +134,7 @@ class ParquetStore:
         cleaned = pd.DataFrame(index=df.index)
         for field in schema:
             if field.name in df.columns:
-                series = df[field.name].copy()
+                series = df[field.name]
             else:
                 series = pd.Series(pd.NA, index=df.index, name=field.name)
             cleaned[field.name] = self._coerce_series(series, field.type)
@@ -123,21 +142,53 @@ class ParquetStore:
 
     def _coerce_series(self, series: pd.Series, arrow_type: pa.DataType) -> pd.Series:
         if pa.types.is_date32(arrow_type) or pa.types.is_date64(arrow_type):
-            values = series.replace(NULL_LIKE_VALUES)
+            values = self._replace_null_like(series)
             dates = pd.to_datetime(values, errors="coerce")
             return dates.dt.date.where(dates.notna(), None)
         if pa.types.is_timestamp(arrow_type):
-            values = series.replace(NULL_LIKE_VALUES)
+            values = self._replace_null_like(series)
+            if pd.api.types.is_datetime64_any_dtype(values.dtype):
+                return values.dt.floor("ms")
             return pd.to_datetime(values, errors="coerce").dt.floor("ms")
         if pa.types.is_integer(arrow_type):
-            values = series.replace(NULL_LIKE_VALUES)
+            if pd.api.types.is_integer_dtype(series.dtype):
+                return series
+            values = self._replace_null_like(series)
             return pd.to_numeric(values, errors="coerce").astype("Int64")
         if pa.types.is_floating(arrow_type):
-            values = series.replace(NULL_LIKE_VALUES)
+            if pd.api.types.is_float_dtype(series.dtype):
+                return series
+            if pd.api.types.is_integer_dtype(series.dtype):
+                return series.astype("float64")
+            values = self._replace_null_like(series)
             return pd.to_numeric(values, errors="coerce")
         if pa.types.is_string(arrow_type):
+            if pd.api.types.is_string_dtype(series.dtype):
+                return series
             return series.astype("string")
         return series
+
+    def _replace_null_like(self, series: pd.Series) -> pd.Series:
+        if series.empty:
+            return series
+        if not pd.api.types.is_object_dtype(series.dtype) and not pd.api.types.is_string_dtype(series.dtype):
+            return series
+        return series.replace(NULL_LIKE_VALUES)
+
+    def _require_partition_value(
+        self,
+        df: pd.DataFrame,
+        column: str,
+        expected: str,
+        context: str,
+    ) -> None:
+        if df.empty:
+            return
+        if df[column].isna().any():
+            raise ValueError(f"{context} missing {column} for {expected}")
+        values = set(df[column].astype(str))
+        if values != {expected}:
+            raise ValueError(f"{context} mismatch for {expected}: {sorted(values)}")
 
     def to_table(self, df: pd.DataFrame, schema: pa.Schema) -> pa.Table:
         cleaned = self.clean_dataframe_for_schema(df, schema)
@@ -166,8 +217,9 @@ class ParquetStore:
         last_error: Exception | None = None
         for attempt in range(PARQUET_WRITE_MAX_RETRIES):
             try:
-                pq.write_table(table, tmp_path)
-                os.replace(tmp_path, destination)
+                with self._parquet_write_lock:
+                    pq.write_table(table, tmp_path)
+                    os.replace(tmp_path, destination)
                 return
             except (PermissionError, OSError) as e:
                 last_error = e
@@ -202,10 +254,7 @@ class ParquetStore:
         definition = daily_k_definition(dataset)
         cleaned = self.clean_dataframe_for_schema(df, definition.schema)
         if not cleaned.empty:
-            cleaned["code"] = cleaned["code"].fillna(code)
-            codes = set(cleaned["code"].dropna().astype(str))
-            if codes != {code}:
-                raise ValueError(f"Daily file code mismatch for {code}: {sorted(codes)}")
+            self._require_partition_value(cleaned, "code", code, "Daily file code")
             cleaned = cleaned.sort_values(["code", "date"]).reset_index(drop=True)
         definition.validator(cleaned)
         destination = self.daily_k_path(dataset, code)
@@ -227,17 +276,18 @@ class ParquetStore:
         return self._safe_read_parquet(path)
 
     def write_adjust_factor(self, code: str, df: pd.DataFrame) -> Path:
-        cleaned = self.clean_dataframe_for_schema(df, ADJUST_FACTOR_DATASET.schema)
-        if not cleaned.empty:
-            cleaned["code"] = cleaned["code"].fillna(code)
-            codes = set(cleaned["code"].dropna().astype(str))
-            if codes != {code}:
-                raise ValueError(f"Adjust factor file code mismatch for {code}: {sorted(codes)}")
-            cleaned = cleaned.sort_values(["code", "dividOperateDate"]).reset_index(drop=True)
-        ADJUST_FACTOR_DATASET.validator(cleaned)
+        cleaned = self.clean_adjust_factor_frame(code, df)
         destination = self.adjust_factor_path(code)
         self.atomic_write(cleaned, ADJUST_FACTOR_DATASET.schema, destination)
         return destination
+
+    def clean_adjust_factor_frame(self, code: str, df: pd.DataFrame) -> pd.DataFrame:
+        cleaned = self.clean_dataframe_for_schema(df, ADJUST_FACTOR_DATASET.schema)
+        if not cleaned.empty:
+            self._require_partition_value(cleaned, "code", code, "Adjust factor file code")
+            cleaned = cleaned.sort_values(["code", "dividOperateDate"]).reset_index(drop=True)
+        ADJUST_FACTOR_DATASET.validator(cleaned)
+        return cleaned
 
     def read_adjust_factor(self, code: str) -> pd.DataFrame:
         path = self.adjust_factor_path(code)
@@ -301,42 +351,79 @@ class ParquetStore:
             return pd.DataFrame(columns=field_names(CALENDAR_DATASET.schema))
         return self._safe_read_parquet(path)
 
+    def write_stock_institute_hold(self, report_period: str, df: pd.DataFrame) -> Path:
+        cleaned = self.clean_dataframe_for_schema(df, STOCK_INSTITUTE_HOLD_DATASET.schema)
+        if not cleaned.empty:
+            self._require_partition_value(
+                cleaned,
+                "report_period",
+                report_period,
+                "Institute hold file period",
+            )
+            cleaned = cleaned.sort_values(["report_period", "code"]).reset_index(drop=True)
+        STOCK_INSTITUTE_HOLD_DATASET.validator(cleaned)
+        destination = self.stock_institute_hold_path(report_period)
+        self.atomic_write(cleaned, STOCK_INSTITUTE_HOLD_DATASET.schema, destination)
+        logger.info(
+            "AkShare Parquet stored dataset={} report_period={} rows={} path={}",
+            STOCK_INSTITUTE_HOLD_DATASET.name,
+            report_period,
+            len(cleaned),
+            destination,
+        )
+        return destination
+
+    def read_stock_institute_hold(self, report_period: str) -> pd.DataFrame:
+        path = self.stock_institute_hold_path(report_period)
+        if not path.exists():
+            return pd.DataFrame(columns=field_names(STOCK_INSTITUTE_HOLD_DATASET.schema))
+        return self.clean_dataframe_for_schema(self._safe_read_parquet(path), STOCK_INSTITUTE_HOLD_DATASET.schema)
+
+    def write_stock_value_em(self, code: str, df: pd.DataFrame) -> Path:
+        cleaned = self.clean_dataframe_for_schema(df, STOCK_VALUE_EM_DATASET.schema)
+        if not cleaned.empty:
+            self._require_partition_value(cleaned, "code", code, "Stock value file code")
+            cleaned = cleaned.sort_values(["code", "date"]).reset_index(drop=True)
+        STOCK_VALUE_EM_DATASET.validator(cleaned)
+        destination = self.stock_value_em_path(code)
+        self.atomic_write(cleaned, STOCK_VALUE_EM_DATASET.schema, destination)
+        logger.info(
+            "AkShare Parquet stored dataset={} code={} rows={} path={}",
+            STOCK_VALUE_EM_DATASET.name,
+            code,
+            len(cleaned),
+            destination,
+        )
+        return destination
+
+    def read_stock_value_em(self, code: str) -> pd.DataFrame:
+        path = self.stock_value_em_path(code)
+        if not path.exists():
+            return pd.DataFrame(columns=field_names(STOCK_VALUE_EM_DATASET.schema))
+        return self.clean_dataframe_for_schema(self._safe_read_parquet(path), STOCK_VALUE_EM_DATASET.schema)
+
     def append_update_runs(self, df: pd.DataFrame) -> Path:
-        cleaned = self.clean_dataframe_for_schema(df, UPDATE_RUNS_SCHEMA)
         path = self.metadata_path("update_runs")
-        if path.exists():
-            existing = self._safe_read_parquet(path)
-            cleaned = pd.concat([existing, cleaned], ignore_index=True)
-            cleaned = self.clean_dataframe_for_schema(cleaned, UPDATE_RUNS_SCHEMA)
-        self.atomic_write(cleaned, UPDATE_RUNS_SCHEMA, path)
+        self._metadata_store.append_update_runs(df)
         return path
 
     def upsert_update_status(self, df: pd.DataFrame) -> Path:
-        incoming = self.clean_dataframe_for_schema(df, UPDATE_STATUS_SCHEMA)
         path = self.metadata_path("update_status")
-        if path.exists():
-            existing = self._safe_read_parquet(path)
-            merged = pd.concat([existing, incoming], ignore_index=True)
-            merged = merged.drop_duplicates(["dataset", "code"], keep="last").reset_index(drop=True)
-            incoming = self.clean_dataframe_for_schema(merged, UPDATE_STATUS_SCHEMA)
-        self.atomic_write(incoming, UPDATE_STATUS_SCHEMA, path)
+        self._metadata_store.upsert_update_status(df)
         return path
 
+    def read_update_runs(self) -> pd.DataFrame:
+        return self._metadata_store.read_update_runs()
+
+    def read_update_status(self) -> pd.DataFrame:
+        return self._metadata_store.read_update_status()
+
     def read_pipeline_checkpoints(self) -> pd.DataFrame:
-        path = self.metadata_path("pipeline_checkpoints")
-        if not path.exists():
-            return pd.DataFrame(columns=field_names(PIPELINE_CHECKPOINTS_SCHEMA))
-        return self.clean_dataframe_for_schema(self._safe_read_parquet(path), PIPELINE_CHECKPOINTS_SCHEMA)
+        return self._metadata_store.read_pipeline_checkpoints()
 
     def upsert_pipeline_checkpoints(self, df: pd.DataFrame) -> Path:
-        incoming = self.clean_dataframe_for_schema(df, PIPELINE_CHECKPOINTS_SCHEMA)
         path = self.metadata_path("pipeline_checkpoints")
-        if path.exists():
-            existing = self.clean_dataframe_for_schema(self._safe_read_parquet(path), PIPELINE_CHECKPOINTS_SCHEMA)
-            merged = pd.concat([existing, incoming], ignore_index=True)
-            merged = merged.drop_duplicates(CHECKPOINT_KEY_COLUMNS, keep="last").reset_index(drop=True)
-            incoming = self.clean_dataframe_for_schema(merged, PIPELINE_CHECKPOINTS_SCHEMA)
-        self.atomic_write(incoming, PIPELINE_CHECKPOINTS_SCHEMA, path)
+        self._metadata_store.upsert_pipeline_checkpoints(df)
         return path
 
     def persist_update_metadata(
@@ -347,12 +434,7 @@ class ParquetStore:
     ) -> None:
         """Persist update metadata with one write per metadata table."""
 
-        if run_rows:
-            self.append_update_runs(pd.DataFrame(run_rows))
-        if status_rows:
-            self.upsert_update_status(pd.DataFrame(status_rows))
-        if checkpoint_rows:
-            self.upsert_pipeline_checkpoints(pd.DataFrame(checkpoint_rows))
+        self._metadata_store.persist_update_metadata(run_rows, status_rows, checkpoint_rows)
 
     def pipeline_checkpoint_succeeded(
         self,
@@ -412,12 +494,4 @@ class ParquetStore:
         return str(latest["status"]) == "success"
 
     def initialize_empty_metadata(self) -> None:
-        for name, schema in {
-            "update_runs": UPDATE_RUNS_SCHEMA,
-            "update_status": UPDATE_STATUS_SCHEMA,
-            "pipeline_checkpoints": PIPELINE_CHECKPOINTS_SCHEMA,
-        }.items():
-            path = self.metadata_path(name)
-            if not path.exists():
-                empty = pd.DataFrame(columns=field_names(schema))
-                self.atomic_write(self.clean_dataframe_for_schema(empty, schema), schema, path)
+        self._metadata_store.initialize()

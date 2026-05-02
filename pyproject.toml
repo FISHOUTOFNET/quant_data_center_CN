@@ -11,6 +11,7 @@ dependencies = [
     "pandas",
     "pyarrow",
     "duckdb",
+    "akshare",
     "baostock",
     "pydantic",
     "pyyaml",

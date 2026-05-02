@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
 from threading import RLock
-from typing import TypeVar
 
 import pandas as pd
 
@@ -13,9 +11,6 @@ from src.pipeline.common import FULL_HISTORY_START_DATE, calendar_covers_range
 from src.storage.parquet_store import ParquetStore
 from src.utils.config_mgr import ConfigManager
 from src.utils.logging import logger
-
-
-T = TypeVar("T")
 
 
 class PipelineMetadataBatch:
@@ -31,6 +26,7 @@ class PipelineMetadataBatch:
         self._status_rows: list[dict[str, object]] = []
         self._checkpoint_rows: list[dict[str, object]] = []
         self._lock = RLock()
+        self._flush_write_lock = RLock()
 
     def add(
         self,
@@ -38,6 +34,7 @@ class PipelineMetadataBatch:
         status_row: dict[str, object] | None = None,
         checkpoint: dict[str, object] | None = None,
     ) -> None:
+        should_flush = False
         with self._lock:
             if run_row is not None:
                 self._run_rows.append(run_row)
@@ -45,27 +42,29 @@ class PipelineMetadataBatch:
                 self._status_rows.append(status_row)
             if checkpoint is not None:
                 self._checkpoint_rows.append(checkpoint)
-            if self._pending_count >= self._flush_size:
-                self._flush_unlocked()
+            should_flush = self._pending_count >= self._flush_size
+        if should_flush:
+            self.flush()
 
     def flush(self) -> None:
-        with self._lock:
-            self._flush_unlocked()
-
-    def run_serialized(self, action: Callable[[], T]) -> T:
-        with self._lock:
-            return action()
-
-    def _flush_unlocked(self) -> None:
-        if self._pending_count == 0:
-            return
-        run_rows = self._run_rows
-        status_rows = self._status_rows
-        checkpoint_rows = self._checkpoint_rows
-        self._run_rows = []
-        self._status_rows = []
-        self._checkpoint_rows = []
-        self._store.persist_update_metadata(run_rows, status_rows, checkpoint_rows)
+        with self._flush_write_lock:
+            with self._lock:
+                if self._pending_count == 0:
+                    return
+                run_rows = self._run_rows
+                status_rows = self._status_rows
+                checkpoint_rows = self._checkpoint_rows
+                self._run_rows = []
+                self._status_rows = []
+                self._checkpoint_rows = []
+            try:
+                self._store.persist_update_metadata(run_rows, status_rows, checkpoint_rows)
+            except Exception:
+                with self._lock:
+                    self._run_rows = [*run_rows, *self._run_rows]
+                    self._status_rows = [*status_rows, *self._status_rows]
+                    self._checkpoint_rows = [*checkpoint_rows, *self._checkpoint_rows]
+                raise
 
     @property
     def _pending_count(self) -> int:

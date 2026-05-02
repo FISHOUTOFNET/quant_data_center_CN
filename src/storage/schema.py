@@ -58,6 +58,40 @@ ADJUST_FACTOR_SCHEMA = pa.schema(
     ]
 )
 
+STOCK_INSTITUTE_HOLD_SCHEMA = pa.schema(
+    [
+        pa.field("report_period", pa.string()),
+        pa.field("period_end_date", pa.date32()),
+        pa.field("code", pa.string()),
+        pa.field("code_name", pa.string()),
+        pa.field("institution_count", pa.int64()),
+        pa.field("institution_count_change", pa.int64()),
+        pa.field("holding_ratio", pa.float64()),
+        pa.field("holding_ratio_change", pa.float64()),
+        pa.field("float_holding_ratio", pa.float64()),
+        pa.field("float_holding_ratio_change", pa.float64()),
+    ]
+)
+
+STOCK_VALUE_EM_SCHEMA = pa.schema(
+    [
+        pa.field("date", pa.date32()),
+        pa.field("code", pa.string()),
+        pa.field("close", pa.float64()),
+        pa.field("pct_chg", pa.float64()),
+        pa.field("total_market_cap", pa.float64()),
+        pa.field("float_market_cap", pa.float64()),
+        pa.field("total_shares", pa.float64()),
+        pa.field("float_shares", pa.float64()),
+        pa.field("pe_ttm", pa.float64()),
+        pa.field("pe_static", pa.float64()),
+        pa.field("pb", pa.float64()),
+        pa.field("peg", pa.float64()),
+        pa.field("pcf", pa.float64()),
+        pa.field("ps", pa.float64()),
+    ]
+)
+
 UPDATE_RUNS_SCHEMA = pa.schema(
     [
         pa.field("task_id", pa.string()),
@@ -113,6 +147,8 @@ DATASET_SCHEMAS: Mapping[str, pa.Schema] = {
     "stock_basic": STOCK_BASIC_SCHEMA,
     "calendar": CALENDAR_SCHEMA,
     "adjust_factor": ADJUST_FACTOR_SCHEMA,
+    "stock_institute_hold": STOCK_INSTITUTE_HOLD_SCHEMA,
+    "stock_value_em": STOCK_VALUE_EM_SCHEMA,
     **METADATA_SCHEMAS,
 }
 

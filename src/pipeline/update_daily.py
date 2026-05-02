@@ -189,6 +189,11 @@ def update_daily(
             end_date=end_date,
             metadata_batch=metadata_batch,
         )
+        background_workers = max(int(config.get("pipeline.background_workers", 4)), 1)
+        background_max_pending = max(
+            int(config.get("pipeline.background_max_pending", background_workers * 4)),
+            1,
+        )
         pending: set[Future[BackgroundTaskResult]] = set()
         future_sequences: dict[Future[BackgroundTaskResult], int] = {}
         completed_results: dict[int, BackgroundTaskResult] = {}
@@ -197,6 +202,8 @@ def update_daily(
 
         def submit_background(action) -> Future[BackgroundTaskResult]:
             nonlocal next_submit_sequence
+            while len(pending) >= background_max_pending:
+                drain_completed(block=True)
             future = executor.submit(action)
             future_sequences[future] = next_submit_sequence
             next_submit_sequence += 1
@@ -278,7 +285,10 @@ def update_daily(
                 error_stack,
             )
 
-        with ThreadPoolExecutor(max_workers=4, thread_name_prefix="update-daily-background") as executor:
+        with ThreadPoolExecutor(
+            max_workers=background_workers,
+            thread_name_prefix="update-daily-background",
+        ) as executor:
             for stock_code in codes:
                 factor_future: Future[BackgroundTaskResult] | None = None
                 if needs_adjust_factor_api:
@@ -378,6 +388,7 @@ def update_daily(
             while pending:
                 drain_completed(block=True)
 
+    store.close()
     if build_views:
         DuckDBStore(root=config.root).build_views()
     return run_records

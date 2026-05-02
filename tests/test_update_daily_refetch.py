@@ -79,6 +79,60 @@ def test_update_daily_refetches_full_history_when_lookback_is_empty(
     assert [item["row_count"] for item in daily_records] == [2, 2, 2]
 
 
+def test_update_daily_does_not_refetch_when_overlap_values_match_with_different_dtypes(
+    tmp_path,
+    monkeypatch,
+    daily_sample,
+    stock_basic_sample,
+) -> None:
+    _write_settings(tmp_path)
+    store = ParquetStore(root=tmp_path)
+    store.ensure_layout()
+    code = "sh.600000"
+    existing = daily_sample().assign(code=code, adjustflag="3")
+    store.write_daily_k("daily_k_none", code, existing)
+
+    target_day = existing.iloc[[1]].copy()
+    target_day.loc[:, "date"] = "2024-01-04"
+    target_day.loc[:, "open"] = 8.3
+    target_day.loc[:, "high"] = 8.5
+    target_day.loc[:, "low"] = 8.2
+    target_day.loc[:, "close"] = 8.4
+    target_day.loc[:, "preclose"] = 8.3
+    target_day.loc[:, "volume"] = 1300
+    target_day.loc[:, "amount"] = 10920.0
+    target_day.loc[:, "pctChg"] = 1.2048
+    provider_daily = pd.concat([existing, target_day], ignore_index=True).astype(str)
+
+    provider_factory, state = _fake_provider_factory(stock_basic_sample(), provider_daily)
+    monkeypatch.setattr(update_daily_module, "create_provider", provider_factory)
+
+    records = update_daily_module.update_daily(
+        dataset="daily_k_none",
+        code=code,
+        end="2024-01-04",
+        lookback_days=2,
+        root=tmp_path,
+        build_views=False,
+    )
+
+    assert state["history_params"] == [
+        {
+            "code": code,
+            "start_date": "2024-01-02",
+            "end_date": "2024-01-04",
+            "adjustflag": "3",
+        },
+    ]
+    assert [item["start_date"] for item in records if item["dataset"] == "daily_k_none"] == ["2024-01-02"]
+    stored = store.read_daily_k("daily_k_none", code)
+    assert pd.to_datetime(stored["date"], errors="coerce").dt.strftime("%Y-%m-%d").tolist() == [
+        "2024-01-02",
+        "2024-01-03",
+        "2024-01-04",
+    ]
+
+
 def test_update_daily_adjust_factor_change_recomputes_adjusted_without_full_refetch(
     tmp_path,
     monkeypatch,

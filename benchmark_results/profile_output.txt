@@ -1,0 +1,38 @@
+         1085399 function calls (1057550 primitive calls) in 8.690 seconds
+
+   Ordered by: cumulative time
+   List reduced from 1812 to 30 due to restriction <30>
+
+   ncalls  tottime  percall  cumtime  percall filename:lineno(function)
+  443/322    0.025    0.000   29.744    0.092 C:\Users\孙弈 Sun Yi\AppData\Local\Python\pythoncore-3.14-64\Lib\site-packages\pandas\core\frame.py:4559(__setitem__)
+  858/250    0.045    0.000   17.849    0.071 C:\Users\孙弈 Sun Yi\AppData\Local\Python\pythoncore-3.14-64\Lib\site-packages\pandas\core\internals\blocks.py:817(<genexpr>)
+  715/211    0.028    0.000   17.012    0.081 C:\Users\孙弈 Sun Yi\AppData\Local\Python\pythoncore-3.14-64\Lib\site-packages\pandas\core\array_algos\replace.py:46(compare_or_regex_search)
+  443/387    0.013    0.000   14.193    0.037 C:\Users\孙弈 Sun Yi\AppData\Local\Python\pythoncore-3.14-64\Lib\site-packages\pandas\core\frame.py:4862(_set_item)
+  513/420    0.065    0.000   14.079    0.034 C:\Users\孙弈 Sun Yi\AppData\Local\Python\pythoncore-3.14-64\Lib\site-packages\pandas\core\indexes\base.py:2457(is_unique)
+  443/387    0.024    0.000   13.987    0.036 C:\Users\孙弈 Sun Yi\AppData\Local\Python\pythoncore-3.14-64\Lib\site-packages\pandas\core\frame.py:4846(_set_item_mgr)
+  715/212    0.017    0.000   10.926    0.052 C:\Users\孙弈 Sun Yi\AppData\Local\Python\pythoncore-3.14-64\Lib\site-packages\pandas\core\array_algos\replace.py:87(<lambda>)
+  715/212    0.037    0.000   10.670    0.050 {built-in method _operator.eq}
+        1    0.001    0.001    8.690    8.690 C:\PycharmProjects\quant_data_center\src\pipeline\update_daily.py:51(update_daily)
+       45    0.001    0.000    8.652    0.192 C:\Users\孙弈 Sun Yi\AppData\Local\Python\pythoncore-3.14-64\Lib\threading.py:1097(join)
+       45    0.004    0.000    8.580    0.191 {method 'join' of '_thread._ThreadHandle' objects}
+       11    0.000    0.000    8.536    0.776 C:\Users\孙弈 Sun Yi\AppData\Local\Python\pythoncore-3.14-64\Lib\concurrent\futures\_base.py:666(__exit__)
+       11    0.001    0.000    8.473    0.770 C:\Users\孙弈 Sun Yi\AppData\Local\Python\pythoncore-3.14-64\Lib\concurrent\futures\thread.py:254(shutdown)
+       11    0.000    0.000    8.007    0.728 C:\PycharmProjects\quant_data_center\src\pipeline\update_daily.py:244(drain_completed)
+        6    0.001    0.000    8.004    1.334 C:\Users\孙弈 Sun Yi\AppData\Local\Python\pythoncore-3.14-64\Lib\concurrent\futures\_base.py:257(wait)
+    51/11    0.003    0.000    8.001    0.727 C:\Users\孙弈 Sun Yi\AppData\Local\Python\pythoncore-3.14-64\Lib\threading.py:651(wait)
+   138/30    0.008    0.000    7.997    0.267 C:\PycharmProjects\quant_data_center\src\storage\parquet_store.py:153(_replace_null_like)
+   173/16    0.004    0.000    7.982    0.499 C:\Users\孙弈 Sun Yi\AppData\Local\Python\pythoncore-3.14-64\Lib\threading.py:337(wait)
+     45/1    0.001    0.000    7.969    7.969 C:\Users\孙弈 Sun Yi\AppData\Local\Python\pythoncore-3.14-64\Lib\threading.py:1030(_bootstrap)
+     45/1    0.004    0.000    7.969    7.969 C:\Users\孙弈 Sun Yi\AppData\Local\Python\pythoncore-3.14-64\Lib\threading.py:1065(_bootstrap_inner)
+     45/1    0.004    0.000    7.969    7.969 {method 'run' of '_contextvars.Context' objects}
+     70/8    0.005    0.000    7.968    0.996 {method 'get' of '_queue.SimpleQueue' objects}
+     45/1    0.001    0.000    7.967    7.967 C:\Users\孙弈 Sun Yi\AppData\Local\Python\pythoncore-3.14-64\Lib\threading.py:1013(run)
+     45/1    0.002    0.000    7.967    7.967 C:\Users\孙弈 Sun Yi\AppData\Local\Python\pythoncore-3.14-64\Lib\concurrent\futures\thread.py:97(_worker)
+   286/35    0.028    0.000    7.730    0.221 C:\Users\孙弈 Sun Yi\AppData\Local\Python\pythoncore-3.14-64\Lib\site-packages\pandas\core\generic.py:7387(replace)
+  378/115    0.014    0.000    7.644    0.066 C:\PycharmProjects\quant_data_center\src\storage\parquet_store.py:125(_coerce_series)
+    187/2    0.005    0.000    7.556    3.778 C:\Users\孙弈 Sun Yi\AppData\Local\Python\pythoncore-3.14-64\Lib\concurrent\futures\thread.py:81(run)
+    187/2    0.005    0.000    7.555    3.778 C:\Users\孙弈 Sun Yi\AppData\Local\Python\pythoncore-3.14-64\Lib\concurrent\futures\thread.py:71(run)
+  560/221    0.055    0.000    7.398    0.033 C:\Users\孙弈 Sun Yi\AppData\Local\Python\pythoncore-3.14-64\Lib\site-packages\pandas\core\internals\managers.py:396(apply)
+  951/876    0.020    0.000    7.220    0.008 C:\Users\孙弈 Sun Yi\AppData\Local\Python\pythoncore-3.14-64\Lib\site-packages\pandas\core\frame.py:4337(__getitem__)
+
+

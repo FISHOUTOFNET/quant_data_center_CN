@@ -19,9 +19,9 @@ from src.pipeline.adjustments import (
 from src.pipeline.common import (
     FULL_HISTORY_START_DATE,
     PIPELINE_UPDATE_DAILY,
+    checkpoint_row,
     daily_frames_differ_on_overlap,
     merge_daily_frames,
-    write_checkpoint,
 )
 from src.pipeline.services import PipelineMetadataBatch
 from src.pipeline.update_daily_frames import (
@@ -30,7 +30,6 @@ from src.pipeline.update_daily_frames import (
     _log_daily_frame,
 )
 from src.pipeline.update_daily_metadata import (
-    _persist_run_status,
     _run_row,
     _status_row,
     _write_daily_failure,
@@ -80,9 +79,9 @@ class _DailyUpdateBackgroundWorker:
     ) -> BackgroundTaskResult:
         try:
             existing = self._store.read_adjust_factor(code)
-            changed = _adjust_factor_frames_differ(self._store, existing, fetched)
-            output_path = self._store.write_adjust_factor(code, fetched)
-            stored = self._store.read_adjust_factor(code)
+            stored = self._store.clean_adjust_factor_frame(code, fetched)
+            changed = _adjust_factor_frames_differ(self._store, existing, stored)
+            output_path = self._store.write_adjust_factor(code, stored)
             run_row = _run_row(
                 ADJUST_FACTOR_DATASET,
                 code,
@@ -95,22 +94,17 @@ class _DailyUpdateBackgroundWorker:
                 "",
             )
             status_row = _status_row(ADJUST_FACTOR_DATASET, code, self._end_date, len(stored), "success", "")
-
-            def persist_metadata() -> None:
-                _persist_run_status(self._store, run_row, status_row)
-                write_checkpoint(
-                    self._store,
-                    PIPELINE_UPDATE_DAILY,
-                    ADJUST_FACTOR_DATASET,
-                    code,
-                    FULL_HISTORY_START_DATE,
-                    self._end_date,
-                    "success",
-                    len(stored),
-                    output_path,
-                )
-
-            self._metadata_batch.run_serialized(persist_metadata)
+            checkpoint = checkpoint_row(
+                PIPELINE_UPDATE_DAILY,
+                ADJUST_FACTOR_DATASET,
+                code,
+                FULL_HISTORY_START_DATE,
+                self._end_date,
+                "success",
+                len(stored),
+                output_path,
+            )
+            self._metadata_batch.add(run_row=run_row, status_row=status_row, checkpoint=checkpoint)
             self._set_factor_state(code, _AdjustFactorState(stored, changed, None))
             return BackgroundTaskResult(run_records=[run_row])
         except Exception:
@@ -144,23 +138,19 @@ class _DailyUpdateBackgroundWorker:
             error_stack,
         )
         status_row = _status_row(ADJUST_FACTOR_DATASET, code, None, 0, "failed", error_stack)
+        checkpoint = checkpoint_row(
+            PIPELINE_UPDATE_DAILY,
+            ADJUST_FACTOR_DATASET,
+            code,
+            FULL_HISTORY_START_DATE,
+            self._end_date,
+            "failed",
+            0,
+            output_path,
+            error_stack,
+        )
         try:
-            def persist_metadata() -> None:
-                _persist_run_status(self._store, run_row, status_row)
-                write_checkpoint(
-                    self._store,
-                    PIPELINE_UPDATE_DAILY,
-                    ADJUST_FACTOR_DATASET,
-                    code,
-                    FULL_HISTORY_START_DATE,
-                    self._end_date,
-                    "failed",
-                    0,
-                    output_path,
-                    error_stack,
-                )
-
-            self._metadata_batch.run_serialized(persist_metadata)
+            self._metadata_batch.add(run_row=run_row, status_row=status_row, checkpoint=checkpoint)
         except Exception:
             logger.exception("Failed to persist adjust factor failure for {}", code)
 
