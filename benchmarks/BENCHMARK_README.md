@@ -6,7 +6,7 @@ This directory contains comprehensive performance benchmarks for the `update_dai
 
 The benchmark suite is designed to identify performance bottlenecks in the following areas. The current `update_daily`
 implementation keeps provider API calls on the main thread and overlaps storage/dataframe work through a background
-worker pool (`pipeline.background_workers`, default `4`).
+worker pool (`pipeline.background_workers`, default `3`).
 
 1. **API Calls** - Measure latency and throughput of Baostock API calls
 2. **I/O Operations** - Measure Parquet file read/write performance

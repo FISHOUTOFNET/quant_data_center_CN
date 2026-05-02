@@ -7,8 +7,10 @@ from datetime import date
 
 import pandas as pd
 
+import src.pipeline.update_akshare as update_akshare_module
 from src.api.akshare_client import AkShareCircuitOpen, AkShareResponse, dataframe_hash
 from src.pipeline.akshare_tasks import plan_akshare_tasks
+from src.pipeline.common import write_checkpoint
 from src.pipeline.update_akshare import _AdaptiveConcurrencyController, update_akshare
 from src.storage.parquet_store import ParquetStore
 from src.utils.config_mgr import ConfigManager
@@ -87,6 +89,7 @@ def test_update_akshare_stock_value_partial_active_only_resume_and_force(
     store = ParquetStore(root=tmp_path)
     store.ensure_layout()
     store.write_stock_basic(stock_basic_sample())
+    _write_calendar(store, "2024-01-03")
     client = FakeAkShareClient(stock_value_em_sample, stock_institute_hold_sample)
 
     records = update_akshare(
@@ -100,6 +103,8 @@ def test_update_akshare_stock_value_partial_active_only_resume_and_force(
     assert client.value_calls == ["600000"]
     assert [item["status"] for item in records] == ["success"]
     assert store.stock_value_em_path("600000").exists()
+    manifest_count = len(_manifest_rows(tmp_path))
+    checkpoint_count = len(store.read_pipeline_checkpoints())
 
     client.value_calls.clear()
     records = update_akshare(
@@ -111,7 +116,9 @@ def test_update_akshare_stock_value_partial_active_only_resume_and_force(
     )
 
     assert client.value_calls == []
-    assert [item["status"] for item in records] == ["skipped_checkpoint"]
+    assert records == []
+    assert len(_manifest_rows(tmp_path)) == manifest_count
+    assert len(store.read_pipeline_checkpoints()) == checkpoint_count
 
     records = update_akshare(
         dataset="stock_value_em",
@@ -133,6 +140,66 @@ def test_update_akshare_stock_value_partial_active_only_resume_and_force(
     assert manifest_rows[-1]["params"] == {"symbol": "600000"}
     assert manifest_rows[-1]["status"] == "success"
     assert manifest_rows[-1]["raw_path"]
+
+
+def test_stock_value_prefilter_kept_task_ignores_checkpoint_and_logs_unchanged(
+    tmp_path,
+    stock_basic_sample,
+    stock_value_em_sample,
+    stock_institute_hold_sample,
+    monkeypatch,
+) -> None:
+    _write_settings(tmp_path)
+    store = ParquetStore(root=tmp_path)
+    store.ensure_layout()
+    store.write_stock_basic(stock_basic_sample())
+    _write_calendar(store, "2024-01-04")
+    existing_path = store.write_stock_value_em("600000", stock_value_em_sample("600000"))
+    write_checkpoint(
+        store,
+        update_akshare_module.PIPELINE_UPDATE_AKSHARE,
+        "stock_value_em",
+        "600000",
+        "2024-01-02",
+        "2024-01-03",
+        "success",
+        2,
+        existing_path,
+    )
+    client = FakeAkShareClient(stock_value_em_sample, stock_institute_hold_sample)
+    logs = []
+
+    class FakeLogger:
+        def info(self, message, *args, **kwargs) -> None:
+            logs.append((message, args))
+
+        def warning(self, message, *args, **kwargs) -> None:
+            return None
+
+        def error(self, message, *args, **kwargs) -> None:
+            return None
+
+        def exception(self, message, *args, **kwargs) -> None:
+            return None
+
+    monkeypatch.setattr(update_akshare_module, "logger", FakeLogger())
+
+    records = update_akshare(
+        dataset="stock_value_em",
+        mode="partial",
+        code=("600000",),
+        root=tmp_path,
+        build_views=False,
+        workers=1,
+        client=client,
+    )
+
+    assert client.value_calls == ["600000"]
+    assert [item["status"] for item in records] == ["success"]
+    assert (
+        "AkShare stock_value_em unchanged code={} rows={} path={}",
+        ("600000", 2, existing_path),
+    ) in logs
 
 
 def test_update_akshare_stock_value_full_and_max_tasks(
@@ -405,6 +472,15 @@ def _response(endpoint: str, params: dict[str, object], data: pd.DataFrame) -> A
 def _manifest_rows(root) -> list[dict[str, object]]:
     path = root / "data" / "raw" / "akshare" / "manifest" / "fetch_runs.jsonl"
     return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+
+
+def _write_calendar(store: ParquetStore, latest_date: str) -> None:
+    dates = list(dict.fromkeys(["2024-01-02", "2024-01-03", latest_date]))
+    store.write_calendar(
+        pd.DataFrame(
+            [{"calendar_date": item, "is_trading_day": "1"} for item in dates]
+        )
+    )
 
 
 def _write_settings(root, lookback_quarters: int = 2) -> None:

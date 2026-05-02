@@ -25,8 +25,8 @@ from src.utils.config_mgr import ConfigManager
 class AkShareTask:
     dataset: str
     key: str
-    start_date: str
-    end_date: str
+    start_date: str | None
+    end_date: str | None
     output_path: Path
     report_period: str | None = None
     code: str | None = None
@@ -133,19 +133,40 @@ def _stock_value_em_tasks(
             raise ValueError("No stock codes found in stock_basic data")
 
     codes = list(dict.fromkeys(code_to_akshare_symbol(item, code_maps) for item in raw_codes))
-    today_iso = date.today().isoformat()
-    return [
-        AkShareTask(
-            dataset=STOCK_VALUE_EM_DATASET.name,
-            key=stock_code,
-            code=stock_code,
-            start_date="1990-01-01",
-            end_date=today_iso,
-            output_path=store.stock_value_em_path(stock_code),
-            active=stock_code in active_codes,
+    tasks: list[AkShareTask] = []
+    for stock_code in codes:
+        output_path = store.stock_value_em_path(stock_code)
+        start_date, end_date = _stock_value_em_date_range(store, stock_code)
+        tasks.append(
+            AkShareTask(
+                dataset=STOCK_VALUE_EM_DATASET.name,
+                key=stock_code,
+                code=stock_code,
+                start_date=start_date,
+                end_date=end_date,
+                output_path=output_path,
+                active=stock_code in active_codes,
+            )
         )
-        for stock_code in codes
-    ]
+    return tasks
+
+
+def _stock_value_em_date_range(
+    store: ParquetStore,
+    code: str,
+) -> tuple[str | None, str | None]:
+    path = store.stock_value_em_path(code)
+    if not path.exists():
+        return None, None
+    df = store.read_stock_value_em(code)
+    if df.empty or "date" not in df.columns:
+        return None, None
+    dates = df["date"]
+    if dates.empty:
+        return None, None
+    min_date = str(dates.min())
+    max_date = str(dates.max())
+    return min_date, max_date
 
 
 def _stock_value_em_stock_basic_codes(stock_basic_df, include_inactive: bool) -> list[str]:

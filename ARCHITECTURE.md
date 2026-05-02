@@ -389,6 +389,7 @@ api:
       hfq: "1"
   akshare:
     max_retries: 3
+    workers: 3                    # stock_value_em 并发拉取 worker 数量
     jitter_seconds: [2, 8]
     lookback_quarters: 8
     endpoints:
@@ -426,7 +427,7 @@ pipeline:
   max_retries: 3         # API 调用最大重试次数
   default_code: sh.600000
   metadata_flush_size: 200  # 元数据批量写入阈值
-  background_workers: 3      # 后台处理线程数；background_max_pending 未配置时默认为该值的 4 倍
+  background_workers: 4      # 后台处理线程数；background_max_pending 未配置时默认为该值的 4 倍
   # background_max_pending: 16  # 后台待处理任务上限（默认 background_workers * 4）
 
 storage:
@@ -800,7 +801,7 @@ def should_skip_checkpoint(
 **实现**：
 
 ```python
-background_workers = max(int(config.get("pipeline.background_workers", 3)), 1)
+background_workers = max(int(config.get("pipeline.background_workers", 4)), 1)
 background_max_pending = max(
     int(config.get("pipeline.background_max_pending", background_workers * 4)),
     1,
@@ -811,7 +812,7 @@ with ThreadPoolExecutor(max_workers=background_workers) as executor:
     # drain completed futures and keep run_records ordered
 ```
 
-默认配置为 3 个后台 worker；如果未显式配置 `pipeline.background_max_pending`，待处理任务上限为 `background_workers * 4`。前/后复权日线任务会等待同一股票的复权因子任务完成后再计算。
+默认配置为 4 个后台 worker；如果未显式配置 `pipeline.background_max_pending`，待处理任务上限为 `background_workers * 4`。前/后复权日线任务会等待同一股票的复权因子任务完成后再计算。
 
 **主线程-工作线程协作**：
 
@@ -890,6 +891,41 @@ def _stock_value_em_unchanged(store: ParquetStore, code: str, df: pd.DataFrame) 
     existing = store.clean_dataframe_for_schema(existing, STOCK_VALUE_EM_DATASET.schema)
     return dataframe_hash(existing) == dataframe_hash(cleaned)
 ```
+
+**并发拉取机制**：
+
+`stock_value_em` 数据集支持并发拉取，通过 `_AdaptiveConcurrencyController` 实现自适应并发控制：
+
+```python
+class _AdaptiveConcurrencyController:
+    """Conservative fetch concurrency control for crawler-style AkShare endpoints."""
+    
+    def __init__(
+        self,
+        max_workers: int,
+        window_size: int = 20,
+        failure_rate_threshold: float = 0.15,
+        recovery_successes: int = 50,
+        consecutive_failure_threshold: int = 3,
+    ) -> None:
+        # ...
+    
+    def record_fetch_result(self, success: bool) -> None:
+        # 根据成功率动态调整并发度
+```
+
+**控制策略**：
+- **降速条件**：
+  - 连续失败次数达到 `consecutive_failure_threshold`（默认 3 次）
+  - 滑动窗口内失败率超过 `failure_rate_threshold`（默认 15%）
+- **提速条件**：
+  - 连续成功次数达到 `recovery_successes`（默认 50 次）
+- **并发度范围**：1 到 `max_workers`（由 `api.akshare.workers` 配置）
+
+**优势**：
+- 根据源站响应能力自动调整并发度
+- 避免过载导致被限流
+- 在网络状况良好时最大化吞吐量
 
 ### 5.8 DuckDB 查询层
 
@@ -1006,6 +1042,7 @@ qdc update-akshare --dataset stock_value_em --code sh.600000
 - `--code`：股票代码（可重复；仅对 stock_value_em 生效）
 - `--include-inactive`：在 partial 模式的 stock_value_em 中包含非活跃/非普通股票
 - `--max-tasks`：最大任务数
+- `--workers`：并发拉取 worker 数量（仅对 stock_value_em 生效），默认使用 `api.akshare.workers`
 - `--resume/--no-resume`：启用续传（默认启用）
 - `--force`：强制重新拉取
 - `--build-views/--no-build-views`：完成后构建视图（默认启用）
@@ -1226,34 +1263,43 @@ endlocal
 │   AkShareClient     │ (熔断、重试、抖动、字段映射)
 └────────┬────────────┘
          │
-         ▼
-┌─────────────────────┐
-│   AkShare API       │ (stock_institute_hold / stock_value_em)
-└────────┬────────────┘
-         │
-         ├──────────────┐
-         │              │
-         ▼              ▼
+         ├──────────────────────┐
+         │                      │
+         ▼                      ▼
+┌─────────────────┐  ┌─────────────────────┐
+│ stock_institute │  │ stock_value_em      │ (并发拉取)
+│ _hold (串行)    │  │ ThreadPoolExecutor  │
+└────────┬────────┘  │ + AdaptiveCtrl      │
+         │           └────────┬────────────┘
+         │                    │
+         ▼                    ▼
 ┌─────────────────┐  ┌─────────────────┐
-│  Validators     │  │ Raw Archive     │ (原始响应归档)
-└────────┬────────┘  └─────────────────┘
-         │
-         ▼
-┌─────────────────────┐
-│  ParquetStore       │ (原子写入+重试)
-└────────┬────────────┘
-         │
-         ├──────────────┐
-         │              │
-         ▼              ▼
-┌─────────────────┐  ┌─────────────────┐
-│  Parquet Files  │  │MetadataBatch    │ (批量元数据写入)
-└────────┬────────┘  └─────────────────┘
-         │              │
-         ▼              ▼
-┌─────────────────┐  ┌─────────────────┐
-│   DuckDB Views  │  │ DuckDB Metadata │
-└─────────────────┘  └─────────────────┘
+│   AkShare API   │  │   AkShare API   │
+└────────┬────────┘  └────────┬────────┘
+         │                    │
+         └────────┬───────────┘
+                  │
+                  ▼
+         ┌─────────────────┐
+         │   Validators    │
+         └────────┬────────┘
+                  │
+                  ▼
+         ┌─────────────────────┐
+         │  ParquetStore       │
+         └────────┬────────────┘
+                  │
+                  ├──────────────┐
+                  │              │
+                  ▼              ▼
+         ┌─────────────────┐  ┌─────────────────┐
+         │  Parquet Files  │  │MetadataBatch    │
+         └────────┬────────┘  └─────────────────┘
+                  │              │
+                  ▼              ▼
+         ┌─────────────────┐  ┌─────────────────┐
+         │   DuckDB Views  │  │ DuckDB Metadata │
+         └─────────────────┘  └─────────────────┘
 ```
 
 ### 10.3 续传检查流程
@@ -1347,6 +1393,8 @@ AkShare 接口可能因源站变更导致字段名变化。系统通过字段别
 - **批量元数据写入**：减少 DuckDB 元数据事务次数
 - **跨 pipeline checkpoint 识别**：避免不同模式间的重复执行
 - **AkShare 数据去重**：`stock_value_em` 更新时比较哈希值，数据未变化时跳过写入
+- **AkShare 并发拉取**：stock_value_em 支持并发拉取，通过线程池和自适应并发控制器优化性能
+- **自适应并发控制**：根据请求成功率动态调整并发度，避免过载和被限流
 
 ### 12.4 内存优化
 

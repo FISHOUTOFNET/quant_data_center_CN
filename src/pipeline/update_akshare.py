@@ -40,6 +40,67 @@ from src.utils.logging import logger
 PIPELINE_UPDATE_AKSHARE = "update_akshare"
 
 
+def _get_latest_calendar_date(store: ParquetStore) -> str | None:
+    calendar_df = store.read_calendar()
+    if calendar_df.empty or "calendar_date" not in calendar_df.columns:
+        return None
+    dates = calendar_df["calendar_date"]
+    if dates.empty:
+        return None
+    return str(dates.max())
+
+
+def _prefilter_stock_value_em_tasks(
+    tasks: list[AkShareTask],
+    store: ParquetStore,
+    checkpoint_lookup: PipelineCheckpointLookup | None,
+) -> list[AkShareTask]:
+    if checkpoint_lookup is None or not tasks:
+        return list(tasks)
+
+    latest_calendar_date = _get_latest_calendar_date(store)
+    if latest_calendar_date is None:
+        logger.warning("Calendar is empty, cannot prefilter stock_value_em tasks")
+        return list(tasks)
+
+    remaining_tasks: list[AkShareTask] = []
+    skipped_count = 0
+    calendar_warning_shown = False
+
+    for task in tasks:
+        if task.end_date is None:
+            remaining_tasks.append(task)
+            continue
+
+        if task.end_date >= latest_calendar_date:
+            if not task.output_path.exists():
+                remaining_tasks.append(task)
+                continue
+            if task.end_date > latest_calendar_date and not calendar_warning_shown:
+                logger.warning(
+                    "Local calendar is outdated (latest: {}). "
+                    "Some stock_value_em data has dates beyond calendar. "
+                    "Run 'python -m src.cli update-daily --include-calendar' to update calendar.",
+                    latest_calendar_date,
+                )
+                calendar_warning_shown = True
+            skipped_count += 1
+            continue
+
+        remaining_tasks.append(task)
+
+    if skipped_count:
+        skipped_ratio = skipped_count / len(tasks) * 100
+        logger.info(
+            "Checkpoint prefilter skipped {}/{} stock_value_em tasks ({:.1f}%); processing {} tasks",
+            skipped_count,
+            len(tasks),
+            skipped_ratio,
+            len(remaining_tasks),
+        )
+    return remaining_tasks
+
+
 def update_akshare(
     dataset: str = "all",
     mode: str = "partial",
@@ -88,6 +149,11 @@ def update_akshare(
     run_records: list[dict[str, object]] = []
     concurrent_stock_value_tasks: list[AkShareTask] = []
 
+    stock_value_em_tasks = [t for t in tasks if t.dataset == STOCK_VALUE_EM_DATASET.name]
+    other_tasks = [t for t in tasks if t.dataset != STOCK_VALUE_EM_DATASET.name]
+    stock_value_em_tasks = _prefilter_stock_value_em_tasks(stock_value_em_tasks, store, checkpoint_lookup)
+    tasks = other_tasks + stock_value_em_tasks
+
     def flush_concurrent_stock_value_tasks() -> None:
         if not concurrent_stock_value_tasks:
             return
@@ -102,7 +168,7 @@ def update_akshare(
         concurrent_stock_value_tasks.clear()
 
     for task in tasks:
-        if should_skip_checkpoint(
+        if task.dataset != STOCK_VALUE_EM_DATASET.name and should_skip_checkpoint(
             store,
             PIPELINE_UPDATE_AKSHARE,
             task.dataset,
@@ -505,6 +571,12 @@ def _write_task_data(store: ParquetStore, task: AkShareTask, df: pd.DataFrame) -
         if df.empty and task.active:
             raise AkShareEmptyDataError(f"stock_value_em returned empty data for active code {task.code}")
         if _stock_value_em_unchanged(store, task.code, df):
+            logger.info(
+                "AkShare stock_value_em unchanged code={} rows={} path={}",
+                task.code,
+                len(df),
+                task.output_path,
+            )
             return task.output_path, len(df), _max_date_iso(df) or task.end_date
         output_path = store.write_stock_value_em(task.code, df)
         return output_path, len(df), _max_date_iso(df) or task.end_date
