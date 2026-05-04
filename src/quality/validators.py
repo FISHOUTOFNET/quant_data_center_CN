@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+import re
 
 import pandas as pd
 import pyarrow as pa
@@ -12,8 +12,11 @@ from src.storage.schema import (
     CALENDAR_SCHEMA,
     DAILY_K_SCHEMA,
     STOCK_BASIC_SCHEMA,
-    STOCK_INSTITUTE_HOLD_SCHEMA,
+    STOCK_INFO_SH_DELIST_SCHEMA,
     STOCK_VALUE_EM_SCHEMA,
+    STOCK_ZH_A_HIST_SCHEMA,
+    STOCK_ZH_A_SPOT_EM_SCHEMA,
+    STOCK_ZH_A_SPOT_SINA_SCHEMA,
     field_names,
 )
 from src.utils.logging import logger
@@ -21,6 +24,9 @@ from src.utils.logging import logger
 
 class ValidationError(ValueError):
     """Raised when a dataframe violates a storage contract."""
+
+
+AKSHARE_CODE_RE = re.compile(r"^\d{6}$")
 
 
 def validate_schema_matches(df: pd.DataFrame, schema: pa.Schema) -> None:
@@ -41,6 +47,23 @@ def validate_unique_code_date(df: pd.DataFrame) -> None:
         raise ValidationError(f"Duplicate code/date rows found: {sample}")
 
 
+def validate_unique_columns(df: pd.DataFrame, columns: list[str]) -> None:
+    duplicated = df.duplicated(columns, keep=False)
+    if duplicated.any():
+        sample = df.loc[duplicated, columns].head(5).to_dict("records")
+        raise ValidationError(f"Duplicate rows found for {columns}: {sample}")
+
+
+def validate_akshare_six_digit_codes(df: pd.DataFrame) -> None:
+    if df.empty or "code" not in df.columns:
+        return
+    codes = df["code"].astype("string").str.strip()
+    invalid = codes.isna() | ~codes.map(lambda value: bool(AKSHARE_CODE_RE.fullmatch(str(value))))
+    if invalid.any():
+        sample = df.loc[invalid, ["code"]].head(5).to_dict("records")
+        raise ValidationError(f"AkShare code must be 6 digits: {sample}")
+
+
 def validate_date_monotonic(df: pd.DataFrame) -> None:
     if df.empty:
         return
@@ -51,12 +74,6 @@ def validate_date_monotonic(df: pd.DataFrame) -> None:
     for code, group in work.groupby("code", dropna=False, sort=False):
         if not group["_date"].is_monotonic_increasing:
             raise ValidationError(f"date is not monotonically increasing for code={code}")
-
-
-def _require_columns_not_null(df: pd.DataFrame, columns: Iterable[str]) -> None:
-    missing = [column for column in columns if df[column].isna().any()]
-    if missing:
-        raise ValidationError(f"Columns contain null values: {missing}")
 
 
 OHLC_RELATIVE_TOLERANCE = 1e-4
@@ -141,25 +158,50 @@ def validate_adjust_factor(df: pd.DataFrame, schema: pa.Schema = ADJUST_FACTOR_S
             raise ValidationError(f"dividOperateDate is not monotonically increasing for code={code}")
 
 
-def validate_stock_institute_hold(
-    df: pd.DataFrame,
-    schema: pa.Schema = STOCK_INSTITUTE_HOLD_SCHEMA,
-) -> None:
-    validate_schema_matches(df, schema)
-    duplicated = df.duplicated(["report_period", "code"], keep=False)
-    if duplicated.any():
-        sample = df.loc[duplicated, ["report_period", "code"]].head(5).to_dict("records")
-        raise ValidationError(f"Duplicate report_period/code rows found: {sample}")
-    if df.empty:
-        return
-    _require_columns_not_null(df, ["report_period", "period_end_date", "code"])
-
-
 def validate_stock_value_em(df: pd.DataFrame, schema: pa.Schema = STOCK_VALUE_EM_SCHEMA) -> None:
     validate_schema_matches(df, schema)
+    validate_akshare_six_digit_codes(df)
     validate_unique_code_date(df)
     validate_date_monotonic(df)
     validate_non_negative(df, "total_market_cap")
     validate_non_negative(df, "float_market_cap")
     validate_non_negative(df, "total_shares")
     validate_non_negative(df, "float_shares")
+
+
+def validate_stock_info_sh_delist(df: pd.DataFrame, schema: pa.Schema = STOCK_INFO_SH_DELIST_SCHEMA) -> None:
+    validate_schema_matches(df, schema)
+    validate_akshare_six_digit_codes(df)
+    validate_unique_columns(df, ["snapshot_date", "market", "code"])
+
+
+def validate_stock_zh_a_spot_em(df: pd.DataFrame, schema: pa.Schema = STOCK_ZH_A_SPOT_EM_SCHEMA) -> None:
+    validate_schema_matches(df, schema)
+    validate_akshare_six_digit_codes(df)
+    validate_unique_columns(df, ["trade_date", "code"])
+    for column in [
+        "latest_price",
+        "volume",
+        "amount",
+        "total_market_cap",
+        "float_market_cap",
+    ]:
+        validate_non_negative(df.rename(columns={"trade_date": "date"}), column)
+
+
+def validate_stock_zh_a_spot_sina(df: pd.DataFrame, schema: pa.Schema = STOCK_ZH_A_SPOT_SINA_SCHEMA) -> None:
+    validate_schema_matches(df, schema)
+    validate_akshare_six_digit_codes(df)
+    validate_unique_columns(df, ["trade_date", "code"])
+    for column in ["latest_price", "volume", "amount"]:
+        validate_non_negative(df.rename(columns={"trade_date": "date"}), column)
+
+
+def validate_stock_zh_a_hist(df: pd.DataFrame, schema: pa.Schema = STOCK_ZH_A_HIST_SCHEMA) -> None:
+    validate_schema_matches(df, schema)
+    validate_akshare_six_digit_codes(df)
+    validate_unique_columns(df, ["code", "date", "adjust"])
+    validate_date_monotonic(df)
+    validate_ohlc(df)
+    validate_non_negative(df, "volume")
+    validate_non_negative(df, "amount")

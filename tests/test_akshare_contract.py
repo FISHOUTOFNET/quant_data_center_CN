@@ -6,7 +6,6 @@ import pandas as pd
 import pytest
 
 from src.api.akshare_client import AkShareClient
-from src.pipeline.akshare_tasks import latest_disclosable_quarter
 
 
 pytestmark = pytest.mark.skipif(
@@ -20,21 +19,10 @@ class ContractConfig:
         values = {
             "api.akshare.max_retries": 3,
             "api.akshare.jitter_seconds": [0, 0],
-            "api.akshare.endpoints.stock_institute_hold.failure_threshold": 3,
-            "api.akshare.endpoints.stock_institute_hold.cooldown_minutes": 1,
             "api.akshare.endpoints.stock_value_em.failure_threshold": 3,
             "api.akshare.endpoints.stock_value_em.cooldown_minutes": 1,
         }
         return values.get(dotted_key, default)
-
-
-def test_akshare_contract_stock_institute_hold_recent_quarter() -> None:
-    client = AkShareClient(config=ContractConfig(), stock_basic_df=_contract_stock_basic())
-
-    df = client.query_stock_institute_hold(latest_disclosable_quarter())
-
-    assert not df.empty
-    assert {"report_period", "code", "institution_count"}.issubset(df.columns)
 
 
 def test_akshare_contract_stock_value_em_sample_stock() -> None:

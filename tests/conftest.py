@@ -22,11 +22,6 @@ def adjust_factor_sample():
 
 
 @pytest.fixture
-def stock_institute_hold_sample():
-    return _stock_institute_hold_sample
-
-
-@pytest.fixture
 def stock_value_em_sample():
     return _stock_value_em_sample
 
@@ -119,37 +114,6 @@ def _adjust_factor_sample() -> pd.DataFrame:
                 "backAdjustFactor": 1.0,
                 "adjustFactor": 1.0,
             }
-        ]
-    )
-
-
-def _stock_institute_hold_sample() -> pd.DataFrame:
-    return pd.DataFrame(
-        [
-            {
-                "report_period": "2024Q1",
-                "period_end_date": date(2024, 3, 31),
-                "code": "600000",
-                "code_name": "PF Bank",
-                "institution_count": 3,
-                "institution_count_change": 1,
-                "holding_ratio": 2.1,
-                "holding_ratio_change": 0.2,
-                "float_holding_ratio": 3.1,
-                "float_holding_ratio_change": 0.3,
-            },
-            {
-                "report_period": "2024Q1",
-                "period_end_date": date(2024, 3, 31),
-                "code": "000001",
-                "code_name": "PA Bank",
-                "institution_count": 2,
-                "institution_count_change": 0,
-                "holding_ratio": 1.1,
-                "holding_ratio_change": 0.0,
-                "float_holding_ratio": 1.5,
-                "float_holding_ratio_change": 0.1,
-            },
         ]
     )
 

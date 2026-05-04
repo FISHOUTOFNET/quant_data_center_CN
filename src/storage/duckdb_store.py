@@ -11,9 +11,9 @@ from src.storage.dataset_catalog import (
     ADJUST_FACTOR_DATASET,
     CALENDAR_DATASET,
     STOCK_BASIC_DATASET,
-    STOCK_INSTITUTE_HOLD_DATASET,
     STOCK_VALUE_EM_DATASET,
     DatasetDefinition,
+    akshare_a_stock_definitions,
     daily_k_definitions,
 )
 from src.utils import paths
@@ -47,8 +47,11 @@ class DuckDBStore:
                 for definition in daily_k_definitions()
             ],
             self._adjust_factor_view_sql(),
-            self._partitioned_dataset_view_sql(STOCK_INSTITUTE_HOLD_DATASET),
             self._partitioned_dataset_view_sql(STOCK_VALUE_EM_DATASET),
+            *[
+                self._partitioned_dataset_view_sql(definition)
+                for definition in akshare_a_stock_definitions()
+            ],
             self._stock_basic_view_sql(),
             self._calendar_view_sql(),
         ]

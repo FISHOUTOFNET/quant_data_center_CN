@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import threading
 import time
-from datetime import date
+from datetime import datetime
 
 import pandas as pd
 
@@ -19,26 +19,19 @@ from src.utils.config_mgr import ConfigManager
 class FakeAkShareClient:
     akshare_version = "fake-akshare"
 
-    def __init__(self, stock_value_em_sample, stock_institute_hold_sample) -> None:
+    def __init__(self, stock_value_em_sample) -> None:
         self.value_calls: list[str] = []
-        self.hold_calls: list[str] = []
         self._stock_value_em_sample = stock_value_em_sample
-        self._stock_institute_hold_sample = stock_institute_hold_sample
 
     def fetch_stock_value(self, code: str) -> AkShareResponse:
         self.value_calls.append(code)
         data = self._stock_value_em_sample(code)
         return _response("stock_value_em", {"symbol": code}, data)
 
-    def fetch_stock_institute_hold(self, period: str) -> AkShareResponse:
-        self.hold_calls.append(period)
-        data = self._stock_institute_hold_sample().assign(report_period=period)
-        return _response("stock_institute_hold", {"symbol": period.replace("Q", "")}, data)
-
 
 class OverlapAkShareClient(FakeAkShareClient):
-    def __init__(self, stock_value_em_sample, stock_institute_hold_sample, fail_codes: set[str] | None = None) -> None:
-        super().__init__(stock_value_em_sample, stock_institute_hold_sample)
+    def __init__(self, stock_value_em_sample, fail_codes: set[str] | None = None) -> None:
+        super().__init__(stock_value_em_sample)
         self._fail_codes = fail_codes or set()
         self._lock = threading.Lock()
         self._overlap_seen = threading.Event()
@@ -65,8 +58,8 @@ class OverlapAkShareClient(FakeAkShareClient):
 
 
 class CircuitOpenAkShareClient(FakeAkShareClient):
-    def __init__(self, stock_value_em_sample, stock_institute_hold_sample) -> None:
-        super().__init__(stock_value_em_sample, stock_institute_hold_sample)
+    def __init__(self, stock_value_em_sample) -> None:
+        super().__init__(stock_value_em_sample)
         self._lock = threading.Lock()
 
     def fetch_stock_value(self, code: str) -> AkShareResponse:
@@ -83,14 +76,14 @@ def test_update_akshare_stock_value_partial_active_only_resume_and_force(
     tmp_path,
     stock_basic_sample,
     stock_value_em_sample,
-    stock_institute_hold_sample,
 ) -> None:
     _write_settings(tmp_path)
     store = ParquetStore(root=tmp_path)
     store.ensure_layout()
     store.write_stock_basic(stock_basic_sample())
+    _write_akshare_universe(store)
     _write_calendar(store, "2024-01-03")
-    client = FakeAkShareClient(stock_value_em_sample, stock_institute_hold_sample)
+    client = FakeAkShareClient(stock_value_em_sample)
 
     records = update_akshare(
         dataset="stock_value_em",
@@ -146,13 +139,13 @@ def test_stock_value_prefilter_kept_task_ignores_checkpoint_and_logs_unchanged(
     tmp_path,
     stock_basic_sample,
     stock_value_em_sample,
-    stock_institute_hold_sample,
     monkeypatch,
 ) -> None:
     _write_settings(tmp_path)
     store = ParquetStore(root=tmp_path)
     store.ensure_layout()
     store.write_stock_basic(stock_basic_sample())
+    _write_akshare_universe(store)
     _write_calendar(store, "2024-01-04")
     existing_path = store.write_stock_value_em("600000", stock_value_em_sample("600000"))
     write_checkpoint(
@@ -166,7 +159,7 @@ def test_stock_value_prefilter_kept_task_ignores_checkpoint_and_logs_unchanged(
         2,
         existing_path,
     )
-    client = FakeAkShareClient(stock_value_em_sample, stock_institute_hold_sample)
+    client = FakeAkShareClient(stock_value_em_sample)
     logs = []
 
     class FakeLogger:
@@ -206,13 +199,13 @@ def test_update_akshare_stock_value_full_and_max_tasks(
     tmp_path,
     stock_basic_sample,
     stock_value_em_sample,
-    stock_institute_hold_sample,
 ) -> None:
     _write_settings(tmp_path)
     store = ParquetStore(root=tmp_path)
     store.ensure_layout()
     store.write_stock_basic(stock_basic_sample())
-    client = FakeAkShareClient(stock_value_em_sample, stock_institute_hold_sample)
+    _write_akshare_universe(store)
+    client = FakeAkShareClient(stock_value_em_sample)
 
     update_akshare(
         dataset="stock_value_em",
@@ -227,32 +220,15 @@ def test_update_akshare_stock_value_full_and_max_tasks(
     assert client.value_calls == ["600000", "000001"]
 
 
-def test_stock_value_task_pool_excludes_non_common_types_in_full_and_include_inactive(
+def test_stock_value_task_pool_uses_akshare_universe_and_filters_delisted_incremental(
     tmp_path,
     stock_basic_sample,
 ) -> None:
     _write_settings(tmp_path)
     store = ParquetStore(root=tmp_path)
     store.ensure_layout()
-    stock_basic = pd.concat(
-        [
-            stock_basic_sample(),
-            pd.DataFrame(
-                [
-                    {
-                        "code": "sh.000044",
-                        "code_name": "SSE Midcap",
-                        "ipoDate": date(2009, 7, 3),
-                        "outDate": None,
-                        "type": "2",
-                        "status": "1",
-                    },
-                ]
-            ),
-        ],
-        ignore_index=True,
-    )
-    store.write_stock_basic(stock_basic)
+    store.write_stock_basic(stock_basic_sample())
+    _write_akshare_universe(store, spot_codes=("600000", "000001"), delisted_codes=("000001",))
     config = ConfigManager(tmp_path)
 
     partial = plan_akshare_tasks(config=config, store=store, dataset="stock_value_em", mode="partial")
@@ -270,53 +246,16 @@ def test_stock_value_task_pool_excludes_non_common_types_in_full_and_include_ina
     assert [task.code for task in full] == ["600000", "000001"]
 
 
-def test_update_akshare_stock_institute_hold_partial_and_full_task_selection(
-    tmp_path,
-    stock_basic_sample,
-    stock_value_em_sample,
-    stock_institute_hold_sample,
-) -> None:
-    _write_settings(tmp_path, lookback_quarters=2)
-    store = ParquetStore(root=tmp_path)
-    store.ensure_layout()
-    store.write_stock_basic(stock_basic_sample())
-    client = FakeAkShareClient(stock_value_em_sample, stock_institute_hold_sample)
-
-    update_akshare(
-        dataset="stock_institute_hold",
-        mode="partial",
-        end_quarter="2024Q2",
-        max_tasks=1,
-        root=tmp_path,
-        build_views=False,
-        client=client,
-    )
-
-    assert client.hold_calls == ["2024Q1"]
-    assert store.stock_institute_hold_path("2024Q1").exists()
-
-    tasks = plan_akshare_tasks(
-        config=ConfigManager(tmp_path),
-        store=store,
-        dataset="stock_institute_hold",
-        mode="full",
-        start_quarter="2024Q1",
-        end_quarter="2024Q2",
-    )
-    assert [task.report_period for task in tasks] == ["2024Q1", "2024Q2"]
-
-
 def test_update_akshare_accepts_repeated_code_option(
     tmp_path,
     stock_basic_sample,
     stock_value_em_sample,
-    stock_institute_hold_sample,
 ) -> None:
     _write_settings(tmp_path)
     store = ParquetStore(root=tmp_path)
     store.ensure_layout()
     store.write_stock_basic(stock_basic_sample())
-    client = FakeAkShareClient(stock_value_em_sample, stock_institute_hold_sample)
+    client = FakeAkShareClient(stock_value_em_sample)
 
     update_akshare(
         dataset="stock_value_em",
@@ -336,13 +275,12 @@ def test_update_akshare_stock_value_fetches_concurrently_but_writes_serially(
     monkeypatch,
     stock_basic_sample,
     stock_value_em_sample,
-    stock_institute_hold_sample,
 ) -> None:
     _write_settings(tmp_path)
     store = ParquetStore(root=tmp_path)
     store.ensure_layout()
     store.write_stock_basic(stock_basic_sample())
-    client = OverlapAkShareClient(stock_value_em_sample, stock_institute_hold_sample, fail_codes={"000003"})
+    client = OverlapAkShareClient(stock_value_em_sample, fail_codes={"000003"})
     original_write = ParquetStore.write_stock_value_em
     write_lock = threading.Lock()
     active_writes = 0
@@ -424,13 +362,12 @@ def test_update_akshare_stock_value_stops_submitting_after_circuit_open(
     tmp_path,
     stock_basic_sample,
     stock_value_em_sample,
-    stock_institute_hold_sample,
 ) -> None:
     _write_settings(tmp_path)
     store = ParquetStore(root=tmp_path)
     store.ensure_layout()
     store.write_stock_basic(stock_basic_sample())
-    client = CircuitOpenAkShareClient(stock_value_em_sample, stock_institute_hold_sample)
+    client = CircuitOpenAkShareClient(stock_value_em_sample)
 
     records = update_akshare(
         dataset="stock_value_em",
@@ -483,7 +420,67 @@ def _write_calendar(store: ParquetStore, latest_date: str) -> None:
     )
 
 
-def _write_settings(root, lookback_quarters: int = 2) -> None:
+def _write_akshare_universe(
+    store: ParquetStore,
+    spot_codes: tuple[str, ...] = ("600000",),
+    delisted_codes: tuple[str, ...] = ("000001",),
+) -> None:
+    fetched_at = datetime(2024, 1, 3, 18, 0)
+    store.write_stock_zh_a_spot_em(
+        "2024-01-03",
+        pd.DataFrame(
+            [
+                {
+                    "trade_date": "2024-01-03",
+                    "code": code,
+                    "source_symbol": code,
+                    "name": f"Stock {code}",
+                    "latest_price": 8.3,
+                    "change_amount": 0.1,
+                    "pct_chg": 1.2,
+                    "open": 8.2,
+                    "high": 8.4,
+                    "low": 8.1,
+                    "preclose": 8.2,
+                    "volume": 120000.0,
+                    "amount": 9960.0,
+                    "turnover_rate": 0.12,
+                    "amplitude": 3.0,
+                    "pe_dynamic": 5.1,
+                    "pb": 0.71,
+                    "total_market_cap": 101000000.0,
+                    "float_market_cap": 81000000.0,
+                    "source_endpoint": "stock_zh_a_spot_em",
+                    "fetched_at": fetched_at,
+                }
+                for code in spot_codes
+            ]
+        ),
+    )
+    if delisted_codes:
+        store.write_stock_info_sh_delist(
+            "2024-01-03",
+            pd.DataFrame(
+                [
+                    {
+                        "snapshot_date": "2024-01-03",
+                        "exchange": "sh",
+                        "market": "全部",
+                        "code": code,
+                        "source_symbol": code,
+                        "name": f"Delisted {code}",
+                        "list_date": "2000-01-01",
+                        "delist_date": "2024-01-02",
+                        "source_endpoint": "stock_info_sh_delist",
+                        "fetched_at": fetched_at,
+                    }
+                    for code in delisted_codes
+                ]
+            ),
+        )
+
+
+def _write_settings(root) -> None:
     config_dir = root / "config"
     config_dir.mkdir()
     (config_dir / "settings.yaml").write_text(
@@ -496,17 +493,11 @@ def _write_settings(root, lookback_quarters: int = 2) -> None:
                 "    max_retries: 1",
                 "    workers: 3",
                 "    jitter_seconds: [0, 0]",
-                f"    lookback_quarters: {lookback_quarters}",
                 "    endpoints:",
-                "      stock_institute_hold:",
-                "        failure_threshold: 2",
-                "        cooldown_minutes: 1",
                 "      stock_value_em:",
                 "        failure_threshold: 2",
                 "        cooldown_minutes: 1",
                 "datasets:",
-                "  stock_institute_hold:",
-                "    start_quarter: 2024Q1",
                 "  stock_value_em:",
                 "    active_only: true",
                 "pipeline:",

@@ -21,13 +21,24 @@ api:
     max_retries: 3
     workers: 3
     jitter_seconds: [2, 8]
-    lookback_quarters: 8
     endpoints:
-      stock_institute_hold:
-        source: sina
+      stock_value_em:
+        source: eastmoney
         failure_threshold: 5
         cooldown_minutes: 30
-      stock_value_em:
+      stock_info_sh_delist:
+        source: sse
+        failure_threshold: 3
+        cooldown_minutes: 30
+      stock_zh_a_spot_em:
+        source: eastmoney
+        failure_threshold: 3
+        cooldown_minutes: 30
+      stock_zh_a_spot:
+        source: sina
+        failure_threshold: 1
+        cooldown_minutes: 180
+      stock_zh_a_hist:
         source: eastmoney
         failure_threshold: 5
         cooldown_minutes: 30
@@ -46,10 +57,13 @@ datasets:
     fields: "calendar_date,is_trading_day"
   adjust_factor:
     fields: "code,dividOperateDate,foreAdjustFactor,backAdjustFactor,adjustFactor"
-  stock_institute_hold:
-    start_quarter: 2005Q1
   stock_value_em:
     active_only: true
+  stock_zh_a_hist:
+    default_adjusts: ["none", "qfq", "hfq"]
+    full_start: "1990-01-01"
+  stock_zh_a_spot:
+    update_hist_from_spot: true
 
 pipeline:
   lookback_days: 10

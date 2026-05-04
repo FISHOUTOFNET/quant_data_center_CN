@@ -9,6 +9,9 @@ import click
 
 from src.pipeline.repair_tool import repair as run_repair
 from src.pipeline.update_akshare import update_akshare as run_update_akshare
+from src.pipeline.update_akshare_hist import update_akshare_hist as run_update_akshare_hist
+from src.pipeline.update_akshare_spot import update_akshare_spot as run_update_akshare_spot
+from src.pipeline.update_akshare_universe import update_akshare_universe as run_update_akshare_universe
 from src.pipeline.update_daily import update_daily as run_update_daily
 from src.storage.duckdb_store import DuckDBStore
 from src.utils import paths
@@ -76,12 +79,10 @@ def update_daily(
 
 
 @cli.command("update-akshare")
-@click.option("--dataset", default="all", show_default=True, help="all/stock_institute_hold/stock_value_em.")
+@click.option("--dataset", default="all", show_default=True, help="all/stock_value_em.")
 @click.option("--mode", type=click.Choice(["partial", "full"]), default="partial", show_default=True, help="Update mode.")
-@click.option("--start-quarter", default=None, help="Full-mode start quarter for stock_institute_hold, e.g. 2005Q1.")
-@click.option("--end-quarter", default=None, help="End quarter for stock_institute_hold, e.g. 2024Q4.")
-@click.option("--code", multiple=True, help="Stock code for stock_value_em. Can be repeated.")
-@click.option("--include-inactive", is_flag=True, help="Include inactive common stocks in stock_value_em partial mode.")
+@click.option("--code", multiple=True, help="AkShare stock code. Accepts 600000/sh.600000/sh600000. Can be repeated.")
+@click.option("--include-inactive", is_flag=True, help="Use the full local AkShare pool, including delisted codes, in partial mode.")
 @click.option("--max-tasks", type=int, default=None, help="Maximum AkShare tasks to execute in this run.")
 @click.option("--workers", type=int, default=None, help="Concurrent fetch workers for stock_value_em. Defaults to api.akshare.workers.")
 @click.option("--resume/--no-resume", default=True, show_default=True, help="Resume from successful checkpoints.")
@@ -90,8 +91,6 @@ def update_daily(
 def update_akshare(
     dataset: str,
     mode: str,
-    start_quarter: str | None,
-    end_quarter: str | None,
     code: tuple[str, ...],
     include_inactive: bool,
     max_tasks: int | None,
@@ -105,10 +104,98 @@ def update_akshare(
     records = run_update_akshare(
         dataset=dataset,
         mode=mode,
-        start_quarter=start_quarter,
-        end_quarter=end_quarter,
         code=code,
         include_inactive=include_inactive,
+        max_tasks=max_tasks,
+        workers=workers,
+        resume=resume,
+        force=force,
+        build_views=build_views,
+    )
+    for item in records:
+        click.echo(f"{item['dataset']} {item['code']} status={item['status']} rows={item['row_count']}")
+
+
+@cli.command("update-akshare-universe")
+@click.option("--market", default="全部", show_default=True, help="stock_info_sh_delist market parameter.")
+@click.option("--snapshot-date", default=None, help="Snapshot date, YYYY-MM-DD. Defaults to today.")
+@click.option("--resume/--no-resume", default=True, show_default=True, help="Resume from successful checkpoints.")
+@click.option("--force", is_flag=True, help="Ignore checkpoints and re-fetch the snapshot.")
+@click.option("--build-views/--no-build-views", default=True, show_default=True)
+def update_akshare_universe(
+    market: str,
+    snapshot_date: str | None,
+    resume: bool,
+    force: bool,
+    build_views: bool,
+) -> None:
+    """Manually update AkShare SH delist universe data."""
+
+    records = run_update_akshare_universe(
+        market=market,
+        snapshot_date=snapshot_date,
+        resume=resume,
+        force=force,
+        build_views=build_views,
+    )
+    for item in records:
+        click.echo(f"{item['dataset']} {item['code']} status={item['status']} rows={item['row_count']}")
+
+
+@cli.command("update-akshare-spot")
+@click.option("--end", default=None, help="Target trade date, YYYY-MM-DD. Defaults through 18:00 trading-day resolution.")
+@click.option("--resume/--no-resume", default=True, show_default=True, help="Resume from successful checkpoints.")
+@click.option("--force", is_flag=True, help="Ignore checkpoints and re-fetch the spot snapshot.")
+@click.option("--build-views/--no-build-views", default=True, show_default=True)
+def update_akshare_spot(
+    end: str | None,
+    resume: bool,
+    force: bool,
+    build_views: bool,
+) -> None:
+    """Run AkShare A-share daily spot snapshot with fallback."""
+
+    records = run_update_akshare_spot(
+        end=end,
+        resume=resume,
+        force=force,
+        build_views=build_views,
+    )
+    for item in records:
+        click.echo(f"{item['dataset']} {item['code']} status={item['status']} rows={item['row_count']}")
+
+
+@cli.command("update-akshare-hist")
+@click.option("--mode", type=click.Choice(["full", "incremental"]), required=True, help="History update mode.")
+@click.option("--adjust", type=click.Choice(["none", "qfq", "hfq", "all"]), default="all", show_default=True)
+@click.option("--code", multiple=True, help="AkShare stock code. Accepts 600000/sh.600000/sh600000. Defaults to the local AkShare pool.")
+@click.option("--start", default=None, help="Start date, YYYY-MM-DD. Required for incremental mode.")
+@click.option("--end", default=None, help="End date, YYYY-MM-DD. Defaults through 18:00 trading-day resolution.")
+@click.option("--max-tasks", type=int, default=None, help="Maximum hist tasks to execute in this run.")
+@click.option("--workers", type=int, default=None, help="Concurrent fetch workers for stock_zh_a_hist.")
+@click.option("--resume/--no-resume", default=True, show_default=True, help="Resume from successful checkpoints.")
+@click.option("--force", is_flag=True, help="Ignore checkpoints and re-fetch all selected tasks.")
+@click.option("--build-views/--no-build-views", default=True, show_default=True)
+def update_akshare_hist(
+    mode: str,
+    adjust: str,
+    code: tuple[str, ...],
+    start: str | None,
+    end: str | None,
+    max_tasks: int | None,
+    workers: int | None,
+    resume: bool,
+    force: bool,
+    build_views: bool,
+) -> None:
+    """Run AkShare stock_zh_a_hist full or manual incremental update."""
+
+    records = run_update_akshare_hist(
+        mode=mode,
+        adjust=adjust,
+        code=code,
+        start=start,
+        end=end,
         max_tasks=max_tasks,
         workers=workers,
         resume=resume,

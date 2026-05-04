@@ -8,8 +8,11 @@ from src.storage.schema import (
     DAILY_K_SCHEMA,
     PIPELINE_CHECKPOINTS_SCHEMA,
     STOCK_BASIC_SCHEMA,
-    STOCK_INSTITUTE_HOLD_SCHEMA,
+    STOCK_INFO_SH_DELIST_SCHEMA,
     STOCK_VALUE_EM_SCHEMA,
+    STOCK_ZH_A_HIST_SCHEMA,
+    STOCK_ZH_A_SPOT_EM_SCHEMA,
+    STOCK_ZH_A_SPOT_SINA_SCHEMA,
 )
 
 
@@ -65,21 +68,6 @@ def test_pipeline_checkpoint_schema_core_fields() -> None:
 
 
 def test_akshare_dataset_schema_core_fields() -> None:
-    assert STOCK_INSTITUTE_HOLD_SCHEMA.field("period_end_date").type == pa.date32()
-    assert STOCK_INSTITUTE_HOLD_SCHEMA.field("institution_count").type == pa.int64()
-    assert STOCK_INSTITUTE_HOLD_SCHEMA.names == [
-        "report_period",
-        "period_end_date",
-        "code",
-        "code_name",
-        "institution_count",
-        "institution_count_change",
-        "holding_ratio",
-        "holding_ratio_change",
-        "float_holding_ratio",
-        "float_holding_ratio_change",
-    ]
-
     assert STOCK_VALUE_EM_SCHEMA.field("date").type == pa.date32()
     assert STOCK_VALUE_EM_SCHEMA.field("total_market_cap").type == pa.float64()
     assert STOCK_VALUE_EM_SCHEMA.names == [
@@ -97,4 +85,31 @@ def test_akshare_dataset_schema_core_fields() -> None:
         "peg",
         "pcf",
         "ps",
+    ]
+
+
+def test_akshare_a_stock_schema_core_fields() -> None:
+    assert STOCK_INFO_SH_DELIST_SCHEMA.field("snapshot_date").type == pa.date32()
+    assert STOCK_ZH_A_SPOT_EM_SCHEMA.field("trade_date").type == pa.date32()
+    assert STOCK_ZH_A_SPOT_EM_SCHEMA.field("source_symbol").type == pa.string()
+    assert STOCK_ZH_A_SPOT_SINA_SCHEMA.field("is_fallback").type == pa.bool_()
+    assert STOCK_ZH_A_HIST_SCHEMA.field("volume").type == pa.int64()
+    assert STOCK_ZH_A_HIST_SCHEMA.names == [
+        "date",
+        "code",
+        "source_symbol",
+        "open",
+        "high",
+        "low",
+        "close",
+        "volume",
+        "amount",
+        "amplitude",
+        "pct_chg",
+        "change_amount",
+        "turnover_rate",
+        "adjust",
+        "source_endpoint",
+        "quality_status",
+        "fetched_at",
     ]

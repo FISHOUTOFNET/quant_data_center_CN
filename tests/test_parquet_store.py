@@ -77,26 +77,125 @@ def test_adjust_factor_write_and_read(tmp_path, adjust_factor_sample) -> None:
     assert loaded.loc[0, "foreAdjustFactor"] == 1.0
 
 
-def test_akshare_dataset_write_and_read(tmp_path, stock_institute_hold_sample, stock_value_em_sample) -> None:
+def test_akshare_dataset_write_and_read(tmp_path, stock_value_em_sample) -> None:
     store = ParquetStore(root=tmp_path)
     store.ensure_layout()
 
-    hold_path = store.write_stock_institute_hold("2024Q1", stock_institute_hold_sample())
     value_path = store.write_stock_value_em("600000", stock_value_em_sample().astype({"pe_ttm": "string"}))
 
-    assert hold_path == tmp_path / "data" / "parquet" / "stock_institute_hold" / "report_period=2024Q1" / "data.parquet"
     assert value_path == tmp_path / "data" / "parquet" / "stock_value_em" / "code=600000" / "data.parquet"
-    assert len(store.read_stock_institute_hold("2024Q1")) == 2
     loaded = store.read_stock_value_em("600000")
     assert len(loaded) == 2
     assert loaded.loc[0, "pe_ttm"] == 5.0
+
+
+def test_akshare_a_stock_writes_and_hist_upsert_overrides_spot(tmp_path) -> None:
+    store = ParquetStore(root=tmp_path)
+    store.ensure_layout()
+    fetched_at = datetime(2024, 1, 3, 16, 0)
+
+    delist_path = store.write_stock_info_sh_delist(
+        "2024-01-03",
+        pd.DataFrame(
+            [
+                {
+                    "snapshot_date": "2024-01-03",
+                    "exchange": "sh",
+                    "market": "全部",
+                    "code": "600001",
+                    "source_symbol": "600001",
+                    "name": "Old Corp",
+                    "list_date": "2000-01-01",
+                    "delist_date": "2024-01-02",
+                    "source_endpoint": "stock_info_sh_delist",
+                    "fetched_at": fetched_at,
+                }
+            ]
+        ),
+    )
+    assert delist_path == tmp_path / "data" / "parquet" / "stock_info_sh_delist" / "snapshot_date=2024-01-03" / "data.parquet"
+    assert store.read_latest_stock_info_sh_delist().loc[0, "code"] == "600001"
+
+    spot_path = store.write_stock_zh_a_spot_em(
+        "2024-01-03",
+        pd.DataFrame(
+            [
+                {
+                    "trade_date": "2024-01-03",
+                    "code": "600000",
+                    "source_symbol": "600000",
+                    "name": "PF Bank",
+                    "latest_price": "8.30",
+                    "change_amount": 0.1,
+                    "pct_chg": 1.2,
+                    "open": 8.2,
+                    "high": 8.4,
+                    "low": 8.1,
+                    "preclose": 8.2,
+                    "volume": 120000.0,
+                    "amount": 9960.0,
+                    "turnover_rate": 0.12,
+                    "amplitude": 3.0,
+                    "pe_dynamic": 5.1,
+                    "pb": 0.71,
+                    "total_market_cap": 101000000.0,
+                    "float_market_cap": 81000000.0,
+                    "source_endpoint": "stock_zh_a_spot_em",
+                    "fetched_at": fetched_at,
+                }
+            ]
+        ),
+    )
+    assert spot_path.exists()
+    assert store.read_latest_stock_zh_a_spot_em().loc[0, "latest_price"] == 8.3
+
+    sina_path = store.write_stock_zh_a_spot_sina(
+        "2024-01-03",
+        pd.DataFrame(
+            [
+                {
+                    "trade_date": "2024-01-03",
+                    "code": "600000",
+                    "source_symbol": "sh600000",
+                    "name": "PF Bank",
+                    "latest_price": 8.3,
+                    "change_amount": 0.1,
+                    "pct_chg": 1.2,
+                    "bid": 8.29,
+                    "ask": 8.31,
+                    "preclose": 8.2,
+                    "open": 8.2,
+                    "high": 8.4,
+                    "low": 8.1,
+                    "volume": 120000.0,
+                    "amount": 9960.0,
+                    "source_timestamp": "15:00:00",
+                    "source_endpoint": "stock_zh_a_spot",
+                    "is_fallback": "true",
+                    "fallback_reason": "planned",
+                    "fetched_at": fetched_at,
+                }
+            ]
+        ),
+    )
+    assert sina_path.exists()
+    assert bool(store.read_stock_zh_a_spot_sina("2024-01-03").loc[0, "is_fallback"])
+
+    spot_hist = _akshare_hist_row("stock_zh_a_spot_em", "spot_close", close=8.3)
+    hist_confirmed = _akshare_hist_row("stock_zh_a_hist", "hist_confirmed", close=8.31)
+    store.write_stock_zh_a_hist("none", "600000", pd.DataFrame([spot_hist]))
+    store.upsert_stock_zh_a_hist("none", "600000", pd.DataFrame([hist_confirmed]))
+    hist = store.read_stock_zh_a_hist("none", "600000")
+    assert len(hist) == 1
+    assert hist.loc[0, "close"] == 8.31
+    assert hist.loc[0, "source_endpoint"] == "stock_zh_a_hist"
+    assert hist.loc[0, "quality_status"] == "hist_confirmed"
 
 
 def test_writes_reject_missing_partition_keys(
     tmp_path,
     daily_sample,
     adjust_factor_sample,
-    stock_institute_hold_sample,
     stock_value_em_sample,
 ) -> None:
     store = ParquetStore(root=tmp_path)
@@ -106,8 +205,6 @@ def test_writes_reject_missing_partition_keys(
         store.write_daily_k("daily_k_qfq", "sh.600000", daily_sample().drop(columns=["code"]))
     with pytest.raises(ValueError, match="Adjust factor file code missing code"):
         store.write_adjust_factor("sh.600000", adjust_factor_sample().drop(columns=["code"]))
-    with pytest.raises(ValueError, match="Institute hold file period missing report_period"):
-        store.write_stock_institute_hold("2024Q1", stock_institute_hold_sample().drop(columns=["report_period"]))
     with pytest.raises(ValueError, match="Stock value file code missing code"):
         store.write_stock_value_em("600000", stock_value_em_sample().drop(columns=["code"]))
 
@@ -527,3 +624,25 @@ def test_metadata_batch_flush_size_one_keeps_concurrent_rows(tmp_path) -> None:
     assert len(store.read_update_runs()) == 20
     assert len(store.read_update_status()) == 20
     assert len(store.read_pipeline_checkpoints()) == 20
+
+
+def _akshare_hist_row(source_endpoint: str, quality_status: str, close: float) -> dict[str, object]:
+    return {
+        "date": "2024-01-03",
+        "code": "600000",
+        "source_symbol": "600000",
+        "open": 8.2,
+        "high": 8.4,
+        "low": 8.1,
+        "close": close,
+        "volume": 120000,
+        "amount": 9960.0,
+        "amplitude": 3.0,
+        "pct_chg": 1.2,
+        "change_amount": 0.1,
+        "turnover_rate": 0.12,
+        "adjust": "none",
+        "source_endpoint": source_endpoint,
+        "quality_status": quality_status,
+        "fetched_at": datetime(2024, 1, 3, 16, 0),
+    }

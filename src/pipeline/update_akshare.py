@@ -24,13 +24,12 @@ from src.api.akshare_client import (
     AkShareNetworkError,
     AkShareResponse,
     dataframe_hash,
-    report_period_to_akshare_quarter,
 )
 from src.pipeline.akshare_tasks import AkShareTask, plan_akshare_tasks
 from src.pipeline.common import PipelineCheckpointLookup, checkpoint_row, should_skip_checkpoint
 from src.pipeline.services import PipelineMetadataBatch
 from src.quality.validators import ValidationError
-from src.storage.dataset_catalog import STOCK_INSTITUTE_HOLD_DATASET, STOCK_VALUE_EM_DATASET
+from src.storage.dataset_catalog import STOCK_VALUE_EM_DATASET
 from src.storage.duckdb_store import DuckDBStore
 from src.storage.parquet_store import ParquetStore
 from src.utils.config_mgr import ConfigManager
@@ -104,8 +103,6 @@ def _prefilter_stock_value_em_tasks(
 def update_akshare(
     dataset: str = "all",
     mode: str = "partial",
-    start_quarter: str | None = None,
-    end_quarter: str | None = None,
     code: tuple[str, ...] | list[str] | str | None = None,
     include_inactive: bool = False,
     max_tasks: int | None = None,
@@ -127,8 +124,6 @@ def update_akshare(
         store=store,
         dataset=dataset,
         mode=mode,
-        start_quarter=start_quarter,
-        end_quarter=end_quarter,
         code=code,
         include_inactive=include_inactive,
         max_tasks=max_tasks,
@@ -508,21 +503,6 @@ def _record_fetched_task_result(
 
 
 def _fetch_task(client: Any, task: AkShareTask) -> AkShareResponse:
-    if task.dataset == STOCK_INSTITUTE_HOLD_DATASET.name:
-        if task.report_period is None:
-            raise ValueError("stock_institute_hold task missing report_period")
-        result = (
-            client.fetch_stock_institute_hold(task.report_period)
-            if hasattr(client, "fetch_stock_institute_hold")
-            else client.query_stock_institute_hold(task.report_period)
-        )
-        return _ensure_response(
-            result,
-            endpoint=STOCK_INSTITUTE_HOLD_DATASET.name,
-            params={"symbol": report_period_to_akshare_quarter(task.report_period)},
-            client=client,
-        )
-
     if task.dataset == STOCK_VALUE_EM_DATASET.name:
         if task.code is None:
             raise ValueError("stock_value_em task missing code")
@@ -557,14 +537,6 @@ def _ensure_response(result: object, endpoint: str, params: dict[str, object], c
 
 
 def _write_task_data(store: ParquetStore, task: AkShareTask, df: pd.DataFrame) -> tuple[Path, int, str | None]:
-    if task.dataset == STOCK_INSTITUTE_HOLD_DATASET.name:
-        if task.report_period is None:
-            raise ValueError("stock_institute_hold task missing report_period")
-        if df.empty:
-            raise AkShareEmptyDataError(f"stock_institute_hold returned empty data for {task.report_period}")
-        output_path = store.write_stock_institute_hold(task.report_period, df)
-        return output_path, len(df), task.end_date
-
     if task.dataset == STOCK_VALUE_EM_DATASET.name:
         if task.code is None:
             raise ValueError("stock_value_em task missing code")
@@ -678,8 +650,6 @@ def _append_manifest_row(store: ParquetStore, row: dict[str, object]) -> None:
 
 
 def _task_params(task: AkShareTask) -> dict[str, object]:
-    if task.dataset == STOCK_INSTITUTE_HOLD_DATASET.name and task.report_period is not None:
-        return {"symbol": report_period_to_akshare_quarter(task.report_period)}
     if task.dataset == STOCK_VALUE_EM_DATASET.name and task.code is not None:
         return {"symbol": task.code}
     return {}

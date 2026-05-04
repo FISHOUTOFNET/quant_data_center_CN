@@ -11,7 +11,6 @@ import pandas as pd
 from src.storage.parquet_store import ParquetStore
 from src.storage.schema import DAILY_K_SCHEMA
 from src.storage.dataset_catalog import (
-    STOCK_INSTITUTE_HOLD_DATASET,
     STOCK_VALUE_EM_DATASET,
     daily_k_dataset_names,
     expand_daily_k_selection,
@@ -247,8 +246,6 @@ def checkpoint_output_path(store: ParquetStore, dataset: str, code: str, end_dat
         return store.stock_basic_path()
     if dataset == "calendar":
         return store.calendar_path()
-    if dataset == STOCK_INSTITUTE_HOLD_DATASET.name:
-        return store.stock_institute_hold_path(code)
     if dataset == STOCK_VALUE_EM_DATASET.name:
         return store.stock_value_em_path(code)
     raise ValueError(f"Unsupported checkpoint dataset: {dataset}")

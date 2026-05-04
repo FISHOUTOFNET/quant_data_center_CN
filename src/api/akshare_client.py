@@ -13,12 +13,20 @@ from typing import Any
 
 import pandas as pd
 
-from src.storage.schema import STOCK_INSTITUTE_HOLD_SCHEMA, STOCK_VALUE_EM_SCHEMA, field_names
+from src.storage.schema import (
+    STOCK_INFO_SH_DELIST_SCHEMA,
+    STOCK_VALUE_EM_SCHEMA,
+    STOCK_ZH_A_HIST_SCHEMA,
+    STOCK_ZH_A_SPOT_EM_SCHEMA,
+    STOCK_ZH_A_SPOT_SINA_SCHEMA,
+    field_names,
+)
 from src.utils.config_mgr import ConfigManager
 from src.utils.logging import logger
 
 
-PROJECT_CODE_PATTERN = re.compile(r"^(?P<market>sh|sz)\.(?P<symbol>\d{6})$", re.IGNORECASE)
+PROJECT_CODE_PATTERN = re.compile(r"^(?P<market>sh|sz|bj)\.(?P<symbol>\d{6})$", re.IGNORECASE)
+AKSHARE_PREFIXED_CODE_PATTERN = re.compile(r"^(?P<market>sh|sz|bj)[\.\s_-]?(?P<symbol>\d{6})$", re.IGNORECASE)
 
 
 class AkShareError(RuntimeError):
@@ -77,17 +85,6 @@ class _EndpointRuntimeConfig:
     cooldown: timedelta
 
 
-INSTITUTE_HOLD_FIELD_ALIASES = {
-    "code": ("证券代码", "股票代码", "code"),
-    "code_name": ("证券简称", "股票简称", "code_name"),
-    "institution_count": ("机构数", "institution_count"),
-    "institution_count_change": ("机构数变化", "institution_count_change"),
-    "holding_ratio": ("持股比例", "holding_ratio"),
-    "holding_ratio_change": ("持股比例增幅", "holding_ratio_change"),
-    "float_holding_ratio": ("占流通股比例", "float_holding_ratio"),
-    "float_holding_ratio_change": ("占流通股比例增幅", "float_holding_ratio_change"),
-}
-
 STOCK_VALUE_FIELD_ALIASES = {
     "date": ("数据日期", "date"),
     "close": ("当日收盘价", "close"),
@@ -102,6 +99,65 @@ STOCK_VALUE_FIELD_ALIASES = {
     "peg": ("PEG值", "peg"),
     "pcf": ("市现率", "pcf"),
     "ps": ("市销率", "ps"),
+}
+
+STOCK_INFO_SH_DELIST_FIELD_ALIASES = {
+    "source_symbol": ("公司代码", "证券代码", "代码", "source_symbol"),
+    "name": ("公司简称", "证券简称", "名称", "name"),
+    "list_date": ("上市日期", "list_date"),
+    "delist_date": ("暂停上市日期", "终止上市日期", "delist_date"),
+}
+
+STOCK_ZH_A_SPOT_EM_FIELD_ALIASES = {
+    "source_symbol": ("代码", "股票代码", "source_symbol"),
+    "name": ("名称", "股票简称", "name"),
+    "latest_price": ("最新价", "最新价格", "latest_price"),
+    "change_amount": ("涨跌额", "change_amount"),
+    "pct_chg": ("涨跌幅", "pct_chg"),
+    "open": ("今开", "开盘", "open"),
+    "high": ("最高", "high"),
+    "low": ("最低", "low"),
+    "preclose": ("昨收", "preclose"),
+    "volume": ("成交量", "volume"),
+    "amount": ("成交额", "amount"),
+    "turnover_rate": ("换手率", "turnover_rate"),
+    "amplitude": ("振幅", "amplitude"),
+    "pe_dynamic": ("市盈率-动态", "动态市盈率", "pe_dynamic"),
+    "pb": ("市净率", "pb"),
+    "total_market_cap": ("总市值", "total_market_cap"),
+    "float_market_cap": ("流通市值", "float_market_cap"),
+}
+
+STOCK_ZH_A_SPOT_SINA_FIELD_ALIASES = {
+    "source_symbol": ("代码", "股票代码", "source_symbol"),
+    "name": ("名称", "股票简称", "name"),
+    "latest_price": ("最新价", "最新价格", "latest_price"),
+    "change_amount": ("涨跌额", "change_amount"),
+    "pct_chg": ("涨跌幅", "pct_chg"),
+    "bid": ("买入", "竞买价", "bid"),
+    "ask": ("卖出", "竞卖价", "ask"),
+    "preclose": ("昨收", "preclose"),
+    "open": ("今开", "开盘", "open"),
+    "high": ("最高", "high"),
+    "low": ("最低", "low"),
+    "volume": ("成交量", "volume"),
+    "amount": ("成交额", "amount"),
+    "source_timestamp": ("时间戳", "时间", "source_timestamp"),
+}
+
+STOCK_ZH_A_HIST_FIELD_ALIASES = {
+    "date": ("日期", "date"),
+    "source_symbol": ("股票代码", "代码", "source_symbol"),
+    "open": ("开盘", "open"),
+    "close": ("收盘", "close"),
+    "high": ("最高", "high"),
+    "low": ("最低", "low"),
+    "volume": ("成交量", "volume"),
+    "amount": ("成交额", "amount"),
+    "amplitude": ("振幅", "amplitude"),
+    "pct_chg": ("涨跌幅", "pct_chg"),
+    "change_amount": ("涨跌额", "change_amount"),
+    "turnover_rate": ("换手率", "turnover_rate"),
 }
 
 
@@ -138,19 +194,9 @@ def build_code_maps(stock_basic_df: pd.DataFrame | None) -> CodeMaps:
 
 
 def code_to_akshare_symbol(code: str, code_maps: CodeMaps) -> str:
-    """Return the AkShare request symbol while leaving stored codes source-shaped."""
+    """Return the 6-digit AkShare request/storage symbol."""
 
-    value = str(code).strip()
-    if re.fullmatch(r"\d+\.0", value):
-        value = value.split(".", 1)[0]
-    lower = value.lower()
-    mapped = code_maps.project_to_six.get(lower)
-    if mapped is not None:
-        return mapped
-    project_match = PROJECT_CODE_PATTERN.match(lower)
-    if project_match is not None:
-        return project_match.group("symbol")
-    return value.zfill(6) if value.isdigit() else value
+    return normalize_akshare_code(code, code_maps)
 
 
 def project_code_to_akshare_symbol(code: str, code_maps: CodeMaps) -> str:
@@ -159,26 +205,67 @@ def project_code_to_akshare_symbol(code: str, code_maps: CodeMaps) -> str:
     return code_to_akshare_symbol(code, code_maps)
 
 
-def report_period_to_akshare_quarter(report_period: str) -> str:
-    value = str(report_period).strip().upper()
-    if re.fullmatch(r"\d{4}Q[1-4]", value):
-        return f"{value[:4]}{value[-1]}"
-    if re.fullmatch(r"\d{4}[1-4]", value):
-        return value
-    raise ValueError(f"Invalid report period: {report_period}")
+def akshare_symbol_to_project_code(
+    symbol: object,
+    code_maps: CodeMaps | None = None,
+    default_market: str | None = None,
+) -> str:
+    """Convert AkShare/Sina code shapes into the 6-digit AkShare storage code.
+
+    The public name is kept for compatibility with older callers. AkShare
+    datasets now store only 6-digit A-share codes; Baostock datasets still use
+    market-prefixed project codes.
+    """
+
+    return normalize_akshare_code(symbol, code_maps)
 
 
-def akshare_quarter_to_report_period(quarter: str) -> str:
-    value = report_period_to_akshare_quarter(quarter)
-    return f"{value[:4]}Q{value[-1]}"
+def normalize_akshare_code(symbol: object, code_maps: CodeMaps | None = None) -> str:
+    """Normalize accepted A-share code shapes to a 6-digit AkShare code."""
+
+    value = _clean_source_symbol(symbol)
+    if value == "":
+        return ""
+    lower = value.lower()
+    prefixed_match = AKSHARE_PREFIXED_CODE_PATTERN.match(lower)
+    if prefixed_match is not None:
+        return prefixed_match.group("symbol")
+    if re.fullmatch(r"\d+\.0", value):
+        value = value.split(".", 1)[0]
+    digits = value.zfill(6) if value.isdigit() else value
+    maps = code_maps or CodeMaps(six_to_project={}, project_to_six={})
+    mapped = maps.project_to_six.get(lower)
+    if mapped is not None:
+        return mapped
+    if PROJECT_CODE_PATTERN.match(lower) is not None:
+        return PROJECT_CODE_PATTERN.match(lower).group("symbol")  # type: ignore[union-attr]
+    return digits
 
 
-def report_period_end_date(report_period: str) -> date:
-    value = akshare_quarter_to_report_period(report_period)
-    year = int(value[:4])
-    quarter = int(value[-1])
-    month_day = {1: (3, 31), 2: (6, 30), 3: (9, 30), 4: (12, 31)}[quarter]
-    return date(year, month_day[0], month_day[1])
+def normalize_project_code(code: object, code_maps: CodeMaps | None = None) -> str:
+    """Backward-compatible AkShare code normalizer returning a 6-digit code."""
+
+    return normalize_akshare_code(code, code_maps)
+
+
+def _clean_source_symbol(symbol: object) -> str:
+    if pd.isna(symbol):
+        return ""
+    value = str(symbol).strip()
+    if re.fullmatch(r"\d+\.0", value):
+        value = value.split(".", 1)[0]
+    return value
+
+
+def _infer_market_for_symbol(symbol: str) -> str:
+    digits = str(symbol).zfill(6)
+    if digits.startswith(("60", "68", "90")):
+        return "sh"
+    if digits.startswith(("00", "20", "30")):
+        return "sz"
+    if digits.startswith(("43", "83", "87", "88", "92", "4", "8")):
+        return "bj"
+    return "sh"
 
 
 def dataframe_hash(df: pd.DataFrame) -> str:
@@ -212,20 +299,6 @@ class AkShareClient:
     def code_maps(self) -> CodeMaps:
         return self._code_maps
 
-    def query_stock_institute_hold(self, period: str) -> pd.DataFrame:
-        return self.fetch_stock_institute_hold(period).data
-
-    def fetch_stock_institute_hold(self, period: str) -> AkShareResponse:
-        report_period = akshare_quarter_to_report_period(period)
-        quarter = report_period_to_akshare_quarter(report_period)
-        params: dict[str, object] = {"symbol": quarter}
-        return self._fetch(
-            endpoint="stock_institute_hold",
-            params=params,
-            caller=lambda: self._ak().stock_institute_hold(symbol=quarter),
-            normalizer=lambda raw: self._normalize_stock_institute_hold(raw, report_period),
-        )
-
     def query_stock_value(self, code: str) -> pd.DataFrame:
         return self.fetch_stock_value(code).data
 
@@ -237,6 +310,101 @@ class AkShareClient:
             params=params,
             caller=lambda: self._ak().stock_value_em(symbol=symbol),
             normalizer=lambda raw: self._normalize_stock_value_em(raw, symbol),
+        )
+
+    def fetch_stock_info_sh_delist(
+        self,
+        symbol: str = "全部",
+        snapshot_date: str | date | None = None,
+    ) -> AkShareResponse:
+        resolved_snapshot_date = _date_iso(snapshot_date, self._now().date().isoformat())
+        params: dict[str, object] = {"symbol": symbol, "snapshot_date": resolved_snapshot_date}
+        return self._fetch(
+            endpoint="stock_info_sh_delist",
+            params=params,
+            caller=lambda: self._ak().stock_info_sh_delist(symbol=symbol),
+            normalizer=lambda raw: self._normalize_stock_info_sh_delist(
+                raw,
+                market=symbol,
+                snapshot_date=resolved_snapshot_date,
+                fetched_at=self._now(),
+            ),
+        )
+
+    def fetch_stock_zh_a_spot_em(self, trade_date: str | date | None = None) -> AkShareResponse:
+        resolved_trade_date = _date_iso(trade_date, self._now().date().isoformat())
+        params: dict[str, object] = {"trade_date": resolved_trade_date}
+        return self._fetch(
+            endpoint="stock_zh_a_spot_em",
+            params=params,
+            caller=lambda: self._ak().stock_zh_a_spot_em(),
+            normalizer=lambda raw: self._normalize_stock_zh_a_spot_em(
+                raw,
+                trade_date=resolved_trade_date,
+                fetched_at=self._now(),
+            ),
+        )
+
+    def fetch_stock_zh_a_spot_sina(
+        self,
+        trade_date: str | date | None = None,
+        fallback_reason: str = "",
+    ) -> AkShareResponse:
+        resolved_trade_date = _date_iso(trade_date, self._now().date().isoformat())
+        params: dict[str, object] = {
+            "trade_date": resolved_trade_date,
+            "fallback_reason": fallback_reason,
+        }
+        return self._fetch(
+            endpoint="stock_zh_a_spot",
+            params=params,
+            caller=lambda: self._ak().stock_zh_a_spot(),
+            normalizer=lambda raw: self._normalize_stock_zh_a_spot_sina(
+                raw,
+                trade_date=resolved_trade_date,
+                fallback_reason=fallback_reason,
+                fetched_at=self._now(),
+            ),
+        )
+
+    def fetch_stock_zh_a_hist(
+        self,
+        symbol: str,
+        start_date: str | date,
+        end_date: str | date,
+        adjust: str,
+    ) -> AkShareResponse:
+        project_code = normalize_project_code(symbol, self._code_maps)
+        source_symbol = code_to_akshare_symbol(project_code, self._code_maps)
+        normalized_adjust = _normalize_adjust(adjust)
+        ak_adjust = "" if normalized_adjust == "none" else normalized_adjust
+        request_start = _akshare_date(start_date)
+        request_end = _akshare_date(end_date)
+        params: dict[str, object] = {
+            "symbol": source_symbol,
+            "project_code": project_code,
+            "period": "daily",
+            "start_date": request_start,
+            "end_date": request_end,
+            "adjust": normalized_adjust,
+        }
+        return self._fetch(
+            endpoint="stock_zh_a_hist",
+            params=params,
+            caller=lambda: self._ak().stock_zh_a_hist(
+                symbol=source_symbol,
+                period="daily",
+                start_date=request_start,
+                end_date=request_end,
+                adjust=ak_adjust,
+            ),
+            normalizer=lambda raw: self._normalize_stock_zh_a_hist(
+                raw,
+                project_code=project_code,
+                source_symbol=source_symbol,
+                adjust=normalized_adjust,
+                fetched_at=self._now(),
+            ),
         )
 
     def _fetch(
@@ -309,16 +477,6 @@ class AkShareClient:
             raise last_error
         raise AkShareNetworkError(f"{endpoint} failed without a captured error")
 
-    def _normalize_stock_institute_hold(self, raw_df: pd.DataFrame, report_period: str) -> pd.DataFrame:
-        raw_df = _standardize_columns(raw_df)
-        if raw_df.empty:
-            raise AkShareEmptyDataError(f"stock_institute_hold returned empty data for {report_period}")
-        selected = _select_required_columns(raw_df, INSTITUTE_HOLD_FIELD_ALIASES, "stock_institute_hold")
-        selected.insert(0, "period_end_date", report_period_end_date(report_period))
-        selected.insert(0, "report_period", report_period)
-        selected["code"] = selected["code"].map(_akshare_code_text)
-        return selected[field_names(STOCK_INSTITUTE_HOLD_SCHEMA)].reset_index(drop=True)
-
     def _normalize_stock_value_em(self, raw_df: pd.DataFrame, source_code: str) -> pd.DataFrame:
         raw_df = _standardize_columns(raw_df)
         if raw_df.empty:
@@ -327,12 +485,163 @@ class AkShareClient:
         selected.insert(1, "code", source_code)
         return selected[field_names(STOCK_VALUE_EM_SCHEMA)].reset_index(drop=True)
 
+    def _normalize_stock_info_sh_delist(
+        self,
+        raw_df: pd.DataFrame,
+        market: str,
+        snapshot_date: str,
+        fetched_at: datetime,
+    ) -> pd.DataFrame:
+        raw_df = _standardize_columns(raw_df)
+        columns = field_names(STOCK_INFO_SH_DELIST_SCHEMA)
+        if raw_df.empty:
+            return pd.DataFrame(columns=columns)
+        selected = _select_required_columns(raw_df, STOCK_INFO_SH_DELIST_FIELD_ALIASES, "stock_info_sh_delist")
+        selected["snapshot_date"] = snapshot_date
+        selected["exchange"] = "sh"
+        selected["market"] = market
+        selected["source_symbol"] = selected["source_symbol"].map(_clean_source_symbol)
+        selected["code"] = selected["source_symbol"].map(
+            lambda value: akshare_symbol_to_project_code(value, self._code_maps, default_market="sh")
+        )
+        selected["source_endpoint"] = "stock_info_sh_delist"
+        selected["fetched_at"] = fetched_at
+        return selected[columns].reset_index(drop=True)
+
+    def _normalize_stock_zh_a_spot_em(
+        self,
+        raw_df: pd.DataFrame,
+        trade_date: str,
+        fetched_at: datetime,
+    ) -> pd.DataFrame:
+        raw_df = _standardize_columns(raw_df)
+        if raw_df.empty:
+            raise AkShareEmptyDataError("stock_zh_a_spot_em returned empty data")
+        selected = _select_required_columns(raw_df, STOCK_ZH_A_SPOT_EM_FIELD_ALIASES, "stock_zh_a_spot_em")
+        selected["trade_date"] = trade_date
+        selected["source_symbol"] = selected["source_symbol"].map(_clean_source_symbol)
+        selected["code"] = selected["source_symbol"].map(
+            lambda value: akshare_symbol_to_project_code(value, self._code_maps)
+        )
+        for column in [
+            "latest_price",
+            "change_amount",
+            "pct_chg",
+            "open",
+            "high",
+            "low",
+            "preclose",
+            "volume",
+            "amount",
+            "turnover_rate",
+            "amplitude",
+            "pe_dynamic",
+            "pb",
+            "total_market_cap",
+            "float_market_cap",
+        ]:
+            selected[column] = _to_numeric(selected[column])
+        selected["volume"] = selected["volume"] * 100
+        selected["source_endpoint"] = "stock_zh_a_spot_em"
+        selected["fetched_at"] = fetched_at
+        return selected[field_names(STOCK_ZH_A_SPOT_EM_SCHEMA)].reset_index(drop=True)
+
+    def _normalize_stock_zh_a_spot_sina(
+        self,
+        raw_df: pd.DataFrame,
+        trade_date: str,
+        fallback_reason: str,
+        fetched_at: datetime,
+    ) -> pd.DataFrame:
+        raw_df = _standardize_columns(raw_df)
+        if raw_df.empty:
+            raise AkShareEmptyDataError("stock_zh_a_spot returned empty data")
+        selected = _select_required_columns(raw_df, STOCK_ZH_A_SPOT_SINA_FIELD_ALIASES, "stock_zh_a_spot")
+        selected["trade_date"] = trade_date
+        selected["source_symbol"] = selected["source_symbol"].map(_clean_source_symbol)
+        selected["code"] = selected["source_symbol"].map(
+            lambda value: akshare_symbol_to_project_code(value, self._code_maps)
+        )
+        for column in [
+            "latest_price",
+            "change_amount",
+            "pct_chg",
+            "bid",
+            "ask",
+            "preclose",
+            "open",
+            "high",
+            "low",
+            "volume",
+            "amount",
+        ]:
+            selected[column] = _to_numeric(selected[column])
+        selected["source_timestamp"] = selected["source_timestamp"].astype("string")
+        selected["source_endpoint"] = "stock_zh_a_spot"
+        selected["is_fallback"] = True
+        selected["fallback_reason"] = fallback_reason
+        selected["fetched_at"] = fetched_at
+        return selected[field_names(STOCK_ZH_A_SPOT_SINA_SCHEMA)].reset_index(drop=True)
+
+    def _normalize_stock_zh_a_hist(
+        self,
+        raw_df: pd.DataFrame,
+        project_code: str,
+        source_symbol: str,
+        adjust: str,
+        fetched_at: datetime,
+    ) -> pd.DataFrame:
+        raw_df = _standardize_columns(raw_df)
+        columns = field_names(STOCK_ZH_A_HIST_SCHEMA)
+        if raw_df.empty:
+            return pd.DataFrame(columns=columns)
+        selected = _select_required_columns(raw_df, STOCK_ZH_A_HIST_FIELD_ALIASES, "stock_zh_a_hist")
+        selected["source_symbol"] = selected["source_symbol"].map(_clean_source_symbol)
+        selected.loc[selected["source_symbol"].astype("string").str.strip() == "", "source_symbol"] = source_symbol
+        selected["code"] = selected["source_symbol"].map(
+            lambda value: akshare_symbol_to_project_code(value, self._code_maps)
+        )
+        selected.loc[selected["code"].astype("string").str.strip() == "", "code"] = project_code
+        for column in [
+            "open",
+            "high",
+            "low",
+            "close",
+            "volume",
+            "amount",
+            "amplitude",
+            "pct_chg",
+            "change_amount",
+            "turnover_rate",
+        ]:
+            selected[column] = _to_numeric(selected[column])
+        selected["volume"] = (selected["volume"] * 100).round().astype("Int64")
+        selected["adjust"] = adjust
+        selected["source_endpoint"] = "stock_zh_a_hist"
+        selected["quality_status"] = "hist_confirmed"
+        selected["fetched_at"] = fetched_at
+        return selected[columns].reset_index(drop=True)
+
     def _endpoint_runtime_config(self, endpoint: str) -> _EndpointRuntimeConfig:
         retries = int(_config_get(self._config, "api.akshare.max_retries", _config_get(self._config, "pipeline.max_retries", 3)))
         raw_jitter = _config_get(self._config, "api.akshare.jitter_seconds", [0, 0])
         jitter = _parse_jitter(raw_jitter)
-        threshold = int(_config_get(self._config, f"api.akshare.endpoints.{endpoint}.failure_threshold", 5))
-        cooldown_minutes = float(_config_get(self._config, f"api.akshare.endpoints.{endpoint}.cooldown_minutes", 30))
+        default_threshold = 1 if endpoint == "stock_zh_a_spot" else 5
+        default_cooldown_minutes = 180 if endpoint == "stock_zh_a_spot" else 30
+        threshold = int(
+            _config_get(
+                self._config,
+                f"api.akshare.endpoints.{endpoint}.failure_threshold",
+                default_threshold,
+            )
+        )
+        cooldown_minutes = float(
+            _config_get(
+                self._config,
+                f"api.akshare.endpoints.{endpoint}.cooldown_minutes",
+                default_cooldown_minutes,
+            )
+        )
         return _EndpointRuntimeConfig(
             max_retries=max(retries, 1),
             jitter_seconds=jitter,
@@ -427,13 +736,35 @@ def _as_dataframe(value: object) -> pd.DataFrame:
     return pd.DataFrame(value)
 
 
-def _akshare_code_text(value: object) -> str:
-    if pd.isna(value):
-        return ""
-    text = str(value).strip()
-    if re.fullmatch(r"\d+\.0", text):
-        text = text.split(".", 1)[0]
-    return text.zfill(6) if text.isdigit() else text
+def _date_iso(value: str | date | datetime | None, default: str) -> str:
+    if value is None:
+        return default
+    if isinstance(value, datetime):
+        return value.date().isoformat()
+    if isinstance(value, date):
+        return value.isoformat()
+    parsed = pd.to_datetime(value, errors="raise")
+    return parsed.date().isoformat()
+
+
+def _akshare_date(value: str | date | datetime) -> str:
+    return _date_iso(value, datetime.now().date().isoformat()).replace("-", "")
+
+
+def _normalize_adjust(adjust: str) -> str:
+    normalized = str(adjust).strip().lower()
+    if normalized in {"", "none", "不复权"}:
+        return "none"
+    if normalized not in {"qfq", "hfq"}:
+        raise ValueError(f"Unsupported stock_zh_a_hist adjust: {adjust}")
+    return normalized
+
+
+def _to_numeric(series: pd.Series) -> pd.Series:
+    if series.empty:
+        return pd.to_numeric(series, errors="coerce")
+    values = series.replace({"": pd.NA, "-": pd.NA, "--": pd.NA, "None": pd.NA, "nan": pd.NA})
+    return pd.to_numeric(values, errors="coerce")
 
 
 def _standardize_columns(df: pd.DataFrame) -> pd.DataFrame:
