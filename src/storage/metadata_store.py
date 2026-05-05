@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from contextlib import contextmanager, suppress
-from datetime import datetime
 from pathlib import Path
 from threading import RLock
 from typing import Iterator
@@ -22,7 +21,6 @@ from src.utils import paths
 
 
 CHECKPOINT_KEY_COLUMNS = ["pipeline", "dataset", "code", "start_date", "end_date"]
-_MIGRATION_NAME = "parquet_metadata_v1"
 _DB_LOCKS: dict[Path, RLock] = {}
 _DB_LOCKS_GUARD = RLock()
 
@@ -44,11 +42,9 @@ class DuckDBMetadataStore:
         self,
         root: Path | None = None,
         duckdb_file: Path | None = None,
-        parquet_metadata_dir: Path | None = None,
     ) -> None:
         self.root = (root or paths.ROOT).resolve()
         self.duckdb_file = (duckdb_file or self.root / "data" / "duckdb" / "quant.duckdb").resolve()
-        self.parquet_metadata_dir = (parquet_metadata_dir or self.root / "data" / "metadata").resolve()
         self._lock = _lock_for(self.duckdb_file)
         self._initialized = False
         self._conn: duckdb.DuckDBPyConnection | None = None
@@ -205,7 +201,6 @@ class DuckDBMetadataStore:
     def _ensure_initialized(self, conn: duckdb.DuckDBPyConnection) -> None:
         if not self._initialized:
             self._create_tables(conn)
-            self._migrate_legacy_parquet(conn)
             self._initialized = True
 
     def _create_tables(self, conn: duckdb.DuckDBPyConnection) -> None:
@@ -254,14 +249,6 @@ class DuckDBMetadataStore:
             )
             """
         )
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS metadata_migrations (
-                name VARCHAR PRIMARY KEY,
-                migrated_at TIMESTAMP
-            )
-            """
-        )
         conn.execute("CREATE INDEX IF NOT EXISTS idx_update_status_key ON update_status(dataset, code)")
         conn.execute(
             """
@@ -275,56 +262,6 @@ class DuckDBMetadataStore:
             ON pipeline_checkpoints(pipeline, dataset, code, end_date)
             """
         )
-
-    def _migrate_legacy_parquet(self, conn: duckdb.DuckDBPyConnection) -> None:
-        migrated = conn.execute(
-            "SELECT 1 FROM metadata_migrations WHERE name = ?",
-            [_MIGRATION_NAME],
-        ).fetchone()
-        if migrated is not None:
-            return
-
-        self._migrate_legacy_table(conn, "update_runs", UPDATE_RUNS_SCHEMA)
-        self._migrate_legacy_table(conn, "update_status", UPDATE_STATUS_SCHEMA, upsert_keys=["dataset", "code"])
-        self._migrate_legacy_table(
-            conn,
-            "pipeline_checkpoints",
-            PIPELINE_CHECKPOINTS_SCHEMA,
-            upsert_keys=CHECKPOINT_KEY_COLUMNS,
-        )
-        conn.execute(
-            "INSERT INTO metadata_migrations VALUES (?, ?)",
-            [_MIGRATION_NAME, datetime.now()],
-        )
-
-    def _migrate_legacy_table(
-        self,
-        conn: duckdb.DuckDBPyConnection,
-        table_name: str,
-        schema: pa.Schema,
-        upsert_keys: list[str] | None = None,
-    ) -> None:
-        path = self.parquet_metadata_dir / f"{table_name}.parquet"
-        if not path.exists():
-            return
-
-        incoming = _clean_dataframe_for_schema(pd.read_parquet(path), schema)
-        if incoming.empty:
-            return
-
-        delete_sql = None
-        if upsert_keys:
-            predicates = " AND ".join(f"incoming.{column} = {table_name}.{column}" for column in upsert_keys)
-            delete_sql = f"""
-                DELETE FROM {table_name}
-                WHERE EXISTS (
-                    SELECT 1
-                    FROM incoming
-                    WHERE {predicates}
-                )
-            """
-        sqls = [sql for sql in [delete_sql, f"INSERT INTO {table_name} SELECT * FROM incoming"] if sql]
-        self._register_and_execute(conn, incoming, *sqls)
 
     def _register_and_execute(
         self,

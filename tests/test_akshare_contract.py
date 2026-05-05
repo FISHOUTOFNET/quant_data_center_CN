@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import os
 
-import pandas as pd
 import pytest
 
 from src.api.akshare_client import AkShareClient
@@ -26,18 +25,10 @@ class ContractConfig:
 
 
 def test_akshare_contract_stock_value_em_sample_stock() -> None:
-    client = AkShareClient(config=ContractConfig(), stock_basic_df=_contract_stock_basic())
+    client = AkShareClient(config=ContractConfig())
 
-    df = client.query_stock_value("sz.300766")
+    df = client.query_stock_value("300766")
 
     assert not df.empty
     assert not df.duplicated(["code", "date"]).any()
     assert set(df["code"].dropna().astype(str)) == {"300766"}
-
-
-def _contract_stock_basic() -> pd.DataFrame:
-    return pd.DataFrame(
-        [
-            {"code": "sz.300766", "code_name": "每日互动", "type": "1", "status": "1"},
-        ]
-    )

@@ -201,7 +201,7 @@ class BenchmarkEnvironment:
             "api": {
                 "provider": "baostock",
                 "baostock": {
-                    "adjustflag_map": {"none": "3", "qfq": "2", "hfq": "1"}
+                    "adjustflag_map": {"none": "3", "qfq": "1", "hfq": "2"}
                 },
             },
             "datasets": {

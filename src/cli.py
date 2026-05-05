@@ -7,15 +7,24 @@ from pathlib import Path
 
 import click
 
+from src.api.akshare_client import normalize_akshare_code
 from src.pipeline.repair_tool import repair as run_repair
 from src.pipeline.update_akshare import update_akshare as run_update_akshare
 from src.pipeline.update_akshare_hist import update_akshare_hist as run_update_akshare_hist
 from src.pipeline.update_akshare_spot import update_akshare_spot as run_update_akshare_spot
-from src.pipeline.update_akshare_universe import update_akshare_universe as run_update_akshare_universe
+from src.pipeline.update_akshare_delist import update_akshare_delist as run_update_akshare_delist
 from src.pipeline.update_daily import update_daily as run_update_daily
 from src.storage.duckdb_store import DuckDBStore
 from src.utils import paths
 from src.utils.logging import logger
+
+
+def _validate_akshare_codes(ctx: click.Context, param: click.Parameter, value: tuple[str, ...]) -> tuple[str, ...]:
+    del ctx, param
+    try:
+        return tuple(normalize_akshare_code(item) for item in value)
+    except ValueError as exc:
+        raise click.BadParameter(str(exc)) from exc
 
 
 def configure_logging(root: Path | None = None) -> None:
@@ -38,7 +47,6 @@ def cli() -> None:
 @click.option("--dataset", default="all", show_default=True, help="daily_k_none/daily_k_qfq/daily_k_hfq/daily_k_all/adjust_factor/all/stock_basic/calendar.")
 @click.option("--start", default="1990-01-01", show_default=True, help="Full-mode start date, YYYY-MM-DD.")
 @click.option("--code", multiple=True, help="Stock code. Can be repeated. Defaults to active latest stock_basic snapshot.")
-@click.option("--universe", default=None, help="Deprecated universe name in config/universe.yaml.")
 @click.option("--lookback-days", type=int, default=None, help="Trading-day lookback count. Defaults to settings.yaml.")
 @click.option("--end", default=None, help="Target date, YYYY-MM-DD. Defaults through 18:00 trading-day resolution.")
 @click.option("--mode", type=click.Choice(["partial", "full"]), default="partial", show_default=True, help="Update mode.")
@@ -50,7 +58,6 @@ def update_daily(
     dataset: str,
     start: str,
     code: tuple[str, ...],
-    universe: str | None,
     lookback_days: int | None,
     end: str | None,
     mode: str,
@@ -65,7 +72,6 @@ def update_daily(
         dataset=dataset,
         start=start,
         code=code,
-        universe=universe,
         lookback_days=lookback_days,
         end=end,
         mode=mode,
@@ -81,7 +87,7 @@ def update_daily(
 @cli.command("update-akshare")
 @click.option("--dataset", default="all", show_default=True, help="all/stock_value_em.")
 @click.option("--mode", type=click.Choice(["partial", "full"]), default="partial", show_default=True, help="Update mode.")
-@click.option("--code", multiple=True, help="AkShare stock code. Accepts 600000/sh.600000/sh600000. Can be repeated.")
+@click.option("--code", multiple=True, callback=_validate_akshare_codes, help="AkShare 6-digit stock code, e.g. 600000. Can be repeated.")
 @click.option("--include-inactive", is_flag=True, help="Use the full local AkShare pool, including delisted codes, in partial mode.")
 @click.option("--max-tasks", type=int, default=None, help="Maximum AkShare tasks to execute in this run.")
 @click.option("--workers", type=int, default=None, help="Concurrent fetch workers for stock_value_em. Defaults to api.akshare.workers.")
@@ -116,24 +122,28 @@ def update_akshare(
         click.echo(f"{item['dataset']} {item['code']} status={item['status']} rows={item['row_count']}")
 
 
-@cli.command("update-akshare-universe")
-@click.option("--market", default="全部", show_default=True, help="stock_info_sh_delist market parameter.")
+@cli.command("update-akshare-delist")
+@click.option("--market", default=None, help="Delist market parameter. Uses exchange-specific defaults if not specified.")
 @click.option("--snapshot-date", default=None, help="Snapshot date, YYYY-MM-DD. Defaults to today.")
+@click.option("--exchange", multiple=True, help="Exchange to fetch: sh or sz. Can be repeated. Defaults to both.")
 @click.option("--resume/--no-resume", default=True, show_default=True, help="Resume from successful checkpoints.")
 @click.option("--force", is_flag=True, help="Ignore checkpoints and re-fetch the snapshot.")
 @click.option("--build-views/--no-build-views", default=True, show_default=True)
-def update_akshare_universe(
-    market: str,
+def update_akshare_delist(
+    market: str | None,
     snapshot_date: str | None,
+    exchange: tuple[str, ...],
     resume: bool,
     force: bool,
     build_views: bool,
 ) -> None:
-    """Manually update AkShare SH delist universe data."""
+    """Manually update AkShare SH and SZ delisted stock data."""
 
-    records = run_update_akshare_universe(
+    exchanges = list(exchange) if exchange else None
+    records = run_update_akshare_delist(
         market=market,
         snapshot_date=snapshot_date,
+        exchanges=exchanges,
         resume=resume,
         force=force,
         build_views=build_views,
@@ -167,8 +177,8 @@ def update_akshare_spot(
 
 @cli.command("update-akshare-hist")
 @click.option("--mode", type=click.Choice(["full", "incremental"]), required=True, help="History update mode.")
-@click.option("--adjust", type=click.Choice(["none", "qfq", "hfq", "all"]), default="all", show_default=True)
-@click.option("--code", multiple=True, help="AkShare stock code. Accepts 600000/sh.600000/sh600000. Defaults to the local AkShare pool.")
+@click.option("--adjust", type=click.Choice(["none", "qfq", "hfq", "all"]), default="none", show_default=True)
+@click.option("--code", multiple=True, callback=_validate_akshare_codes, help="AkShare 6-digit stock code, e.g. 600000. Defaults to the local AkShare pool.")
 @click.option("--start", default=None, help="Start date, YYYY-MM-DD. Required for incremental mode.")
 @click.option("--end", default=None, help="End date, YYYY-MM-DD. Defaults through 18:00 trading-day resolution.")
 @click.option("--max-tasks", type=int, default=None, help="Maximum hist tasks to execute in this run.")

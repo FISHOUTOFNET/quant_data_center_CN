@@ -9,9 +9,9 @@ from src.pipeline.adjustments import calculate_adjusted_daily_k
 
 
 def test_calculate_forward_adjusted_daily_k_matches_baostock_example() -> None:
-    result = calculate_adjusted_daily_k(_raw_example(), _factor_example(), "daily_k_qfq", "2")
+    result = calculate_adjusted_daily_k(_raw_example(), _factor_example(), "daily_k_qfq", "1")
 
-    assert result["adjustflag"].tolist() == ["2", "2", "2"]
+    assert result["adjustflag"].tolist() == ["1", "1", "1"]
     assert result.loc[0, "open"] == pytest.approx(11.6816483)
     assert result.loc[0, "close"] == pytest.approx(11.75000645)
     assert result.loc[1, "open"] == pytest.approx(11.75)
@@ -19,9 +19,9 @@ def test_calculate_forward_adjusted_daily_k_matches_baostock_example() -> None:
 
 
 def test_calculate_backward_adjusted_daily_k_matches_baostock_example() -> None:
-    result = calculate_adjusted_daily_k(_raw_example(), _factor_example(), "daily_k_hfq", "1")
+    result = calculate_adjusted_daily_k(_raw_example(), _factor_example(), "daily_k_hfq", "2")
 
-    assert result["adjustflag"].tolist() == ["1", "1", "1"]
+    assert result["adjustflag"].tolist() == ["2", "2", "2"]
     assert result.loc[0, "open"] == pytest.approx(109.64075944)
     assert result.loc[0, "close"] == pytest.approx(110.28235036)
     assert result.loc[1, "open"] == pytest.approx(110.282351)
@@ -29,7 +29,7 @@ def test_calculate_backward_adjusted_daily_k_matches_baostock_example() -> None:
 
 
 def test_calculate_adjusted_daily_k_defaults_to_one_without_factor() -> None:
-    result = calculate_adjusted_daily_k(_raw_example(), pd.DataFrame(), "daily_k_qfq", "2")
+    result = calculate_adjusted_daily_k(_raw_example(), pd.DataFrame(), "daily_k_qfq", "1")
 
     assert result["open"].tolist() == [15.38, 11.75, 12.81]
     assert result["close"].tolist() == [15.47, 12.93, 12.84]

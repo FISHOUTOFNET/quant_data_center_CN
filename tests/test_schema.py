@@ -9,6 +9,7 @@ from src.storage.schema import (
     PIPELINE_CHECKPOINTS_SCHEMA,
     STOCK_BASIC_SCHEMA,
     STOCK_INFO_SH_DELIST_SCHEMA,
+    STOCK_INFO_SZ_DELIST_SCHEMA,
     STOCK_VALUE_EM_SCHEMA,
     STOCK_ZH_A_HIST_SCHEMA,
     STOCK_ZH_A_SPOT_EM_SCHEMA,
@@ -90,6 +91,7 @@ def test_akshare_dataset_schema_core_fields() -> None:
 
 def test_akshare_a_stock_schema_core_fields() -> None:
     assert STOCK_INFO_SH_DELIST_SCHEMA.field("snapshot_date").type == pa.date32()
+    assert STOCK_INFO_SZ_DELIST_SCHEMA.field("snapshot_date").type == pa.date32()
     assert STOCK_ZH_A_SPOT_EM_SCHEMA.field("trade_date").type == pa.date32()
     assert STOCK_ZH_A_SPOT_EM_SCHEMA.field("source_symbol").type == pa.string()
     assert STOCK_ZH_A_SPOT_SINA_SCHEMA.field("is_fallback").type == pa.bool_()

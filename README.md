@@ -46,12 +46,12 @@ qdc update-akshare --dataset stock_value_em --include-inactive
 
 - partial：使用最新 `stock_zh_a_spot_em` 清单并排除本地 delisted。
 - full 或 `--include-inactive`：使用最新 `stock_zh_a_spot_em` 与 delisted 的并集。
-- 显式 `--code` 可传 `600000`、`sh.600000` 或 `sh600000`，入库统一为 `600000`。
+- 显式 `--code` 只接受 6 位代码，例如 `600000`。
 
 ### AkShare A 股行情
 
 ```powershell
-qdc update-akshare-universe --market 全部
+qdc update-akshare-delist --market 全部
 qdc update-akshare-spot --end 2026-05-03
 qdc update-akshare-hist --mode full --adjust all --start 1990-01-01
 qdc update-akshare-hist --mode incremental --adjust none --start 2026-05-01 --end 2026-05-03
@@ -85,8 +85,6 @@ data/
 │   └── manifest/fetch_runs.jsonl
 └── duckdb/quant.duckdb
 ```
-
-旧 AkShare 分区如果曾写成 `code=sh.600000`，本次不会自动迁移。建议重建 AkShare 数据，或后续单独编写迁移脚本。
 
 ## 查询示例
 
@@ -172,6 +170,6 @@ src/
 ├── storage/      # Schema、ParquetStore、DuckDBStore
 └── utils/        # 配置、路径、日志、性能工具
 tests/            # 单元与管道测试
-config/           # settings.yaml 与旧 universe.yaml
+config/           # settings.yaml
 scripts/          # Windows 定时任务脚本
 ```

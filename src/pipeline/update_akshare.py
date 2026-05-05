@@ -112,7 +112,7 @@ def update_akshare(
     build_views: bool = True,
     workers: int | None = None,
     client: Any | None = None,
-    client_factory: Callable[[ConfigManager, pd.DataFrame], Any] | None = None,
+    client_factory: Callable[[ConfigManager], Any] | None = None,
 ) -> list[dict[str, object]]:
     """Update AkShare crawler datasets without going through MarketDataProvider."""
 
@@ -129,11 +129,10 @@ def update_akshare(
         max_tasks=max_tasks,
     )
     checkpoint_lookup = PipelineCheckpointLookup.from_store(store) if resume and not force else None
-    stock_basic_df = store.read_stock_basic()
     ak_client = client or (
-        client_factory(config, stock_basic_df)
+        client_factory(config)
         if client_factory is not None
-        else AkShareClient(config=config, stock_basic_df=stock_basic_df)
+        else AkShareClient(config=config)
     )
     resolved_workers = _resolve_akshare_workers(config, workers)
     metadata_batch = PipelineMetadataBatch(
@@ -144,10 +143,45 @@ def update_akshare(
     run_records: list[dict[str, object]] = []
     concurrent_stock_value_tasks: list[AkShareTask] = []
 
+    planned_task_count = len(tasks)
     stock_value_em_tasks = [t for t in tasks if t.dataset == STOCK_VALUE_EM_DATASET.name]
     other_tasks = [t for t in tasks if t.dataset != STOCK_VALUE_EM_DATASET.name]
     stock_value_em_tasks = _prefilter_stock_value_em_tasks(stock_value_em_tasks, store, checkpoint_lookup)
     tasks = other_tasks + stock_value_em_tasks
+    progress_total = len(tasks)
+    progress_processed = 0
+    progress_success = 0
+    progress_failed = 0
+    progress_skipped = 0
+    logger.info(
+        "AkShare update started dataset={} mode={} force={} workers={} planned_tasks={} processing_tasks={}",
+        dataset,
+        mode,
+        force,
+        resolved_workers,
+        planned_task_count,
+        progress_total,
+    )
+
+    def log_progress(row: dict[str, object], task: AkShareTask | None = None) -> None:
+        nonlocal progress_processed, progress_success, progress_failed, progress_skipped
+        progress_processed += 1
+        status = str(row.get("status", "unknown"))
+        if status == "success":
+            progress_success += 1
+        elif status == "failed":
+            progress_failed += 1
+        elif status.startswith("skipped"):
+            progress_skipped += 1
+        logger.info(
+            "AkShare update progress {}/{} code={} dataset={} status={} rows={}",
+            progress_processed,
+            progress_total,
+            row.get("code", task.key if task is not None else ""),
+            row.get("dataset", task.dataset if task is not None else ""),
+            status,
+            row.get("row_count", 0),
+        )
 
     def flush_concurrent_stock_value_tasks() -> None:
         if not concurrent_stock_value_tasks:
@@ -159,6 +193,7 @@ def update_akshare(
             metadata_batch,
             run_records,
             resolved_workers,
+            progress_callback=log_progress,
         )
         concurrent_stock_value_tasks.clear()
 
@@ -188,6 +223,7 @@ def update_akshare(
             )
             metadata_batch.add(run_row=row)
             run_records.append(row)
+            log_progress(row, task)
             continue
 
         if task.dataset == STOCK_VALUE_EM_DATASET.name and resolved_workers > 1:
@@ -201,12 +237,20 @@ def update_akshare(
             status_row=row.get("status_row"),
             checkpoint=row.get("checkpoint_row"),
         )
+        log_progress(row["run_row"], task)
 
     flush_concurrent_stock_value_tasks()
     metadata_batch.flush()
     store.close()
     if build_views:
         DuckDBStore(root=config.root).build_views()
+    logger.info(
+        "AkShare update completed processed={} success={} failed={} skipped={}",
+        progress_processed,
+        progress_success,
+        progress_failed,
+        progress_skipped,
+    )
     return run_records
 
 
@@ -295,6 +339,7 @@ def _execute_stock_value_tasks_concurrently(
     metadata_batch: PipelineMetadataBatch,
     run_records: list[dict[str, object]],
     workers: int,
+    progress_callback: Callable[[dict[str, object], AkShareTask], None] | None = None,
 ) -> None:
     if not tasks:
         return
@@ -341,6 +386,8 @@ def _execute_stock_value_tasks_concurrently(
                     status_row=row.get("status_row"),
                     checkpoint=row.get("checkpoint_row"),
                 )
+                if progress_callback is not None:
+                    progress_callback(row["run_row"], task)
                 fetch_success = result.error is None
                 controller.record_fetch_result(fetch_success)
                 if isinstance(result.error, AkShareCircuitOpen):

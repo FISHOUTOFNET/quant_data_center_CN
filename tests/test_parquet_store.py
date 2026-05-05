@@ -116,6 +116,28 @@ def test_akshare_a_stock_writes_and_hist_upsert_overrides_spot(tmp_path) -> None
     assert delist_path == tmp_path / "data" / "parquet" / "stock_info_sh_delist" / "snapshot_date=2024-01-03" / "data.parquet"
     assert store.read_latest_stock_info_sh_delist().loc[0, "code"] == "600001"
 
+    sz_delist_path = store.write_stock_info_sz_delist(
+        "2024-01-03",
+        pd.DataFrame(
+            [
+                {
+                    "snapshot_date": "2024-01-03",
+                    "exchange": "sz",
+                    "market": "全部",
+                    "code": "000001",
+                    "source_symbol": "000001",
+                    "name": "Old SZ Corp",
+                    "list_date": "2000-01-01",
+                    "delist_date": "2024-01-02",
+                    "source_endpoint": "stock_info_sz_delist",
+                    "fetched_at": fetched_at,
+                }
+            ]
+        ),
+    )
+    assert sz_delist_path == tmp_path / "data" / "parquet" / "stock_info_sz_delist" / "snapshot_date=2024-01-03" / "data.parquet"
+    assert store.read_latest_stock_info_sz_delist().loc[0, "code"] == "000001"
+
     spot_path = store.write_stock_zh_a_spot_em(
         "2024-01-03",
         pd.DataFrame(
@@ -516,7 +538,7 @@ def test_persist_update_metadata_batches_match_individual_writes(tmp_path) -> No
         pd.testing.assert_frame_equal(left, right)
 
 
-def test_duckdb_metadata_migrates_legacy_parquet_once(tmp_path) -> None:
+def test_duckdb_metadata_ignores_parquet_metadata_files(tmp_path) -> None:
     metadata_dir = tmp_path / "data" / "metadata"
     metadata_dir.mkdir(parents=True)
     pd.DataFrame(
@@ -537,12 +559,9 @@ def test_duckdb_metadata_migrates_legacy_parquet_once(tmp_path) -> None:
     ).to_parquet(metadata_dir / "pipeline_checkpoints.parquet")
 
     store = ParquetStore(root=tmp_path)
-    first = store.read_pipeline_checkpoints()
-    second = store.read_pipeline_checkpoints()
+    checkpoints = store.read_pipeline_checkpoints()
 
-    assert len(first) == 1
-    assert len(second) == 1
-    assert first.loc[0, "dataset"] == "daily_k_qfq"
+    assert checkpoints.empty
     assert (tmp_path / "data" / "duckdb" / "quant.duckdb").exists()
 
 

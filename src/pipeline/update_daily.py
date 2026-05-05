@@ -52,7 +52,6 @@ def update_daily(
     dataset: str = "all",
     start: str = FULL_HISTORY_START_DATE,
     code: tuple[str, ...] | list[str] | str | None = None,
-    universe: str | None = None,
     lookback_days: int | None = None,
     end: str | None = None,
     root: Path | None = None,
@@ -81,6 +80,15 @@ def update_daily(
     candidate_end_date = date_iso(end) if end is not None else default_candidate_date(config)
     lookback = int(lookback_days if lookback_days is not None else config.get("pipeline.lookback_days", 30))
     run_records: list[dict[str, object]] = []
+    logger.info(
+        "Daily update started dataset={} mode={} force={} resume={} candidate_start={} candidate_end={}",
+        dataset,
+        mode,
+        force,
+        resume,
+        start_candidate_date,
+        candidate_end_date,
+    )
 
     with create_provider(config, provider) as data_provider:
         checkpoint_lookup = PipelineCheckpointLookup.from_store(store) if resume and not force else None
@@ -146,7 +154,7 @@ def update_daily(
             )
 
         needs_code_pool = bool(daily_targets or include_adjust_factor)
-        if needs_code_pool and not code and not universe and not store.stock_basic_path().exists():
+        if needs_code_pool and not code and not store.stock_basic_path().exists():
             _write_stock_basic_target(
                 store,
                 data_provider,
@@ -160,7 +168,7 @@ def update_daily(
 
         stock_basic_mode = "all" if mode == "full" else "active"
         codes = (
-            resolve_codes(config, store, code, universe, stock_basic_mode=stock_basic_mode)
+            resolve_codes(config, store, code, stock_basic_mode=stock_basic_mode)
             if needs_code_pool
             else []
         )
@@ -391,4 +399,14 @@ def update_daily(
     store.close()
     if build_views:
         DuckDBStore(root=config.root).build_views()
+    success_count = sum(1 for row in run_records if row.get("status") == "success")
+    failed_count = sum(1 for row in run_records if row.get("status") == "failed")
+    skipped_count = sum(1 for row in run_records if str(row.get("status", "")).startswith("skipped"))
+    logger.info(
+        "Daily update completed records={} success={} failed={} skipped={}",
+        len(run_records),
+        success_count,
+        failed_count,
+        skipped_count,
+    )
     return run_records

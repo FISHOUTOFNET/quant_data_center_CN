@@ -33,12 +33,29 @@ class DuckDBStore:
         return duckdb.connect(str(self.duckdb_file))
 
     def build_views(self) -> list[str]:
+        self._cleanup_tmp_parquet_files()
         sqls = self.view_sqls()
         with self.connect() as conn:
             for sql in sqls:
                 conn.execute(sql)
         logger.info("Built DuckDB views in {}", self.duckdb_file)
         return sqls
+
+    def _cleanup_tmp_parquet_files(self) -> int:
+        """Remove stale .tmp.parquet files left by interrupted writes."""
+        if not self.parquet_dir.exists():
+            return 0
+        count = 0
+        for tmp_file in self.parquet_dir.rglob("*.tmp.parquet"):
+            try:
+                tmp_file.unlink()
+                count += 1
+                logger.debug("Removed stale temp parquet file: {}", tmp_file)
+            except OSError as e:
+                logger.warning("Failed to remove temp parquet file {}: {}", tmp_file, e)
+        if count > 0:
+            logger.info("Cleaned up {} stale .tmp.parquet files", count)
+        return count
 
     def view_sqls(self) -> list[str]:
         return [
@@ -141,7 +158,12 @@ class DuckDBStore:
         return path.as_posix().replace("'", "''")
 
     def _has_parquet_files(self, directory: Path) -> bool:
-        return directory.exists() and any(directory.rglob("*.parquet"))
+        if not directory.exists():
+            return False
+        for f in directory.rglob("*.parquet"):
+            if ".tmp.parquet" not in f.name:
+                return True
+        return False
 
     def _quote(self, name: str) -> str:
         return '"' + name.replace('"', '""') + '"'

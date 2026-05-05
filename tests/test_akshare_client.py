@@ -9,7 +9,6 @@ from src.api.akshare_client import (
     AkShareCircuitOpen,
     AkShareClient,
     AkShareNetworkError,
-    akshare_symbol_to_project_code,
     normalize_akshare_code,
 )
 
@@ -28,7 +27,7 @@ class FakeConfig:
         return self._values.get(dotted_key, default)
 
 
-def test_akshare_client_maps_stock_value_and_stores_source_code(stock_basic_sample) -> None:
+def test_akshare_client_maps_stock_value_and_stores_source_code() -> None:
     calls: list[str] = []
 
     class FakeAk:
@@ -56,25 +55,25 @@ def test_akshare_client_maps_stock_value_and_stores_source_code(stock_basic_samp
                 ]
             )
 
-    client = AkShareClient(config=FakeConfig(), stock_basic_df=stock_basic_sample(), ak_module=FakeAk())
+    client = AkShareClient(config=FakeConfig(), ak_module=FakeAk())
 
-    df = client.query_stock_value("sh.600000")
+    df = client.query_stock_value("600000")
 
     assert calls == ["600000"]
     assert df.loc[0, "code"] == "600000"
     assert df.loc[0, "pe_ttm"] == 5.0
 
 
-def test_akshare_client_handles_empty_data(stock_basic_sample) -> None:
+def test_akshare_client_handles_empty_data() -> None:
     class FakeAk:
         __version__ = "fake-1"
 
         def stock_value_em(self, symbol: str) -> pd.DataFrame:
             return pd.DataFrame()
 
-    client = AkShareClient(config=FakeConfig(), stock_basic_df=stock_basic_sample(), ak_module=FakeAk())
+    client = AkShareClient(config=FakeConfig(), ak_module=FakeAk())
 
-    value_df = client.query_stock_value("sh.600000")
+    value_df = client.query_stock_value("600000")
     assert value_df.empty
     assert list(value_df.columns) == [
         "date",
@@ -94,7 +93,7 @@ def test_akshare_client_handles_empty_data(stock_basic_sample) -> None:
     ]
 
 
-def test_akshare_client_retries_failures(stock_basic_sample) -> None:
+def test_akshare_client_retries_failures() -> None:
     calls = {"count": 0}
 
     class FakeAk:
@@ -106,15 +105,15 @@ def test_akshare_client_retries_failures(stock_basic_sample) -> None:
                 raise OSError("temporary")
             return _stock_value_raw()
 
-    client = AkShareClient(config=FakeConfig(), stock_basic_df=stock_basic_sample(), ak_module=FakeAk())
+    client = AkShareClient(config=FakeConfig(), ak_module=FakeAk())
 
-    df = client.query_stock_value("sh.600000")
+    df = client.query_stock_value("600000")
 
     assert len(df) == 1
     assert calls["count"] == 3
 
 
-def test_akshare_client_opens_endpoint_circuit(stock_basic_sample) -> None:
+def test_akshare_client_opens_endpoint_circuit() -> None:
     calls = {"count": 0}
 
     class FakeAk:
@@ -132,30 +131,29 @@ def test_akshare_client_opens_endpoint_circuit(stock_basic_sample) -> None:
                 "api.akshare.endpoints.stock_value_em.cooldown_minutes": 30,
             }
         ),
-        stock_basic_df=stock_basic_sample(),
         ak_module=FakeAk(),
         now=lambda: datetime(2024, 1, 2, 10, 0),
     )
 
     with pytest.raises(AkShareNetworkError):
-        client.query_stock_value("sh.600000")
+        client.query_stock_value("600000")
     with pytest.raises(AkShareNetworkError):
-        client.query_stock_value("sh.600000")
+        client.query_stock_value("600000")
     with pytest.raises(AkShareCircuitOpen):
-        client.query_stock_value("sh.600000")
+        client.query_stock_value("600000")
     assert calls["count"] == 2
 
 
-def test_akshare_client_handles_none_type_subscript_error(stock_basic_sample) -> None:
+def test_akshare_client_handles_none_type_subscript_error() -> None:
     class FakeAk:
         __version__ = "fake-1"
 
         def stock_value_em(self, symbol: str) -> pd.DataFrame:
             raise TypeError("'NoneType' object is not subscriptable")
 
-    client = AkShareClient(config=FakeConfig(), stock_basic_df=stock_basic_sample(), ak_module=FakeAk())
+    client = AkShareClient(config=FakeConfig(), ak_module=FakeAk())
 
-    df = client.query_stock_value("sh.600000")
+    df = client.query_stock_value("600000")
 
     assert df.empty
     assert list(df.columns) == [
@@ -176,7 +174,7 @@ def test_akshare_client_handles_none_type_subscript_error(stock_basic_sample) ->
     ]
 
 
-def test_akshare_client_normalizes_a_stock_endpoints(stock_basic_sample) -> None:
+def test_akshare_client_normalizes_source_symbols_from_a_stock_endpoints() -> None:
     calls: dict[str, object] = {}
 
     class FakeAk:
@@ -284,7 +282,6 @@ def test_akshare_client_normalizes_a_stock_endpoints(stock_basic_sample) -> None
 
     client = AkShareClient(
         config=FakeConfig({"api.akshare.max_retries": 1}),
-        stock_basic_df=stock_basic_sample(),
         ak_module=FakeAk(),
         now=lambda: datetime(2024, 1, 3, 16, 0),
     )
@@ -292,7 +289,7 @@ def test_akshare_client_normalizes_a_stock_endpoints(stock_basic_sample) -> None
     delist = client.fetch_stock_info_sh_delist(symbol="全部", snapshot_date="2024-01-03").data
     spot_em = client.fetch_stock_zh_a_spot_em(trade_date="2024-01-03").data
     spot_sina = client.fetch_stock_zh_a_spot_sina(trade_date="2024-01-03", fallback_reason="planned").data
-    hist = client.fetch_stock_zh_a_hist("sz.000001", "2024-01-01", "2024-01-03", "none").data
+    hist = client.fetch_stock_zh_a_hist("000001", "2024-01-01", "2024-01-03", "none").data
 
     assert calls["delist_symbol"] == "全部"
     assert delist.loc[0, "code"] == "600001"
@@ -308,13 +305,11 @@ def test_akshare_client_normalizes_a_stock_endpoints(stock_basic_sample) -> None
     assert hist.loc[0, "quality_status"] == "hist_confirmed"
 
 
-def test_akshare_code_normalizers_return_six_digits() -> None:
-    assert akshare_symbol_to_project_code("bj430017") == "430017"
-    assert akshare_symbol_to_project_code("430017") == "430017"
-    assert akshare_symbol_to_project_code("600000") == "600000"
-    assert normalize_akshare_code("sh.600000") == "600000"
-    assert normalize_akshare_code("sh600000") == "600000"
-    assert normalize_akshare_code("600000.0") == "600000"
+def test_akshare_code_normalizer_accepts_only_explicit_six_digit_codes() -> None:
+    assert normalize_akshare_code("600000") == "600000"
+    for code in ["sh.600000", "sh600000", "600000.0", "1", ""]:
+        with pytest.raises(ValueError):
+            normalize_akshare_code(code)
 
 
 def _stock_value_raw() -> pd.DataFrame:

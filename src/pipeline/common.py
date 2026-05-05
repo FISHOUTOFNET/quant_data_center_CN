@@ -210,16 +210,12 @@ def resolve_codes(
     config: ConfigManager,
     store: ParquetStore,
     code: tuple[str, ...] | list[str] | str | None,
-    universe: str | None,
     stock_basic_mode: str,
 ) -> list[str]:
     if isinstance(code, str):
         return [code]
     if code:
         return [str(item) for item in code]
-    if universe:
-        logger.warning("--universe/config/universe.yaml is deprecated; prefer stock_basic-derived code pools.")
-        return config.universe_codes(universe)
     codes = store.stock_basic_codes(stock_basic_mode)
     if not codes:
         raise ValueError("No stock codes found in stock_basic data")

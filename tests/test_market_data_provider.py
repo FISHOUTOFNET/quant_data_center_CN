@@ -89,7 +89,7 @@ def test_baostock_provider_maps_daily_request_to_client(tmp_path) -> None:
         "start_date": "2024-01-01",
         "end_date": "2024-01-31",
         "frequency": "d",
-        "adjustflag": "2",
+        "adjustflag": "1",
     }
 
 
@@ -138,8 +138,8 @@ def _write_settings(root) -> None:
                 "  baostock:",
                 "    adjustflag_map:",
                 '      none: "3"',
-                '      qfq: "2"',
-                '      hfq: "1"',
+                '      qfq: "1"',
+                '      hfq: "2"',
                 "datasets:",
                 "  daily_k:",
                 '    fields: "date,code,close"',

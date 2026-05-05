@@ -13,6 +13,7 @@ from src.storage.schema import (
     DAILY_K_SCHEMA,
     STOCK_BASIC_SCHEMA,
     STOCK_INFO_SH_DELIST_SCHEMA,
+    STOCK_INFO_SZ_DELIST_SCHEMA,
     STOCK_VALUE_EM_SCHEMA,
     STOCK_ZH_A_HIST_SCHEMA,
     STOCK_ZH_A_SPOT_EM_SCHEMA,
@@ -172,7 +173,19 @@ def validate_stock_value_em(df: pd.DataFrame, schema: pa.Schema = STOCK_VALUE_EM
 def validate_stock_info_sh_delist(df: pd.DataFrame, schema: pa.Schema = STOCK_INFO_SH_DELIST_SCHEMA) -> None:
     validate_schema_matches(df, schema)
     validate_akshare_six_digit_codes(df)
-    validate_unique_columns(df, ["snapshot_date", "market", "code"])
+    duplicated = df.duplicated(["snapshot_date", "market", "code"], keep=False)
+    if duplicated.any():
+        sample = df.loc[duplicated, ["snapshot_date", "market", "code"]].head(5).to_dict("records")
+        logger.warning("Duplicate rows found for ['snapshot_date', 'market', 'code']: {}", sample)
+
+
+def validate_stock_info_sz_delist(df: pd.DataFrame, schema: pa.Schema = STOCK_INFO_SZ_DELIST_SCHEMA) -> None:
+    validate_schema_matches(df, schema)
+    validate_akshare_six_digit_codes(df)
+    duplicated = df.duplicated(["snapshot_date", "market", "code"], keep=False)
+    if duplicated.any():
+        sample = df.loc[duplicated, ["snapshot_date", "market", "code"]].head(5).to_dict("records")
+        logger.warning("Duplicate rows found for ['snapshot_date', 'market', 'code']: {}", sample)
 
 
 def validate_stock_zh_a_spot_em(df: pd.DataFrame, schema: pa.Schema = STOCK_ZH_A_SPOT_EM_SCHEMA) -> None:

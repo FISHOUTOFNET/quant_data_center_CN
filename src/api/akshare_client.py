@@ -15,6 +15,7 @@ import pandas as pd
 
 from src.storage.schema import (
     STOCK_INFO_SH_DELIST_SCHEMA,
+    STOCK_INFO_SZ_DELIST_SCHEMA,
     STOCK_VALUE_EM_SCHEMA,
     STOCK_ZH_A_HIST_SCHEMA,
     STOCK_ZH_A_SPOT_EM_SCHEMA,
@@ -25,8 +26,8 @@ from src.utils.config_mgr import ConfigManager
 from src.utils.logging import logger
 
 
-PROJECT_CODE_PATTERN = re.compile(r"^(?P<market>sh|sz|bj)\.(?P<symbol>\d{6})$", re.IGNORECASE)
 AKSHARE_PREFIXED_CODE_PATTERN = re.compile(r"^(?P<market>sh|sz|bj)[\.\s_-]?(?P<symbol>\d{6})$", re.IGNORECASE)
+AKSHARE_STORAGE_CODE_PATTERN = re.compile(r"^\d{6}$")
 
 
 class AkShareError(RuntimeError):
@@ -49,12 +50,6 @@ class AkShareSchemaDriftError(AkShareError):
 
 class AkShareEmptyDataError(AkShareError):
     error_type = "empty_data"
-
-
-@dataclass(frozen=True)
-class CodeMaps:
-    six_to_project: Mapping[str, str]
-    project_to_six: Mapping[str, str]
 
 
 @dataclass(frozen=True)
@@ -106,6 +101,13 @@ STOCK_INFO_SH_DELIST_FIELD_ALIASES = {
     "name": ("公司简称", "证券简称", "名称", "name"),
     "list_date": ("上市日期", "list_date"),
     "delist_date": ("暂停上市日期", "终止上市日期", "delist_date"),
+}
+
+STOCK_INFO_SZ_DELIST_FIELD_ALIASES = {
+    "source_symbol": ("公司代码", "证券代码", "代码", "source_symbol"),
+    "name": ("公司简称", "证券简称", "名称", "name"),
+    "list_date": ("上市日期", "list_date"),
+    "delist_date": ("终止上市日期", "退市日期", "delist_date"),
 }
 
 STOCK_ZH_A_SPOT_EM_FIELD_ALIASES = {
@@ -161,91 +163,33 @@ STOCK_ZH_A_HIST_FIELD_ALIASES = {
 }
 
 
-def build_code_maps(stock_basic_df: pd.DataFrame | None) -> CodeMaps:
-    """Build reversible 6-digit/project-code maps from local stock_basic data."""
-
-    if stock_basic_df is None or stock_basic_df.empty or "code" not in stock_basic_df.columns:
-        return CodeMaps(six_to_project={}, project_to_six={})
-
-    if "type" in stock_basic_df.columns:
-        work_df = stock_basic_df[stock_basic_df["type"].astype(str).str.strip() == "1"]
-    else:
-        work_df = stock_basic_df
-
-    six_to_project: dict[str, str] = {}
-    project_to_six: dict[str, str] = {}
-    for raw_code in work_df["code"].dropna().astype(str):
-        code = raw_code.strip().lower()
-        match = PROJECT_CODE_PATTERN.match(code)
-        if match is None:
-            continue
-        symbol = match.group("symbol")
-        if symbol in six_to_project and six_to_project[symbol] != code:
-            logger.warning(
-                "Duplicate 6-digit stock_basic mapping ignored symbol={} existing={} incoming={}",
-                symbol,
-                six_to_project[symbol],
-                code,
-            )
-            continue
-        six_to_project[symbol] = code
-        project_to_six[code] = symbol
-    return CodeMaps(six_to_project=six_to_project, project_to_six=project_to_six)
-
-
-def code_to_akshare_symbol(code: str, code_maps: CodeMaps) -> str:
+def code_to_akshare_symbol(code: object) -> str:
     """Return the 6-digit AkShare request/storage symbol."""
 
-    return normalize_akshare_code(code, code_maps)
+    return normalize_akshare_code(code)
 
 
-def project_code_to_akshare_symbol(code: str, code_maps: CodeMaps) -> str:
-    """Backward-compatible wrapper for converting user input to AkShare symbol."""
+def normalize_akshare_code(code: object) -> str:
+    """Validate and return a 6-digit AkShare code for explicit user input."""
 
-    return code_to_akshare_symbol(code, code_maps)
-
-
-def akshare_symbol_to_project_code(
-    symbol: object,
-    code_maps: CodeMaps | None = None,
-    default_market: str | None = None,
-) -> str:
-    """Convert AkShare/Sina code shapes into the 6-digit AkShare storage code.
-
-    The public name is kept for compatibility with older callers. AkShare
-    datasets now store only 6-digit A-share codes; Baostock datasets still use
-    market-prefixed project codes.
-    """
-
-    return normalize_akshare_code(symbol, code_maps)
+    if pd.isna(code):
+        raise ValueError("AkShare stock code must be a 6-digit string")
+    value = str(code).strip()
+    if not AKSHARE_STORAGE_CODE_PATTERN.fullmatch(value):
+        raise ValueError(f"AkShare stock code must be 6 digits, got: {value!r}")
+    return value
 
 
-def normalize_akshare_code(symbol: object, code_maps: CodeMaps | None = None) -> str:
-    """Normalize accepted A-share code shapes to a 6-digit AkShare code."""
+def _normalize_source_code(symbol: object) -> str:
+    """Normalize source-provided AkShare/Sina code shapes to storage code."""
 
     value = _clean_source_symbol(symbol)
     if value == "":
         return ""
-    lower = value.lower()
-    prefixed_match = AKSHARE_PREFIXED_CODE_PATTERN.match(lower)
+    prefixed_match = AKSHARE_PREFIXED_CODE_PATTERN.match(value.lower())
     if prefixed_match is not None:
         return prefixed_match.group("symbol")
-    if re.fullmatch(r"\d+\.0", value):
-        value = value.split(".", 1)[0]
-    digits = value.zfill(6) if value.isdigit() else value
-    maps = code_maps or CodeMaps(six_to_project={}, project_to_six={})
-    mapped = maps.project_to_six.get(lower)
-    if mapped is not None:
-        return mapped
-    if PROJECT_CODE_PATTERN.match(lower) is not None:
-        return PROJECT_CODE_PATTERN.match(lower).group("symbol")  # type: ignore[union-attr]
-    return digits
-
-
-def normalize_project_code(code: object, code_maps: CodeMaps | None = None) -> str:
-    """Backward-compatible AkShare code normalizer returning a 6-digit code."""
-
-    return normalize_akshare_code(code, code_maps)
+    return value.zfill(6) if value.isdigit() else value
 
 
 def _clean_source_symbol(symbol: object) -> str:
@@ -255,17 +199,6 @@ def _clean_source_symbol(symbol: object) -> str:
     if re.fullmatch(r"\d+\.0", value):
         value = value.split(".", 1)[0]
     return value
-
-
-def _infer_market_for_symbol(symbol: str) -> str:
-    digits = str(symbol).zfill(6)
-    if digits.startswith(("60", "68", "90")):
-        return "sh"
-    if digits.startswith(("00", "20", "30")):
-        return "sz"
-    if digits.startswith(("43", "83", "87", "88", "92", "4", "8")):
-        return "bj"
-    return "sh"
 
 
 def dataframe_hash(df: pd.DataFrame) -> str:
@@ -279,7 +212,6 @@ class AkShareClient:
     def __init__(
         self,
         config: ConfigManager | None = None,
-        stock_basic_df: pd.DataFrame | None = None,
         ak_module: Any | None = None,
         sleep: Callable[[float], None] = time.sleep,
         random_uniform: Callable[[float, float], float] | None = None,
@@ -290,20 +222,15 @@ class AkShareClient:
         self._sleep = sleep
         self._random_uniform = random_uniform or _default_random_uniform
         self._now = now or datetime.now
-        self._code_maps = build_code_maps(stock_basic_df)
         self._states: dict[str, _EndpointState] = {}
         self._state_lock = RLock()
         self._ak_lock = RLock()
-
-    @property
-    def code_maps(self) -> CodeMaps:
-        return self._code_maps
 
     def query_stock_value(self, code: str) -> pd.DataFrame:
         return self.fetch_stock_value(code).data
 
     def fetch_stock_value(self, code: str) -> AkShareResponse:
-        symbol = code_to_akshare_symbol(code, self._code_maps)
+        symbol = code_to_akshare_symbol(code)
         params: dict[str, object] = {"symbol": symbol}
         return self._fetch(
             endpoint="stock_value_em",
@@ -324,6 +251,25 @@ class AkShareClient:
             params=params,
             caller=lambda: self._ak().stock_info_sh_delist(symbol=symbol),
             normalizer=lambda raw: self._normalize_stock_info_sh_delist(
+                raw,
+                market=symbol,
+                snapshot_date=resolved_snapshot_date,
+                fetched_at=self._now(),
+            ),
+        )
+
+    def fetch_stock_info_sz_delist(
+        self,
+        symbol: str = "终止上市公司",
+        snapshot_date: str | date | None = None,
+    ) -> AkShareResponse:
+        resolved_snapshot_date = _date_iso(snapshot_date, self._now().date().isoformat())
+        params: dict[str, object] = {"symbol": symbol, "snapshot_date": resolved_snapshot_date}
+        return self._fetch(
+            endpoint="stock_info_sz_delist",
+            params=params,
+            caller=lambda: self._ak().stock_info_sz_delist(symbol=symbol),
+            normalizer=lambda raw: self._normalize_stock_info_sz_delist(
                 raw,
                 market=symbol,
                 snapshot_date=resolved_snapshot_date,
@@ -374,15 +320,14 @@ class AkShareClient:
         end_date: str | date,
         adjust: str,
     ) -> AkShareResponse:
-        project_code = normalize_project_code(symbol, self._code_maps)
-        source_symbol = code_to_akshare_symbol(project_code, self._code_maps)
+        stock_code = code_to_akshare_symbol(symbol)
         normalized_adjust = _normalize_adjust(adjust)
         ak_adjust = "" if normalized_adjust == "none" else normalized_adjust
         request_start = _akshare_date(start_date)
         request_end = _akshare_date(end_date)
         params: dict[str, object] = {
-            "symbol": source_symbol,
-            "project_code": project_code,
+            "symbol": stock_code,
+            "code": stock_code,
             "period": "daily",
             "start_date": request_start,
             "end_date": request_end,
@@ -392,7 +337,7 @@ class AkShareClient:
             endpoint="stock_zh_a_hist",
             params=params,
             caller=lambda: self._ak().stock_zh_a_hist(
-                symbol=source_symbol,
+                symbol=stock_code,
                 period="daily",
                 start_date=request_start,
                 end_date=request_end,
@@ -400,8 +345,8 @@ class AkShareClient:
             ),
             normalizer=lambda raw: self._normalize_stock_zh_a_hist(
                 raw,
-                project_code=project_code,
-                source_symbol=source_symbol,
+                stock_code=stock_code,
+                source_symbol=stock_code,
                 adjust=normalized_adjust,
                 fetched_at=self._now(),
             ),
@@ -502,9 +447,32 @@ class AkShareClient:
         selected["market"] = market
         selected["source_symbol"] = selected["source_symbol"].map(_clean_source_symbol)
         selected["code"] = selected["source_symbol"].map(
-            lambda value: akshare_symbol_to_project_code(value, self._code_maps, default_market="sh")
+            _normalize_source_code
         )
         selected["source_endpoint"] = "stock_info_sh_delist"
+        selected["fetched_at"] = fetched_at
+        return selected[columns].reset_index(drop=True)
+
+    def _normalize_stock_info_sz_delist(
+        self,
+        raw_df: pd.DataFrame,
+        market: str,
+        snapshot_date: str,
+        fetched_at: datetime,
+    ) -> pd.DataFrame:
+        raw_df = _standardize_columns(raw_df)
+        columns = field_names(STOCK_INFO_SZ_DELIST_SCHEMA)
+        if raw_df.empty:
+            return pd.DataFrame(columns=columns)
+        selected = _select_required_columns(raw_df, STOCK_INFO_SZ_DELIST_FIELD_ALIASES, "stock_info_sz_delist")
+        selected["snapshot_date"] = snapshot_date
+        selected["exchange"] = "sz"
+        selected["market"] = market
+        selected["source_symbol"] = selected["source_symbol"].map(_clean_source_symbol)
+        selected["code"] = selected["source_symbol"].map(
+            _normalize_source_code
+        )
+        selected["source_endpoint"] = "stock_info_sz_delist"
         selected["fetched_at"] = fetched_at
         return selected[columns].reset_index(drop=True)
 
@@ -521,7 +489,7 @@ class AkShareClient:
         selected["trade_date"] = trade_date
         selected["source_symbol"] = selected["source_symbol"].map(_clean_source_symbol)
         selected["code"] = selected["source_symbol"].map(
-            lambda value: akshare_symbol_to_project_code(value, self._code_maps)
+            _normalize_source_code
         )
         for column in [
             "latest_price",
@@ -560,7 +528,7 @@ class AkShareClient:
         selected["trade_date"] = trade_date
         selected["source_symbol"] = selected["source_symbol"].map(_clean_source_symbol)
         selected["code"] = selected["source_symbol"].map(
-            lambda value: akshare_symbol_to_project_code(value, self._code_maps)
+            _normalize_source_code
         )
         for column in [
             "latest_price",
@@ -586,7 +554,7 @@ class AkShareClient:
     def _normalize_stock_zh_a_hist(
         self,
         raw_df: pd.DataFrame,
-        project_code: str,
+        stock_code: str,
         source_symbol: str,
         adjust: str,
         fetched_at: datetime,
@@ -599,9 +567,9 @@ class AkShareClient:
         selected["source_symbol"] = selected["source_symbol"].map(_clean_source_symbol)
         selected.loc[selected["source_symbol"].astype("string").str.strip() == "", "source_symbol"] = source_symbol
         selected["code"] = selected["source_symbol"].map(
-            lambda value: akshare_symbol_to_project_code(value, self._code_maps)
+            _normalize_source_code
         )
-        selected.loc[selected["code"].astype("string").str.strip() == "", "code"] = project_code
+        selected.loc[selected["code"].astype("string").str.strip() == "", "code"] = stock_code
         for column in [
             "open",
             "high",

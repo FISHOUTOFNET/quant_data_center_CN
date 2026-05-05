@@ -104,7 +104,7 @@ def test_update_daily_prefilter_skips_code_when_requested_targets_are_checkpoint
         ]
     )
     factor_path = store.write_adjust_factor(code, factors)
-    daily_path = store.write_daily_k("daily_k_qfq", code, daily_sample().assign(code=code, adjustflag="2"))
+    daily_path = store.write_daily_k("daily_k_qfq", code, daily_sample().assign(code=code, adjustflag="1"))
     write_checkpoint(
         store,
         PIPELINE_UPDATE_DAILY,
@@ -169,7 +169,7 @@ def test_update_daily_all_keeps_code_when_any_requested_daily_checkpoint_is_miss
         ]
     )
     factor_path = store.write_adjust_factor(code, factors)
-    qfq_path = store.write_daily_k("daily_k_qfq", code, daily_sample().assign(code=code, adjustflag="2"))
+    qfq_path = store.write_daily_k("daily_k_qfq", code, daily_sample().assign(code=code, adjustflag="1"))
     write_checkpoint(
         store,
         PIPELINE_UPDATE_DAILY,
@@ -223,7 +223,7 @@ def test_update_daily_adjusted_daily_keeps_code_when_factor_checkpoint_is_missin
     code = "sh.600000"
     end_date = "2024-01-03"
     checkpoint_start = "2024-01-02"
-    daily_path = store.write_daily_k("daily_k_qfq", code, daily_sample().assign(code=code, adjustflag="2"))
+    daily_path = store.write_daily_k("daily_k_qfq", code, daily_sample().assign(code=code, adjustflag="1"))
     write_checkpoint(
         store,
         PIPELINE_UPDATE_DAILY,

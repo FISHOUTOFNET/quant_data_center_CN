@@ -23,7 +23,7 @@ from src.pipeline.akshare_common import (
     success_metadata,
     write_raw_response,
 )
-from src.pipeline.common import default_candidate_date, should_skip_checkpoint
+from src.pipeline.common import default_candidate_date, is_trading_day, should_skip_checkpoint
 from src.storage.dataset_catalog import (
     STOCK_ZH_A_SPOT_EM_DATASET,
     STOCK_ZH_A_SPOT_SINA_DATASET,
@@ -33,6 +33,7 @@ from src.storage.duckdb_store import DuckDBStore
 from src.storage.parquet_store import ParquetStore
 from src.storage.schema import field_names, schema_for_dataset
 from src.utils.config_mgr import ConfigManager
+from src.utils.logging import logger
 
 
 def update_akshare_spot(
@@ -42,18 +43,49 @@ def update_akshare_spot(
     force: bool = False,
     build_views: bool = True,
     client: Any | None = None,
-    client_factory: Callable[[ConfigManager, pd.DataFrame], Any] | None = None,
+    client_factory: Callable[[ConfigManager], Any] | None = None,
     now: Callable[[], datetime] | None = None,
 ) -> list[dict[str, object]]:
     """Fetch stock_zh_a_spot_em and map successful close snapshots into hist_none."""
 
     config = ConfigManager(root)
-    _ensure_spot_close_window(config, now)
     store = ParquetStore(root=config.root)
+    _ensure_spot_close_window(config, now, store)
     store.ensure_layout()
     trade_date = _resolve_trade_date(config, end)
     dataset = STOCK_ZH_A_SPOT_EM_DATASET.name
     output_path = store.stock_zh_a_spot_em_path(trade_date)
+    progress_processed = 0
+    progress_success = 0
+    progress_failed = 0
+    progress_skipped = 0
+    logger.info(
+        "AkShare spot update started trade_date={} force={} resume={}",
+        trade_date,
+        force,
+        resume,
+    )
+
+    def log_spot_progress(current: int, total: int, row: dict[str, object]) -> None:
+        nonlocal progress_processed, progress_success, progress_failed, progress_skipped
+        progress_processed += 1
+        status = str(row.get("status", "unknown"))
+        if status == "success":
+            progress_success += 1
+        elif status == "failed":
+            progress_failed += 1
+        elif status.startswith("skipped"):
+            progress_skipped += 1
+        logger.info(
+            "AkShare spot progress {}/{} code={} dataset={} status={} rows={}",
+            current,
+            total,
+            row.get("code", "*"),
+            row.get("dataset", dataset),
+            status,
+            row.get("row_count", 0),
+        )
+
     if should_skip_checkpoint(
         store,
         PIPELINE_UPDATE_AKSHARE_SPOT,
@@ -65,14 +97,25 @@ def update_akshare_spot(
         resume,
         force,
     ):
+        log_spot_progress(
+            1,
+            1,
+            {"dataset": dataset, "code": "*", "status": "skipped_checkpoint", "row_count": 0},
+        )
         store.close()
+        logger.info(
+            "AkShare spot update completed processed={} success={} failed={} skipped={}",
+            progress_processed,
+            progress_success,
+            progress_failed,
+            progress_skipped,
+        )
         return []
 
-    stock_basic_df = store.read_stock_basic()
     ak_client = client or (
-        client_factory(config, stock_basic_df)
+        client_factory(config)
         if client_factory is not None
-        else AkShareClient(config=config, stock_basic_df=stock_basic_df)
+        else AkShareClient(config=config)
     )
     metadata: list[tuple[dict[str, object], dict[str, object], dict[str, object]]] = []
 
@@ -108,8 +151,13 @@ def update_akshare_spot(
                 output_path,
             )
         )
+        log_spot_progress(1, 2, metadata[-1][0])
         update_hist_from_spot = bool(config.get("datasets.stock_zh_a_spot.update_hist_from_spot", True))
+        logger.info("AkShare spot fallback started trade_date={} reason={}", trade_date, str(exc))
+        fallback_metadata_start = len(metadata)
         _run_sina_fallback(store, ak_client, trade_date, str(exc), metadata, update_hist_from_spot)
+        if len(metadata) > fallback_metadata_start:
+            log_spot_progress(2, 2, metadata[fallback_metadata_start][0])
     else:
         raw_path: Path | None = None
         try:
@@ -149,6 +197,7 @@ def update_akshare_spot(
                     output_path,
                 )
             )
+            log_spot_progress(1, 1, metadata[-1][0])
             if update_hist_from_spot:
                 hist_dataset = stock_zh_a_hist_dataset_name("none")
                 metadata.append(
@@ -193,11 +242,19 @@ def update_akshare_spot(
                     output_path,
                 )
             )
+            log_spot_progress(1, 1, metadata[-1][0])
 
     records = persist_metadata(store, metadata)
     store.close()
     if build_views:
         DuckDBStore(root=config.root).build_views()
+    logger.info(
+        "AkShare spot update completed processed={} success={} failed={} skipped={}",
+        progress_processed,
+        progress_success,
+        progress_failed,
+        progress_skipped,
+    )
     return records
 
 
@@ -373,7 +430,11 @@ def _resolve_trade_date(config: ConfigManager, end: str | date | None) -> str:
     return default_candidate_date(config)
 
 
-def _ensure_spot_close_window(config: ConfigManager, now: Callable[[], datetime] | None = None) -> None:
+def _ensure_spot_close_window(
+    config: ConfigManager,
+    now: Callable[[], datetime] | None = None,
+    store: ParquetStore | None = None,
+) -> None:
     timezone_name = str(config.get("project.timezone", "Asia/Shanghai"))
     local_zone = ZoneInfo(timezone_name)
     current = now() if now is not None else datetime.now(local_zone)
@@ -382,11 +443,28 @@ def _ensure_spot_close_window(config: ConfigManager, now: Callable[[], datetime]
     else:
         local_now = current.astimezone(local_zone)
     current_time = local_now.time()
+    current_date = local_now.date()
+
     if current_time >= time(18, 0) or current_time < time(8, 0):
         return
+
+    if store is None:
+        store = ParquetStore(root=config.root)
+
+    try:
+        calendar_df = store.read_calendar()
+    except Exception:
+        raise RuntimeError(
+            "stock_zh_a_spot_em/stock_zh_a_spot cannot verify trading day "
+            "without calendar data. Please run calendar update first."
+        )
+
+    if not is_trading_day(calendar_df, current_date):
+        return
+
     raise RuntimeError(
         "stock_zh_a_spot_em/stock_zh_a_spot can only write hist after 18:00 "
-        "and before 08:00 Asia/Shanghai"
+        "and before 08:00 Asia/Shanghai on trading days"
     )
 
 

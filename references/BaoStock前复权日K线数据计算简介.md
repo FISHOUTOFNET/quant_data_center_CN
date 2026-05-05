@@ -118,7 +118,7 @@ forward_adj_data = bs.query_history_k_data_plus(
     start_date=start_date,
     end_date=end_date,
     frequency="d",
-    adjustflag="2"  # 2表示向前复权
+    adjustflag="1"  # 1表示前复权
 )
 
 # 将数据转换为DataFrame

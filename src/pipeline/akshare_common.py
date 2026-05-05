@@ -18,7 +18,7 @@ from src.quality.validators import ValidationError
 from src.storage.parquet_store import ParquetStore
 
 
-PIPELINE_UPDATE_AKSHARE_UNIVERSE = "update_akshare_universe"
+PIPELINE_UPDATE_AKSHARE_DELIST = "update_akshare_delist"
 PIPELINE_UPDATE_AKSHARE_SPOT = "update_akshare_spot"
 PIPELINE_UPDATE_AKSHARE_HIST = "update_akshare_hist"
 

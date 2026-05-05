@@ -20,6 +20,7 @@ from src.storage.dataset_catalog import (
     CALENDAR_DATASET,
     STOCK_BASIC_DATASET,
     STOCK_INFO_SH_DELIST_DATASET,
+    STOCK_INFO_SZ_DELIST_DATASET,
     STOCK_VALUE_EM_DATASET,
     STOCK_ZH_A_SPOT_EM_DATASET,
     STOCK_ZH_A_SPOT_SINA_DATASET,
@@ -40,17 +41,16 @@ PARQUET_READ_MAX_RETRIES = 3
 PARQUET_READ_RETRY_DELAY = 0.1
 PARQUET_WRITE_MAX_RETRIES = 3
 PARQUET_WRITE_RETRY_DELAY = 0.1
-AKSHARE_CODE_PATTERN = re.compile(r"^(?:sh|sz|bj)[\.\s_-]?(\d{6})$", re.IGNORECASE)
+AKSHARE_CODE_PATTERN = re.compile(r"^\d{6}$")
 
 
 def _akshare_partition_code(code: object) -> str:
-    value = "" if pd.isna(code) else str(code).strip()
-    if re.fullmatch(r"\d+\.0", value):
-        value = value.split(".", 1)[0]
-    match = AKSHARE_CODE_PATTERN.match(value)
-    if match is not None:
-        return match.group(1)
-    return value.zfill(6) if value.isdigit() else value
+    if pd.isna(code):
+        raise ValueError("AkShare partition code must be a 6-digit string")
+    value = str(code).strip()
+    if not AKSHARE_CODE_PATTERN.fullmatch(value):
+        raise ValueError(f"AkShare partition code must be 6 digits, got: {value!r}")
+    return value
 
 
 class ParquetStore:
@@ -68,7 +68,6 @@ class ParquetStore:
         self._parquet_write_lock = RLock()
         self._metadata_store = DuckDBMetadataStore(
             root=self.root,
-            parquet_metadata_dir=self.metadata_dir,
         )
 
     def _safe_read_parquet(self, path: Path) -> pd.DataFrame:
@@ -134,6 +133,9 @@ class ParquetStore:
     def stock_info_sh_delist_path(self, snapshot_date: str) -> Path:
         return self.parquet_dir / STOCK_INFO_SH_DELIST_DATASET.name / f"snapshot_date={snapshot_date}" / "data.parquet"
 
+    def stock_info_sz_delist_path(self, snapshot_date: str) -> Path:
+        return self.parquet_dir / STOCK_INFO_SZ_DELIST_DATASET.name / f"snapshot_date={snapshot_date}" / "data.parquet"
+
     def stock_zh_a_spot_em_path(self, trade_date: str) -> Path:
         return self.parquet_dir / STOCK_ZH_A_SPOT_EM_DATASET.name / f"trade_date={trade_date}" / "data.parquet"
 
@@ -155,7 +157,7 @@ class ParquetStore:
         self._metadata_store.close()
 
     def clean_dataframe_for_schema(self, df: pd.DataFrame, schema: pa.Schema) -> pd.DataFrame:
-        """Return a dataframe with exactly schema columns and compatible values.
+        """Return a dataframe with exactly schema columns and schema-ready values.
 
         Baostock returns every field as text. Empty strings in numeric columns
         become NaN/null, and empty strings in date columns become NULL.
@@ -446,6 +448,28 @@ class ParquetStore:
         if latest is None:
             return pd.DataFrame(columns=field_names(STOCK_INFO_SH_DELIST_DATASET.schema))
         return self.read_stock_info_sh_delist(latest)
+
+    def write_stock_info_sz_delist(self, snapshot_date: str, df: pd.DataFrame) -> Path:
+        cleaned = self.clean_dataframe_for_schema(df, STOCK_INFO_SZ_DELIST_DATASET.schema)
+        if not cleaned.empty:
+            self._require_partition_value(cleaned, "snapshot_date", snapshot_date, "SZ delist snapshot date")
+            cleaned = cleaned.sort_values(["market", "code"]).reset_index(drop=True)
+        STOCK_INFO_SZ_DELIST_DATASET.validator(cleaned)
+        destination = self.stock_info_sz_delist_path(snapshot_date)
+        self.atomic_write(cleaned, STOCK_INFO_SZ_DELIST_DATASET.schema, destination)
+        return destination
+
+    def read_stock_info_sz_delist(self, snapshot_date: str) -> pd.DataFrame:
+        path = self.stock_info_sz_delist_path(snapshot_date)
+        if not path.exists():
+            return pd.DataFrame(columns=field_names(STOCK_INFO_SZ_DELIST_DATASET.schema))
+        return self.clean_dataframe_for_schema(self._safe_read_parquet(path), STOCK_INFO_SZ_DELIST_DATASET.schema)
+
+    def read_latest_stock_info_sz_delist(self) -> pd.DataFrame:
+        latest = self._latest_partition_value(STOCK_INFO_SZ_DELIST_DATASET.name, "snapshot_date")
+        if latest is None:
+            return pd.DataFrame(columns=field_names(STOCK_INFO_SZ_DELIST_DATASET.schema))
+        return self.read_stock_info_sz_delist(latest)
 
     def write_stock_zh_a_spot_em(self, trade_date: str, df: pd.DataFrame) -> Path:
         cleaned = self.clean_dataframe_for_schema(df, STOCK_ZH_A_SPOT_EM_DATASET.schema)

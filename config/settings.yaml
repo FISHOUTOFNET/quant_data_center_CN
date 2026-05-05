@@ -15,12 +15,12 @@ api:
   baostock:
     adjustflag_map:
       none: "3"
-      qfq: "2"
-      hfq: "1"
+      qfq: "1"
+      hfq: "2"
   akshare:
     max_retries: 3
     workers: 3
-    jitter_seconds: [2, 8]
+    jitter_seconds: [1, 5]
     endpoints:
       stock_value_em:
         source: eastmoney
@@ -28,6 +28,10 @@ api:
         cooldown_minutes: 30
       stock_info_sh_delist:
         source: sse
+        failure_threshold: 3
+        cooldown_minutes: 30
+      stock_info_sz_delist:
+        source: szse
         failure_threshold: 3
         cooldown_minutes: 30
       stock_zh_a_spot_em:
@@ -60,7 +64,7 @@ datasets:
   stock_value_em:
     active_only: true
   stock_zh_a_hist:
-    default_adjusts: ["none", "qfq", "hfq"]
+    default_adjusts: ["none"]
     full_start: "1990-01-01"
   stock_zh_a_spot:
     update_hist_from_spot: true

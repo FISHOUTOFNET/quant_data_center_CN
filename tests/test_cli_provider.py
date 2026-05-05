@@ -45,6 +45,13 @@ def test_update_daily_cli_keeps_provider_optional(monkeypatch) -> None:
     assert captured["dataset"] == "all"
 
 
+def test_update_daily_cli_does_not_expose_universe_option() -> None:
+    result = CliRunner().invoke(cli_module.cli, ["update-daily", "--help"])
+
+    assert result.exit_code == 0
+    assert "--universe" not in result.output
+
+
 def test_update_akshare_cli_passes_arguments(monkeypatch) -> None:
     captured: dict[str, object] = {}
 
@@ -63,9 +70,9 @@ def test_update_akshare_cli_passes_arguments(monkeypatch) -> None:
             "--mode",
             "full",
             "--code",
-            "sh.600000",
+            "600000",
             "--code",
-            "sz.000001",
+            "000001",
             "--include-inactive",
             "--max-tasks",
             "10",
@@ -80,7 +87,7 @@ def test_update_akshare_cli_passes_arguments(monkeypatch) -> None:
     assert result.exit_code == 0
     assert captured["dataset"] == "stock_value_em"
     assert captured["mode"] == "full"
-    assert captured["code"] == ("sh.600000", "sz.000001")
+    assert captured["code"] == ("600000", "000001")
     assert captured["include_inactive"] is True
     assert captured["max_tasks"] == 10
     assert captured["workers"] == 3
@@ -92,8 +99,8 @@ def test_update_akshare_cli_passes_arguments(monkeypatch) -> None:
 def test_update_akshare_a_stock_cli_commands_pass_arguments(monkeypatch) -> None:
     captured: dict[str, dict[str, object]] = {}
 
-    def fake_universe(**kwargs):
-        captured["universe"] = kwargs
+    def fake_delist(**kwargs):
+        captured["delist"] = kwargs
         return [{"dataset": "stock_info_sh_delist", "code": "全部", "status": "success", "row_count": 1}]
 
     def fake_spot(**kwargs):
@@ -104,14 +111,14 @@ def test_update_akshare_a_stock_cli_commands_pass_arguments(monkeypatch) -> None
         captured["hist"] = kwargs
         return [{"dataset": "stock_zh_a_hist_none", "code": "600000", "status": "success", "row_count": 1}]
 
-    monkeypatch.setattr(cli_module, "run_update_akshare_universe", fake_universe)
+    monkeypatch.setattr(cli_module, "run_update_akshare_delist", fake_delist)
     monkeypatch.setattr(cli_module, "run_update_akshare_spot", fake_spot)
     monkeypatch.setattr(cli_module, "run_update_akshare_hist", fake_hist)
 
     runner = CliRunner()
-    universe_result = runner.invoke(
+    delist_result = runner.invoke(
         cli_module.cli,
-        ["update-akshare-universe", "--market", "沪市", "--snapshot-date", "2024-01-03", "--no-resume", "--force", "--no-build-views"],
+        ["update-akshare-delist", "--market", "沪市", "--snapshot-date", "2024-01-03", "--no-resume", "--force", "--no-build-views"],
     )
     spot_result = runner.invoke(
         cli_module.cli,
@@ -126,7 +133,7 @@ def test_update_akshare_a_stock_cli_commands_pass_arguments(monkeypatch) -> None
             "--adjust",
             "none",
             "--code",
-            "sh.600000",
+            "600000",
             "--start",
             "2024-01-03",
             "--end",
@@ -141,12 +148,13 @@ def test_update_akshare_a_stock_cli_commands_pass_arguments(monkeypatch) -> None
         ],
     )
 
-    assert universe_result.exit_code == 0
+    assert delist_result.exit_code == 0
     assert spot_result.exit_code == 0
     assert hist_result.exit_code == 0
-    assert captured["universe"] == {
+    assert captured["delist"] == {
         "market": "沪市",
         "snapshot_date": "2024-01-03",
+        "exchanges": None,
         "resume": False,
         "force": True,
         "build_views": False,
@@ -159,8 +167,21 @@ def test_update_akshare_a_stock_cli_commands_pass_arguments(monkeypatch) -> None
     }
     assert captured["hist"]["mode"] == "incremental"
     assert captured["hist"]["adjust"] == "none"
-    assert captured["hist"]["code"] == ("sh.600000",)
+    assert captured["hist"]["code"] == ("600000",)
     assert captured["hist"]["start"] == "2024-01-03"
     assert captured["hist"]["end"] == "2024-01-03"
     assert captured["hist"]["max_tasks"] == 1
     assert captured["hist"]["workers"] == 1
+
+
+def test_akshare_cli_rejects_non_six_digit_code_shapes() -> None:
+    runner = CliRunner()
+
+    for command in ["update-akshare", "update-akshare-hist"]:
+        args = [command, "--code", "sh.600000"]
+        if command == "update-akshare-hist":
+            args.extend(["--mode", "incremental", "--start", "2024-01-03"])
+        result = runner.invoke(cli_module.cli, args)
+
+        assert result.exit_code != 0
+        assert "must be 6 digits" in result.output

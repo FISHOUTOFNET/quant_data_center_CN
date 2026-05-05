@@ -72,6 +72,23 @@ class CircuitOpenAkShareClient(FakeAkShareClient):
         return _response("stock_value_em", {"symbol": code}, data)
 
 
+class ProgressLogger:
+    def __init__(self) -> None:
+        self.entries: list[tuple[str, str, tuple[object, ...]]] = []
+
+    def info(self, message: str, *args, **kwargs) -> None:
+        self.entries.append(("info", message, args))
+
+    def warning(self, message: str, *args, **kwargs) -> None:
+        self.entries.append(("warning", message, args))
+
+    def error(self, message: str, *args, **kwargs) -> None:
+        self.entries.append(("error", message, args))
+
+    def exception(self, message: str, *args, **kwargs) -> None:
+        self.entries.append(("exception", message, args))
+
+
 def test_update_akshare_stock_value_partial_active_only_resume_and_force(
     tmp_path,
     stock_basic_sample,
@@ -133,6 +150,47 @@ def test_update_akshare_stock_value_partial_active_only_resume_and_force(
     assert manifest_rows[-1]["params"] == {"symbol": "600000"}
     assert manifest_rows[-1]["status"] == "success"
     assert manifest_rows[-1]["raw_path"]
+
+
+def test_update_akshare_force_logs_stock_value_progress(
+    tmp_path,
+    monkeypatch,
+    stock_value_em_sample,
+) -> None:
+    _write_settings(tmp_path)
+    logger = ProgressLogger()
+    monkeypatch.setattr(update_akshare_module, "logger", logger)
+    client = FakeAkShareClient(stock_value_em_sample)
+
+    records = update_akshare(
+        dataset="stock_value_em",
+        mode="partial",
+        code=("600000", "000001", "000002"),
+        root=tmp_path,
+        build_views=False,
+        workers=2,
+        force=True,
+        client=client,
+    )
+
+    progress_entries = _log_entries(
+        logger,
+        "AkShare update progress {}/{} code={} dataset={} status={} rows={}",
+    )
+    assert len(records) == 3
+    assert len(progress_entries) == 3
+    assert sorted(entry[2][2] for entry in progress_entries) == ["000001", "000002", "600000"]
+    assert [entry[2][0] for entry in progress_entries] == [1, 2, 3]
+    assert all(entry[2][1] == 3 for entry in progress_entries)
+    assert all(entry[2][4] == "success" for entry in progress_entries)
+    assert _log_entries(
+        logger,
+        "AkShare update started dataset={} mode={} force={} workers={} planned_tasks={} processing_tasks={}",
+    )
+    assert _log_entries(
+        logger,
+        "AkShare update completed processed={} success={} failed={} skipped={}",
+    )
 
 
 def test_stock_value_prefilter_kept_task_ignores_checkpoint_and_logs_unchanged(
@@ -246,7 +304,7 @@ def test_stock_value_task_pool_uses_akshare_universe_and_filters_delisted_increm
     assert [task.code for task in full] == ["600000", "000001"]
 
 
-def test_update_akshare_accepts_repeated_code_option(
+def test_update_akshare_accepts_repeated_six_digit_code_option(
     tmp_path,
     stock_basic_sample,
     stock_value_em_sample,
@@ -260,7 +318,7 @@ def test_update_akshare_accepts_repeated_code_option(
     update_akshare(
         dataset="stock_value_em",
         mode="partial",
-        code=("600000", "sz.000001"),
+        code=("600000", "000001"),
         root=tmp_path,
         build_views=False,
         workers=1,
@@ -268,6 +326,34 @@ def test_update_akshare_accepts_repeated_code_option(
     )
 
     assert client.value_calls == ["600000", "000001"]
+
+
+def test_update_akshare_rejects_non_six_digit_explicit_code_shapes(
+    tmp_path,
+    stock_basic_sample,
+    stock_value_em_sample,
+) -> None:
+    _write_settings(tmp_path)
+    store = ParquetStore(root=tmp_path)
+    store.ensure_layout()
+    store.write_stock_basic(stock_basic_sample())
+    client = FakeAkShareClient(stock_value_em_sample)
+
+    for code in ["sh.600000", "sh600000", "600000.0"]:
+        try:
+            update_akshare(
+                dataset="stock_value_em",
+                mode="partial",
+                code=(code,),
+                root=tmp_path,
+                build_views=False,
+                workers=1,
+                client=client,
+            )
+        except ValueError as exc:
+            assert "must be 6 digits" in str(exc)
+        else:
+            raise AssertionError(f"Expected ValueError for {code}")
 
 
 def test_update_akshare_stock_value_fetches_concurrently_but_writes_serially(
@@ -409,6 +495,10 @@ def _response(endpoint: str, params: dict[str, object], data: pd.DataFrame) -> A
 def _manifest_rows(root) -> list[dict[str, object]]:
     path = root / "data" / "raw" / "akshare" / "manifest" / "fetch_runs.jsonl"
     return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+
+
+def _log_entries(logger: ProgressLogger, message: str) -> list[tuple[str, str, tuple[object, ...]]]:
+    return [entry for entry in logger.entries if entry[1] == message]
 
 
 def _write_calendar(store: ParquetStore, latest_date: str) -> None:

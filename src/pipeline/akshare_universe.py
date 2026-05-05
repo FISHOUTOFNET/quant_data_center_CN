@@ -33,11 +33,13 @@ def resolve_akshare_universe_codes(
         return normalize_akshare_code_list(code)
 
     spot_codes = _latest_dataset_codes(store.read_latest_stock_zh_a_spot_em())
-    delisted_codes = _latest_dataset_codes(store.read_latest_stock_info_sh_delist())
+    sh_delisted_codes = _latest_dataset_codes(store.read_latest_stock_info_sh_delist())
+    sz_delisted_codes = _latest_dataset_codes(store.read_latest_stock_info_sz_delist())
+    delisted_codes = list(dict.fromkeys([*sh_delisted_codes, *sz_delisted_codes]))
     if not spot_codes and not delisted_codes:
         raise ValueError(
             f"No local AkShare stock universe found for {context}; "
-            "run update-akshare-spot and/or update-akshare-universe first"
+            "run update-akshare-spot and/or update-akshare-delist first"
         )
 
     delisted = set(delisted_codes)

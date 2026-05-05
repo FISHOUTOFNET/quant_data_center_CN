@@ -14,6 +14,7 @@ from src.quality.validators import (
     validate_daily_k,
     validate_stock_basic,
     validate_stock_info_sh_delist,
+    validate_stock_info_sz_delist,
     validate_stock_value_em,
     validate_stock_zh_a_hist,
     validate_stock_zh_a_spot_em,
@@ -25,6 +26,7 @@ from src.storage.schema import (
     DAILY_K_SCHEMA,
     STOCK_BASIC_SCHEMA,
     STOCK_INFO_SH_DELIST_SCHEMA,
+    STOCK_INFO_SZ_DELIST_SCHEMA,
     STOCK_VALUE_EM_SCHEMA,
     STOCK_ZH_A_HIST_SCHEMA,
     STOCK_ZH_A_SPOT_EM_SCHEMA,
@@ -98,6 +100,14 @@ STOCK_INFO_SH_DELIST_DATASET = DatasetDefinition(
     partition_column="snapshot_date",
 )
 
+STOCK_INFO_SZ_DELIST_DATASET = DatasetDefinition(
+    name="stock_info_sz_delist",
+    schema=STOCK_INFO_SZ_DELIST_SCHEMA,
+    validator=validate_stock_info_sz_delist,
+    view_name="v_stock_info_sz_delist",
+    partition_column="snapshot_date",
+)
+
 STOCK_ZH_A_SPOT_EM_DATASET = DatasetDefinition(
     name="stock_zh_a_spot_em",
     schema=STOCK_ZH_A_SPOT_EM_SCHEMA,
@@ -130,6 +140,7 @@ STOCK_ZH_A_HIST_DATASETS = tuple(
 AKSHARE_DATASET_NAMES = (STOCK_VALUE_EM_DATASET.name,)
 AKSHARE_A_STOCK_DATASET_NAMES = (
     STOCK_INFO_SH_DELIST_DATASET.name,
+    STOCK_INFO_SZ_DELIST_DATASET.name,
     STOCK_ZH_A_SPOT_EM_DATASET.name,
     STOCK_ZH_A_SPOT_SINA_DATASET.name,
     *(definition.name for definition in STOCK_ZH_A_HIST_DATASETS),
@@ -144,6 +155,7 @@ DATASET_CATALOG = {
         ADJUST_FACTOR_DATASET,
         STOCK_VALUE_EM_DATASET,
         STOCK_INFO_SH_DELIST_DATASET,
+        STOCK_INFO_SZ_DELIST_DATASET,
         STOCK_ZH_A_SPOT_EM_DATASET,
         STOCK_ZH_A_SPOT_SINA_DATASET,
         *STOCK_ZH_A_HIST_DATASETS,
@@ -195,6 +207,7 @@ def akshare_a_stock_dataset_names() -> tuple[str, ...]:
 def akshare_a_stock_definitions() -> tuple[DatasetDefinition, ...]:
     return (
         STOCK_INFO_SH_DELIST_DATASET,
+        STOCK_INFO_SZ_DELIST_DATASET,
         STOCK_ZH_A_SPOT_EM_DATASET,
         STOCK_ZH_A_SPOT_SINA_DATASET,
         *STOCK_ZH_A_HIST_DATASETS,

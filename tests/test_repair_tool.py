@@ -52,7 +52,7 @@ def test_repair_normalizes_non_trading_range_to_trading_bounds(
             self,
             request,
         ) -> pd.DataFrame:
-            adjustflag = {"daily_k_none": "3", "daily_k_qfq": "2", "daily_k_hfq": "1"}[request.dataset]
+            adjustflag = {"daily_k_none": "3", "daily_k_qfq": "1", "daily_k_hfq": "2"}[request.dataset]
             state["history_params"].append(
                 {
                     "code": request.code,
@@ -127,8 +127,8 @@ def _write_settings(root) -> None:
                 "  baostock:",
                 "    adjustflag_map:",
                 '      none: "3"',
-                '      qfq: "2"',
-                '      hfq: "1"',
+                '      qfq: "1"',
+                '      hfq: "2"',
                 "datasets:",
                 "  daily_k:",
                 '    fields: "date,code,open,high,low,close,preclose,volume,amount,adjustflag,turn,tradestatus,pctChg,peTTM,pbMRQ,psTTM,pcfNcfTTM,isST"',

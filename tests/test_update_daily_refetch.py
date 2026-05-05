@@ -19,7 +19,7 @@ def test_update_daily_refetches_full_history_on_lookback_mismatch(
     _write_settings(tmp_path)
     store = ParquetStore(root=tmp_path)
     store.ensure_layout()
-    adjustflags = {"daily_k_none": "3", "daily_k_qfq": "2", "daily_k_hfq": "1"}
+    adjustflags = {"daily_k_none": "3", "daily_k_qfq": "1", "daily_k_hfq": "2"}
     for dataset, adjustflag in adjustflags.items():
         existing = daily_sample().assign(code="sh.600000", adjustflag=adjustflag)
         if dataset == "daily_k_none":
@@ -160,7 +160,7 @@ def test_update_daily_adjust_factor_change_recomputes_adjusted_without_full_refe
     new_factors = old_factors.assign(foreAdjustFactor=2.0, backAdjustFactor=3.0, adjustFactor=2.0)
     store.write_adjust_factor(code, old_factors)
     store.write_daily_k("daily_k_none", code, daily_sample().assign(code=code, adjustflag="3"))
-    daily_path = store.write_daily_k("daily_k_qfq", code, daily_sample().assign(code=code, adjustflag="2"))
+    daily_path = store.write_daily_k("daily_k_qfq", code, daily_sample().assign(code=code, adjustflag="1"))
     write_checkpoint(
         store,
         PIPELINE_UPDATE_DAILY,
@@ -216,7 +216,7 @@ def test_update_daily_adjusted_mismatch_recomputes_without_full_refetch(
     checkpoint_start = "2024-01-02"
 
     store.write_daily_k("daily_k_none", code, daily_sample().assign(code=code, adjustflag="3"))
-    stale_qfq = daily_sample().assign(code=code, adjustflag="2")
+    stale_qfq = daily_sample().assign(code=code, adjustflag="1")
     stale_qfq.loc[0, "close"] = 99.0
     store.write_daily_k("daily_k_qfq", code, stale_qfq)
 

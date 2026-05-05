@@ -5,6 +5,7 @@ import pytest
 from src.storage.dataset_catalog import (
     ADJUST_FACTOR_DATASET,
     STOCK_INFO_SH_DELIST_DATASET,
+    STOCK_INFO_SZ_DELIST_DATASET,
     STOCK_VALUE_EM_DATASET,
     STOCK_ZH_A_SPOT_EM_DATASET,
     akshare_a_stock_dataset_names,
@@ -39,6 +40,7 @@ def test_akshare_catalog_expands_supported_selections() -> None:
 
 def test_akshare_a_stock_catalog_registers_independent_datasets() -> None:
     assert STOCK_INFO_SH_DELIST_DATASET.name in akshare_a_stock_dataset_names()
+    assert STOCK_INFO_SZ_DELIST_DATASET.name in akshare_a_stock_dataset_names()
     assert STOCK_ZH_A_SPOT_EM_DATASET.name in akshare_a_stock_dataset_names()
     assert stock_zh_a_hist_dataset_name("none") == "stock_zh_a_hist_none"
     assert [definition.name for definition in akshare_a_stock_definitions()] == list(akshare_a_stock_dataset_names())

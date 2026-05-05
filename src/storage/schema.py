@@ -77,7 +77,7 @@ STOCK_VALUE_EM_SCHEMA = pa.schema(
     ]
 )
 
-STOCK_INFO_SH_DELIST_SCHEMA = pa.schema(
+STOCK_INFO_DELIST_SCHEMA = pa.schema(
     [
         pa.field("snapshot_date", pa.date32()),
         pa.field("exchange", pa.string()),
@@ -91,6 +91,9 @@ STOCK_INFO_SH_DELIST_SCHEMA = pa.schema(
         pa.field("fetched_at", pa.timestamp("ms")),
     ]
 )
+
+STOCK_INFO_SH_DELIST_SCHEMA = STOCK_INFO_DELIST_SCHEMA
+STOCK_INFO_SZ_DELIST_SCHEMA = STOCK_INFO_DELIST_SCHEMA
 
 STOCK_ZH_A_SPOT_EM_SCHEMA = pa.schema(
     [
@@ -222,6 +225,7 @@ DATASET_SCHEMAS: Mapping[str, pa.Schema] = {
     "adjust_factor": ADJUST_FACTOR_SCHEMA,
     "stock_value_em": STOCK_VALUE_EM_SCHEMA,
     "stock_info_sh_delist": STOCK_INFO_SH_DELIST_SCHEMA,
+    "stock_info_sz_delist": STOCK_INFO_SZ_DELIST_SCHEMA,
     "stock_zh_a_spot_em": STOCK_ZH_A_SPOT_EM_SCHEMA,
     "stock_zh_a_spot_sina": STOCK_ZH_A_SPOT_SINA_SCHEMA,
     "stock_zh_a_hist_none": STOCK_ZH_A_HIST_SCHEMA,
