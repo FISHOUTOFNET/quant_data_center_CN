@@ -4,28 +4,28 @@ import pandas as pd
 
 
 def _fake_provider_factory(
-    stock_basic_df: pd.DataFrame,
+    baostock_cn_stock_basic_df: pd.DataFrame,
     daily_df: pd.DataFrame,
     fail_once: set[str] | None = None,
-    adjust_factor_df: pd.DataFrame | None = None,
+    baostock_cn_stock_adjustment_factor_df: pd.DataFrame | None = None,
 ):
     state = {
         "history_calls": [],
         "history_params": [],
-        "adjust_factor_calls": [],
-        "adjust_factor_params": [],
+        "baostock_cn_stock_adjustment_factor_calls": [],
+        "baostock_cn_stock_adjustment_factor_params": [],
         "calendar_params": [],
-        "stock_basic_calls": 0,
+        "baostock_cn_stock_basic_calls": 0,
         "fail_once": set(fail_once or set()),
     }
-    factors = adjust_factor_df if adjust_factor_df is not None else pd.DataFrame(
+    factors = baostock_cn_stock_adjustment_factor_df if baostock_cn_stock_adjustment_factor_df is not None else pd.DataFrame(
         [
             {
                 "code": "sh.600000",
-                "dividOperateDate": "2024-01-02",
-                "foreAdjustFactor": 1.0,
-                "backAdjustFactor": 1.0,
-                "adjustFactor": 1.0,
+                "dividend_operate_date": "2024-01-02",
+                "forward_adjust_factor": 1.0,
+                "backward_adjust_factor": 1.0,
+                "adjustment_factor": 1.0,
             }
         ]
     )
@@ -61,25 +61,25 @@ def _fake_provider_factory(
                 ]
             )
 
-        def query_stock_basic(self) -> pd.DataFrame:
-            state["stock_basic_calls"] += 1
-            return stock_basic_df.copy()
+        def query_baostock_cn_stock_basic(self) -> pd.DataFrame:
+            state["baostock_cn_stock_basic_calls"] += 1
+            return baostock_cn_stock_basic_df.copy()
 
-        def query_daily_k(
+        def query_daily_bars(
             self,
             request,
         ) -> pd.DataFrame:
             code = request.code
             start_date = request.start_date
             end_date = request.end_date
-            adjustflag = _adjustflag_for_dataset(request.dataset)
+            adjust_flag = _adjust_flag_for_dataset(request.dataset)
             state["history_calls"].append(code)
             state["history_params"].append(
                 {
                     "code": code,
                     "start_date": start_date,
                     "end_date": end_date,
-                    "adjustflag": adjustflag,
+                    "adjust_flag": adjust_flag,
                 }
             )
             if code in state["fail_once"]:
@@ -91,13 +91,13 @@ def _fake_provider_factory(
                 start_date=start_date,
                 end_date=end_date,
                 frequency=request.frequency,
-                adjustflag=adjustflag,
+                adjust_flag=adjust_flag,
             ) if callable(daily_df) else daily_df
-            return source.assign(code=code, adjustflag=adjustflag).copy()
+            return source.assign(code=code, adjust_flag=adjust_flag).copy()
 
-        def query_adjust_factor(self, code: str, start_date: str, end_date: str) -> pd.DataFrame:
-            state["adjust_factor_calls"].append(code)
-            state["adjust_factor_params"].append(
+        def query_baostock_cn_stock_adjustment_factor(self, code: str, start_date: str, end_date: str) -> pd.DataFrame:
+            state["baostock_cn_stock_adjustment_factor_calls"].append(code)
+            state["baostock_cn_stock_adjustment_factor_params"].append(
                 {
                     "code": code,
                     "start_date": start_date,
@@ -124,8 +124,8 @@ def _provider_factory_for(provider_cls):
     return create_provider
 
 
-def _adjustflag_for_dataset(dataset: str) -> str:
-    return {"daily_k_none": "3", "daily_k_qfq": "1", "daily_k_hfq": "2"}[dataset]
+def _adjust_flag_for_dataset(dataset: str) -> str:
+    return {"baostock_cn_stock_daily_bar_unadjusted": "3", "baostock_cn_stock_daily_bar_qfq": "1", "baostock_cn_stock_daily_bar_hfq": "2"}[dataset]
 
 
 def _write_settings(root, metadata_flush_size: int | None = None) -> None:
@@ -143,13 +143,13 @@ def _write_settings(root, metadata_flush_size: int | None = None) -> None:
             [
                 "api:",
                 "  baostock:",
-                "    adjustflag_map:",
-                '      none: "3"',
+                "    adjust_flag_map:",
+                '      unadjusted: "3"',
                 '      qfq: "1"',
                 '      hfq: "2"',
                 "datasets:",
-                "  daily_k:",
-                '    fields: "date,code,open,high,low,close,preclose,volume,amount,adjustflag,turn,tradestatus,pctChg,peTTM,pbMRQ,psTTM,pcfNcfTTM,isST"',
+                "  daily_bar:",
+                '    fields: "date,code,open,high,low,close,prev_close,volume,amount,adjust_flag,turn,trade_status,pct_change,pe_ttm,pb_mrq,ps_ttm,pcf_ncf_ttm,is_st"',
                 "    frequency: d",
                 *pipeline_lines,
                 "",
@@ -157,3 +157,4 @@ def _write_settings(root, metadata_flush_size: int | None = None) -> None:
         ),
         encoding="utf-8",
     )
+

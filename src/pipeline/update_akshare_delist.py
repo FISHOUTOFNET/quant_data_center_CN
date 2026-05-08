@@ -22,7 +22,7 @@ from src.pipeline.akshare_common import (
     write_raw_response,
 )
 from src.pipeline.common import should_skip_checkpoint
-from src.storage.dataset_catalog import STOCK_INFO_SH_DELIST_DATASET, STOCK_INFO_SZ_DELIST_DATASET
+from src.storage.dataset_catalog import AKSHARE_DELIST_SH_DATASET, AKSHARE_DELIST_SZ_DATASET
 from src.storage.duckdb_store import DuckDBStore
 from src.storage.parquet_store import ParquetStore
 from src.utils.config_mgr import ConfigManager
@@ -30,19 +30,19 @@ from src.utils.logging import logger
 
 EXCHANGE_CONFIG = {
     "sh": {
-        "dataset": STOCK_INFO_SH_DELIST_DATASET,
-        "fetch_method": "fetch_stock_info_sh_delist",
-        "write_method": "write_stock_info_sh_delist",
-        "path_method": "stock_info_sh_delist_path",
-        "endpoint": "stock_info_sh_delist",
+        "dataset": AKSHARE_DELIST_SH_DATASET,
+        "fetch_method": "fetch_akshare_cn_stock_delist_sh",
+        "write_method": "write_akshare_cn_stock_delist_sh",
+        "path_method": "akshare_cn_stock_delist_sh_path",
+        "endpoint": "akshare_cn_stock_delist_sh",
         "default_symbol": "全部",
     },
     "sz": {
-        "dataset": STOCK_INFO_SZ_DELIST_DATASET,
-        "fetch_method": "fetch_stock_info_sz_delist",
-        "write_method": "write_stock_info_sz_delist",
-        "path_method": "stock_info_sz_delist_path",
-        "endpoint": "stock_info_sz_delist",
+        "dataset": AKSHARE_DELIST_SZ_DATASET,
+        "fetch_method": "fetch_akshare_cn_stock_delist_sz",
+        "write_method": "write_akshare_cn_stock_delist_sz",
+        "path_method": "akshare_cn_stock_delist_sz_path",
+        "endpoint": "akshare_cn_stock_delist_sz",
         "default_symbol": "终止上市公司",
     },
 }
@@ -133,7 +133,7 @@ def update_akshare_delist(
     records = persist_metadata(store, all_metadata)
     store.close()
     if build_views:
-        DuckDBStore(root=config.root).build_views()
+        DuckDBStore(root=config.root).build_views(cleanup_tmp_files=progress_success > 0)
     logger.info(
         "AkShare delist update completed processed={} success={} failed={} skipped={}",
         progress_processed,

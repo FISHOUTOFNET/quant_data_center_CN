@@ -11,9 +11,9 @@ from threading import Lock
 import pandas as pd
 
 from src.pipeline.adjustments import (
-    ADJUST_FACTOR_DATASET,
+    BAOSTOCK_CN_STOCK_ADJUSTMENT_FACTOR_DATASET,
     UNADJUSTED_DAILY_DATASET,
-    calculate_adjusted_daily_k,
+    calculate_adjusted_daily_bar,
     is_adjusted_daily_dataset,
 )
 from src.pipeline.common import (
@@ -25,7 +25,7 @@ from src.pipeline.common import (
 )
 from src.pipeline.services import PipelineMetadataBatch
 from src.pipeline.update_daily_frames import (
-    _adjust_factor_frames_differ,
+    _baostock_cn_stock_adjustment_factor_frames_differ,
     _has_data_in_range,
     _log_daily_frame,
 )
@@ -70,7 +70,7 @@ class _DailyUpdateBackgroundWorker:
         self._daily_plans_by_code: dict[str, tuple[DailyTargetPlan, ...]] = {}
         self._state_lock = Lock()
 
-    def process_adjust_factor_success(
+    def process_baostock_cn_stock_adjustment_factor_success(
         self,
         code: str,
         fetched: pd.DataFrame,
@@ -78,12 +78,12 @@ class _DailyUpdateBackgroundWorker:
         output_path: Path,
     ) -> BackgroundTaskResult:
         try:
-            existing = self._store.read_adjust_factor(code)
-            stored = self._store.clean_adjust_factor_frame(code, fetched)
-            changed = _adjust_factor_frames_differ(self._store, existing, stored)
-            output_path = self._store.write_adjust_factor(code, stored)
+            existing = self._store.read_baostock_cn_stock_adjustment_factor(code)
+            stored = self._store.clean_baostock_cn_stock_adjustment_factor_frame(code, fetched)
+            changed = _baostock_cn_stock_adjustment_factor_frames_differ(self._store, existing, stored)
+            output_path = self._store.write_baostock_cn_stock_adjustment_factor(code, stored)
             run_row = _run_row(
-                ADJUST_FACTOR_DATASET,
+                BAOSTOCK_CN_STOCK_ADJUSTMENT_FACTOR_DATASET,
                 code,
                 "success",
                 FULL_HISTORY_START_DATE,
@@ -93,10 +93,10 @@ class _DailyUpdateBackgroundWorker:
                 len(stored),
                 "",
             )
-            status_row = _status_row(ADJUST_FACTOR_DATASET, code, self._end_date, len(stored), "success", "")
+            status_row = _status_row(BAOSTOCK_CN_STOCK_ADJUSTMENT_FACTOR_DATASET, code, self._end_date, len(stored), "success", "")
             checkpoint = checkpoint_row(
                 PIPELINE_UPDATE_DAILY,
-                ADJUST_FACTOR_DATASET,
+                BAOSTOCK_CN_STOCK_ADJUSTMENT_FACTOR_DATASET,
                 code,
                 FULL_HISTORY_START_DATE,
                 self._end_date,
@@ -110,9 +110,9 @@ class _DailyUpdateBackgroundWorker:
         except Exception:
             error_stack = traceback.format_exc()
             logger.exception("Adjust factor update failed for {}", code)
-            return self.process_adjust_factor_failure(code, start_time, output_path, error_stack)
+            return self.process_baostock_cn_stock_adjustment_factor_failure(code, start_time, output_path, error_stack)
 
-    def process_adjust_factor_failure(
+    def process_baostock_cn_stock_adjustment_factor_failure(
         self,
         code: str,
         start_time: datetime,
@@ -121,13 +121,13 @@ class _DailyUpdateBackgroundWorker:
     ) -> BackgroundTaskResult:
         result = BackgroundTaskResult()
         try:
-            existing = self._store.read_adjust_factor(code)
+            existing = self._store.read_baostock_cn_stock_adjustment_factor(code)
         except Exception:
             existing = pd.DataFrame()
             error_stack = f"{error_stack}\nFailed to read existing adjust factors:\n{traceback.format_exc()}"
 
         run_row = _run_row(
-            ADJUST_FACTOR_DATASET,
+            BAOSTOCK_CN_STOCK_ADJUSTMENT_FACTOR_DATASET,
             code,
             "failed",
             FULL_HISTORY_START_DATE,
@@ -137,10 +137,10 @@ class _DailyUpdateBackgroundWorker:
             0,
             error_stack,
         )
-        status_row = _status_row(ADJUST_FACTOR_DATASET, code, None, 0, "failed", error_stack)
+        status_row = _status_row(BAOSTOCK_CN_STOCK_ADJUSTMENT_FACTOR_DATASET, code, None, 0, "failed", error_stack)
         checkpoint = checkpoint_row(
             PIPELINE_UPDATE_DAILY,
-            ADJUST_FACTOR_DATASET,
+            BAOSTOCK_CN_STOCK_ADJUSTMENT_FACTOR_DATASET,
             code,
             FULL_HISTORY_START_DATE,
             self._end_date,
@@ -254,15 +254,15 @@ class _DailyUpdateBackgroundWorker:
         if self._mode == "full":
             if fetch_start_date is None:
                 for plan in active_plans:
-                    self._log_full_refetch(plan, "adjust_factor_changed")
+                    self._log_full_refetch(plan, "baostock_cn_stock_adjustment_factor_changed")
                 result.api_requests.append(
                     ApiFetchRequest(
-                        kind="daily_k_full_refetch",
+                        kind="daily_bar_full_refetch",
                         code=code,
                         start_date=FULL_HISTORY_START_DATE,
                         end_date=self._end_date,
                         datasets=tuple(dict.fromkeys(plan.dataset for plan in active_plans)),
-                        reason="adjust_factor_changed",
+                        reason="baostock_cn_stock_adjustment_factor_changed",
                     )
                 )
                 return result
@@ -290,7 +290,7 @@ class _DailyUpdateBackgroundWorker:
                 self._log_full_refetch(plan, refetch_reason)
             result.api_requests.append(
                 ApiFetchRequest(
-                    kind="daily_k_full_refetch",
+                    kind="daily_bar_full_refetch",
                     code=code,
                     start_date=FULL_HISTORY_START_DATE,
                     end_date=self._end_date,
@@ -323,7 +323,7 @@ class _DailyUpdateBackgroundWorker:
         code: str,
         fresh_unadjusted: pd.DataFrame,
     ) -> tuple[pd.DataFrame, str | None]:
-        existing = self._store.read_daily_k(UNADJUSTED_DAILY_DATASET, code)
+        existing = self._store.read_baostock_daily_bars(UNADJUSTED_DAILY_DATASET, code)
         if not _has_data_in_range(existing, self._start_date, self._end_date):
             return pd.DataFrame(), "unadjusted_empty_lookback"
         if daily_frames_differ_on_overlap(self._store, existing, fresh_unadjusted, self._start_date, self._end_date):
@@ -398,11 +398,11 @@ class _DailyUpdateBackgroundWorker:
         if dataset == UNADJUSTED_DAILY_DATASET:
             return unadjusted.copy()
         if is_adjusted_daily_dataset(dataset):
-            return calculate_adjusted_daily_k(
+            return calculate_adjusted_daily_bar(
                 unadjusted,
                 factors,
                 dataset,
-                self._config.adjustflag_for_dataset(dataset),
+                self._config.adjust_flag_for_dataset(dataset),
             )
         raise ValueError(f"Unsupported async daily dataset: {dataset}")
 

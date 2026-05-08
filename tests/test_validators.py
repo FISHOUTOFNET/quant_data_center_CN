@@ -5,36 +5,36 @@ import pytest
 
 from src.quality.validators import (
     ValidationError,
-    validate_adjust_factor,
-    validate_daily_k,
+    validate_baostock_cn_stock_adjustment_factor,
+    validate_daily_bar,
     validate_non_negative,
-    validate_stock_zh_a_hist,
-    validate_stock_zh_a_spot_em,
-    validate_stock_value_em,
+    validate_akshare_cn_stock_daily_bar,
+    validate_akshare_cn_stock_spot_quote_eastmoney,
+    validate_akshare_cn_stock_valuation_eastmoney,
 )
 
 
-def test_validate_daily_k_accepts_valid_data(daily_sample) -> None:
-    validate_daily_k(daily_sample())
+def test_validate_daily_bar_accepts_valid_data(daily_sample) -> None:
+    validate_daily_bar(daily_sample())
 
 
-def test_validate_daily_k_rejects_duplicate_code_date(daily_sample) -> None:
+def test_validate_daily_bar_rejects_duplicate_code_date(daily_sample) -> None:
     df = daily_sample()
     df.loc[1, "date"] = df.loc[0, "date"]
     with pytest.raises(ValidationError, match="Duplicate"):
-        validate_daily_k(df)
+        validate_daily_bar(df)
 
 
-def test_validate_daily_k_warns_on_invalid_ohlc(daily_sample) -> None:
+def test_validate_daily_bar_warns_on_invalid_ohlc(daily_sample) -> None:
     df = daily_sample()
     df.loc[0, "close"] = 99.0
-    validate_daily_k(df)
+    validate_daily_bar(df)
 
 
-def test_validate_daily_k_accepts_ohlc_within_tolerance(daily_sample) -> None:
+def test_validate_daily_bar_accepts_ohlc_within_tolerance(daily_sample) -> None:
     df = daily_sample()
     df.loc[0, "close"] = df.loc[0, "high"] * (1 + 1e-5)
-    validate_daily_k(df)
+    validate_daily_bar(df)
 
 
 def test_validate_non_negative_accepts_valid_data(daily_sample) -> None:
@@ -62,38 +62,38 @@ def test_validate_non_negative_warns_on_negative_values(daily_sample) -> None:
     validate_non_negative(df, "volume")
 
 
-def test_validate_adjust_factor_rejects_duplicate_code_date(adjust_factor_sample) -> None:
-    df = pd.concat([adjust_factor_sample(), adjust_factor_sample()], ignore_index=True)
+def test_validate_baostock_cn_stock_adjustment_factor_rejects_duplicate_code_date(baostock_cn_stock_adjustment_factor_sample) -> None:
+    df = pd.concat([baostock_cn_stock_adjustment_factor_sample(), baostock_cn_stock_adjustment_factor_sample()], ignore_index=True)
     with pytest.raises(ValidationError, match="Duplicate"):
-        validate_adjust_factor(df)
+        validate_baostock_cn_stock_adjustment_factor(df)
 
 
-def test_validate_stock_value_em_rejects_duplicate_code_date(stock_value_em_sample) -> None:
-    df = stock_value_em_sample()
+def test_validate_akshare_cn_stock_valuation_eastmoney_rejects_duplicate_code_date(akshare_cn_stock_valuation_eastmoney_sample) -> None:
+    df = akshare_cn_stock_valuation_eastmoney_sample()
     df.loc[1, "date"] = df.loc[0, "date"]
     with pytest.raises(ValidationError, match="Duplicate"):
-        validate_stock_value_em(df)
+        validate_akshare_cn_stock_valuation_eastmoney(df)
 
 
-def test_validate_stock_value_em_rejects_non_monotonic_dates(stock_value_em_sample) -> None:
-    df = stock_value_em_sample()
+def test_validate_akshare_cn_stock_valuation_eastmoney_rejects_non_monotonic_dates(akshare_cn_stock_valuation_eastmoney_sample) -> None:
+    df = akshare_cn_stock_valuation_eastmoney_sample()
     df = df.iloc[::-1].reset_index(drop=True)
     with pytest.raises(ValidationError, match="monotonically"):
-        validate_stock_value_em(df)
+        validate_akshare_cn_stock_valuation_eastmoney(df)
 
 
 def test_validate_akshare_a_stock_rejects_duplicate_spot_date_code() -> None:
     df = _spot_em_sample()
     df = pd.concat([df, df], ignore_index=True)
     with pytest.raises(ValidationError, match="Duplicate"):
-        validate_stock_zh_a_spot_em(df)
+        validate_akshare_cn_stock_spot_quote_eastmoney(df)
 
 
-def test_validate_akshare_hist_rejects_duplicate_adjust_rows() -> None:
+def test_validate_akshare_daily_bar_rejects_duplicate_adjustment_rows() -> None:
     df = _hist_sample()
     df = pd.concat([df, df], ignore_index=True)
     with pytest.raises(ValidationError, match="Duplicate"):
-        validate_stock_zh_a_hist(df)
+        validate_akshare_cn_stock_daily_bar(df)
 
 
 def _spot_em_sample() -> pd.DataFrame:
@@ -104,13 +104,13 @@ def _spot_em_sample() -> pd.DataFrame:
                 "code": "600000",
                 "source_symbol": "600000",
                 "name": "PF Bank",
-                "latest_price": 8.3,
-                "change_amount": 0.1,
-                "pct_chg": 1.2,
+                "last_price": 8.3,
+                "price_change": 0.1,
+                "pct_change": 1.2,
                 "open": 8.2,
                 "high": 8.4,
                 "low": 8.1,
-                "preclose": 8.2,
+                "prev_close": 8.2,
                 "volume": 120000.0,
                 "amount": 9960.0,
                 "turnover_rate": 0.12,
@@ -140,13 +140,14 @@ def _hist_sample() -> pd.DataFrame:
                 "volume": 120000,
                 "amount": 9960.0,
                 "amplitude": 3.0,
-                "pct_chg": 1.2,
-                "change_amount": 0.1,
+                "pct_change": 1.2,
+                "price_change": 0.1,
                 "turnover_rate": 0.12,
-                "adjust": "none",
+                "adjustment": "unadjusted",
                 "source_endpoint": "stock_zh_a_hist",
-                "quality_status": "hist_confirmed",
+                "quality_status": "daily_bar_confirmed",
                 "fetched_at": pd.Timestamp("2024-01-03 16:00:00"),
             }
         ]
     )
+

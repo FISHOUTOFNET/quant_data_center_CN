@@ -2,7 +2,7 @@
 
 from src.api.akshare_client import AkShareClient
 from src.api.market_data import (
-    DailyKRequest,
+    DailyBarRequest,
     MarketDataProvider,
     create_provider,
     register_provider,
@@ -11,7 +11,7 @@ from src.api.market_data import (
 
 __all__ = [
     "AkShareClient",
-    "DailyKRequest",
+    "DailyBarRequest",
     "MarketDataProvider",
     "create_provider",
     "register_provider",

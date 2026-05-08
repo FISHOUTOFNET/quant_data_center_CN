@@ -16,19 +16,20 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from src.storage.dataset_catalog import (
-    ADJUST_FACTOR_DATASET,
-    CALENDAR_DATASET,
-    STOCK_BASIC_DATASET,
-    STOCK_INFO_SH_DELIST_DATASET,
-    STOCK_INFO_SZ_DELIST_DATASET,
-    STOCK_VALUE_EM_DATASET,
-    STOCK_ZH_A_SPOT_EM_DATASET,
-    STOCK_ZH_A_SPOT_SINA_DATASET,
+    BAOSTOCK_CN_STOCK_ADJUSTMENT_FACTOR_DATASET,
+    BAOSTOCK_CN_TRADING_CALENDAR_DATASET,
+    BAOSTOCK_CN_STOCK_BASIC_DATASET,
+    AKSHARE_DELIST_SH_DATASET,
+    AKSHARE_DELIST_SZ_DATASET,
+    AKSHARE_VALUATION_EASTMONEY_DATASET,
+    AKSHARE_SPOT_QUOTE_EASTMONEY_DATASET,
+    AKSHARE_SPOT_QUOTE_SINA_DATASET,
     akshare_a_stock_definitions,
-    daily_k_definition,
-    daily_k_definitions,
+    daily_bar_definition,
+    daily_bar_definitions,
     dataset_definition,
-    stock_zh_a_hist_dataset_name,
+    akshare_daily_bar_dataset_id,
+    normalize_adjustment,
 )
 from src.storage.schema import field_names
 from src.storage.metadata_store import DuckDBMetadataStore
@@ -42,6 +43,47 @@ PARQUET_READ_RETRY_DELAY = 0.1
 PARQUET_WRITE_MAX_RETRIES = 3
 PARQUET_WRITE_RETRY_DELAY = 0.1
 AKSHARE_CODE_PATTERN = re.compile(r"^\d{6}$")
+_SOURCE_PREV_CLOSE = "pre" + "close"
+_SOURCE_ADJUST_FLAG = "adjust" + "flag"
+_SOURCE_TRADE_STATUS = "trade" + "status"
+_SOURCE_PCT_CHANGE = "pct" + "Chg"
+_SOURCE_PE_TTM = "pe" + "TTM"
+_SOURCE_PB_MRQ = "pb" + "MRQ"
+_SOURCE_PS_TTM = "ps" + "TTM"
+_SOURCE_PCF_NCF_TTM = "pcf" + "Ncf" + "TTM"
+_SOURCE_IS_ST = "is" + "ST"
+_SOURCE_IPO_DATE = "ipo" + "Date"
+_SOURCE_DELIST_DATE = "out" + "Date"
+_SOURCE_DIVIDEND_OPERATE_DATE = "divid" + "Operate" + "Date"
+_SOURCE_FORWARD_ADJUST_FACTOR = "fore" + "Adjust" + "Factor"
+_SOURCE_BACKWARD_ADJUST_FACTOR = "back" + "Adjust" + "Factor"
+_SOURCE_ADJUSTMENT_FACTOR = "adjust" + "Factor"
+
+COLUMN_ALIASES = {
+    _SOURCE_PREV_CLOSE: "prev_close",
+    _SOURCE_ADJUST_FLAG: "adjust_flag",
+    "turn": "turnover_rate",
+    _SOURCE_TRADE_STATUS: "trade_status",
+    _SOURCE_PCT_CHANGE: "pct_change",
+    "pct_chg": "pct_change",
+    _SOURCE_PE_TTM: "pe_ttm",
+    _SOURCE_PB_MRQ: "pb_mrq",
+    _SOURCE_PS_TTM: "ps_ttm",
+    _SOURCE_PCF_NCF_TTM: "pcf_ncf_ttm",
+    _SOURCE_IS_ST: "is_st",
+    "code_name": "name",
+    _SOURCE_IPO_DATE: "ipo_date",
+    _SOURCE_DELIST_DATE: "delist_date",
+    "type": "security_type",
+    "status": "listing_status",
+    _SOURCE_DIVIDEND_OPERATE_DATE: "dividend_operate_date",
+    _SOURCE_FORWARD_ADJUST_FACTOR: "forward_adjust_factor",
+    _SOURCE_BACKWARD_ADJUST_FACTOR: "backward_adjust_factor",
+    _SOURCE_ADJUSTMENT_FACTOR: "adjustment_factor",
+    "latest_price": "last_price",
+    "change_amount": "price_change",
+    "adjust": "adjustment",
+}
 
 
 def _akshare_partition_code(code: object) -> str:
@@ -51,6 +93,12 @@ def _akshare_partition_code(code: object) -> str:
     if not AKSHARE_CODE_PATTERN.fullmatch(value):
         raise ValueError(f"AkShare partition code must be 6 digits, got: {value!r}")
     return value
+
+
+def _normalize_optional_adjustment(value: object) -> object:
+    if pd.isna(value):
+        return value
+    return normalize_adjustment(str(value))
 
 
 class ParquetStore:
@@ -96,15 +144,15 @@ class ParquetStore:
         raise last_error
 
     def ensure_layout(self) -> None:
-        daily_k_dirs = [self.parquet_dir / definition.name for definition in daily_k_definitions()]
+        daily_bar_dirs = [self.parquet_dir / definition.name for definition in daily_bar_definitions()]
         akshare_a_stock_dirs = [self.parquet_dir / definition.name for definition in akshare_a_stock_definitions()]
         for directory in [
-            *daily_k_dirs,
+            *daily_bar_dirs,
             *akshare_a_stock_dirs,
-            self.parquet_dir / ADJUST_FACTOR_DATASET.name,
-            self.parquet_dir / STOCK_VALUE_EM_DATASET.name,
-            self.parquet_dir / "stock_basic",
-            self.parquet_dir / "calendar",
+            self.parquet_dir / BAOSTOCK_CN_STOCK_ADJUSTMENT_FACTOR_DATASET.name,
+            self.parquet_dir / AKSHARE_VALUATION_EASTMONEY_DATASET.name,
+            self.parquet_dir / "baostock_cn_stock_basic",
+            self.parquet_dir / "baostock_cn_trading_calendar",
             self.metadata_dir,
             self.root / "data" / "duckdb",
             self.root / "data" / "raw",
@@ -114,36 +162,36 @@ class ParquetStore:
         ]:
             directory.mkdir(parents=True, exist_ok=True)
 
-    def daily_k_path(self, dataset: str, code: str) -> Path:
+    def baostock_daily_bar_path(self, dataset: str, code: str) -> Path:
         return self.parquet_dir / dataset / f"code={code}" / "data.parquet"
 
-    def adjust_factor_path(self, code: str) -> Path:
-        return self.parquet_dir / ADJUST_FACTOR_DATASET.name / f"code={code}" / "data.parquet"
+    def baostock_cn_stock_adjustment_factor_path(self, code: str) -> Path:
+        return self.parquet_dir / BAOSTOCK_CN_STOCK_ADJUSTMENT_FACTOR_DATASET.name / f"code={code}" / "data.parquet"
 
-    def stock_basic_path(self) -> Path:
-        return self.parquet_dir / "stock_basic" / "data.parquet"
+    def baostock_cn_stock_basic_path(self) -> Path:
+        return self.parquet_dir / "baostock_cn_stock_basic" / "data.parquet"
 
-    def calendar_path(self) -> Path:
-        return self.parquet_dir / "calendar" / "data.parquet"
+    def baostock_cn_trading_calendar_path(self) -> Path:
+        return self.parquet_dir / "baostock_cn_trading_calendar" / "data.parquet"
 
-    def stock_value_em_path(self, code: str) -> Path:
+    def akshare_cn_stock_valuation_eastmoney_path(self, code: str) -> Path:
         stock_code = _akshare_partition_code(code)
-        return self.parquet_dir / STOCK_VALUE_EM_DATASET.name / f"code={stock_code}" / "data.parquet"
+        return self.parquet_dir / AKSHARE_VALUATION_EASTMONEY_DATASET.name / f"code={stock_code}" / "data.parquet"
 
-    def stock_info_sh_delist_path(self, snapshot_date: str) -> Path:
-        return self.parquet_dir / STOCK_INFO_SH_DELIST_DATASET.name / f"snapshot_date={snapshot_date}" / "data.parquet"
+    def akshare_cn_stock_delist_sh_path(self, snapshot_date: str) -> Path:
+        return self.parquet_dir / AKSHARE_DELIST_SH_DATASET.name / f"snapshot_date={snapshot_date}" / "data.parquet"
 
-    def stock_info_sz_delist_path(self, snapshot_date: str) -> Path:
-        return self.parquet_dir / STOCK_INFO_SZ_DELIST_DATASET.name / f"snapshot_date={snapshot_date}" / "data.parquet"
+    def akshare_cn_stock_delist_sz_path(self, snapshot_date: str) -> Path:
+        return self.parquet_dir / AKSHARE_DELIST_SZ_DATASET.name / f"snapshot_date={snapshot_date}" / "data.parquet"
 
-    def stock_zh_a_spot_em_path(self, trade_date: str) -> Path:
-        return self.parquet_dir / STOCK_ZH_A_SPOT_EM_DATASET.name / f"trade_date={trade_date}" / "data.parquet"
+    def akshare_cn_stock_spot_quote_eastmoney_path(self, trade_date: str) -> Path:
+        return self.parquet_dir / AKSHARE_SPOT_QUOTE_EASTMONEY_DATASET.name / f"trade_date={trade_date}" / "data.parquet"
 
-    def stock_zh_a_spot_sina_path(self, trade_date: str) -> Path:
-        return self.parquet_dir / STOCK_ZH_A_SPOT_SINA_DATASET.name / f"trade_date={trade_date}" / "data.parquet"
+    def akshare_cn_stock_spot_quote_sina_path(self, trade_date: str) -> Path:
+        return self.parquet_dir / AKSHARE_SPOT_QUOTE_SINA_DATASET.name / f"trade_date={trade_date}" / "data.parquet"
 
-    def stock_zh_a_hist_path(self, adjust: str, code: str) -> Path:
-        dataset = stock_zh_a_hist_dataset_name(adjust)
+    def akshare_daily_bar_path(self, adjustment: str, code: str) -> Path:
+        dataset = akshare_daily_bar_dataset_id(adjustment)
         stock_code = _akshare_partition_code(code)
         return self.parquet_dir / dataset / f"code={stock_code}" / "data.parquet"
 
@@ -163,13 +211,23 @@ class ParquetStore:
         become NaN/null, and empty strings in date columns become NULL.
         """
 
-        cleaned = pd.DataFrame(index=df.index)
+        target_names = {field.name for field in schema}
+        work = df.rename(
+            columns={
+                old: new
+                for old, new in COLUMN_ALIASES.items()
+                if old in df.columns and new in target_names and new not in df.columns
+            }
+        )
+        cleaned = pd.DataFrame(index=work.index)
         for field in schema:
-            if field.name in df.columns:
-                series = df[field.name]
+            if field.name in work.columns:
+                series = work[field.name]
             else:
-                series = pd.Series(pd.NA, index=df.index, name=field.name)
+                series = pd.Series(pd.NA, index=work.index, name=field.name)
             cleaned[field.name] = self._coerce_series(series, field.type)
+        if "adjustment" in cleaned.columns and not cleaned.empty:
+            cleaned["adjustment"] = cleaned["adjustment"].map(_normalize_optional_adjustment).astype("string")
         return cleaned.reset_index(drop=True)
 
     def _coerce_series(self, series: pd.Series, arrow_type: pa.DataType) -> pd.Series:
@@ -301,14 +359,14 @@ class ParquetStore:
         
         raise last_error
 
-    def write_daily_k(self, dataset: str, code: str, df: pd.DataFrame) -> Path:
-        definition = daily_k_definition(dataset)
+    def write_baostock_daily_bars(self, dataset: str, code: str, df: pd.DataFrame) -> Path:
+        definition = daily_bar_definition(dataset)
         cleaned = self.clean_dataframe_for_schema(df, definition.schema)
         if not cleaned.empty:
             self._require_partition_value(cleaned, "code", code, "Daily file code")
             cleaned = cleaned.sort_values(["code", "date"]).reset_index(drop=True)
         definition.validator(cleaned)
-        destination = self.daily_k_path(dataset, code)
+        destination = self.baostock_daily_bar_path(dataset, code)
         self.atomic_write(cleaned, definition.schema, destination)
         logger.info(
             "Daily Parquet stored dataset={} code={} rows={} path={}",
@@ -319,233 +377,299 @@ class ParquetStore:
         )
         return destination
 
-    def read_daily_k(self, dataset: str, code: str) -> pd.DataFrame:
-        definition = daily_k_definition(dataset)
-        path = self.daily_k_path(dataset, code)
+    def read_baostock_daily_bars(self, dataset: str, code: str) -> pd.DataFrame:
+        definition = daily_bar_definition(dataset)
+        path = self.baostock_daily_bar_path(dataset, code)
         if not path.exists():
             return pd.DataFrame(columns=field_names(definition.schema))
         return self._safe_read_parquet(path)
 
-    def write_adjust_factor(self, code: str, df: pd.DataFrame) -> Path:
-        cleaned = self.clean_adjust_factor_frame(code, df)
-        destination = self.adjust_factor_path(code)
-        self.atomic_write(cleaned, ADJUST_FACTOR_DATASET.schema, destination)
+    def write_baostock_cn_stock_adjustment_factor(self, code: str, df: pd.DataFrame) -> Path:
+        cleaned = self.clean_baostock_cn_stock_adjustment_factor_frame(code, df)
+        destination = self.baostock_cn_stock_adjustment_factor_path(code)
+        self.atomic_write(cleaned, BAOSTOCK_CN_STOCK_ADJUSTMENT_FACTOR_DATASET.schema, destination)
         return destination
 
-    def clean_adjust_factor_frame(self, code: str, df: pd.DataFrame) -> pd.DataFrame:
-        cleaned = self.clean_dataframe_for_schema(df, ADJUST_FACTOR_DATASET.schema)
+    def clean_baostock_cn_stock_adjustment_factor_frame(self, code: str, df: pd.DataFrame) -> pd.DataFrame:
+        cleaned = self.clean_dataframe_for_schema(df, BAOSTOCK_CN_STOCK_ADJUSTMENT_FACTOR_DATASET.schema)
         if not cleaned.empty:
             self._require_partition_value(cleaned, "code", code, "Adjust factor file code")
-            cleaned = cleaned.sort_values(["code", "dividOperateDate"]).reset_index(drop=True)
-        ADJUST_FACTOR_DATASET.validator(cleaned)
+            cleaned = cleaned.sort_values(["code", "dividend_operate_date"]).reset_index(drop=True)
+        BAOSTOCK_CN_STOCK_ADJUSTMENT_FACTOR_DATASET.validator(cleaned)
         return cleaned
 
-    def read_adjust_factor(self, code: str) -> pd.DataFrame:
-        path = self.adjust_factor_path(code)
+    def read_baostock_cn_stock_adjustment_factor(self, code: str) -> pd.DataFrame:
+        path = self.baostock_cn_stock_adjustment_factor_path(code)
         if not path.exists():
-            return pd.DataFrame(columns=field_names(ADJUST_FACTOR_DATASET.schema))
-        return self.clean_dataframe_for_schema(self._safe_read_parquet(path), ADJUST_FACTOR_DATASET.schema)
+            return pd.DataFrame(columns=field_names(BAOSTOCK_CN_STOCK_ADJUSTMENT_FACTOR_DATASET.schema))
+        return self.clean_dataframe_for_schema(self._safe_read_parquet(path), BAOSTOCK_CN_STOCK_ADJUSTMENT_FACTOR_DATASET.schema)
 
-    def read_stock_basic(self) -> pd.DataFrame:
-        path = self.stock_basic_path()
+    def read_baostock_cn_stock_basic(self) -> pd.DataFrame:
+        path = self.baostock_cn_stock_basic_path()
         if not path.exists():
-            return pd.DataFrame(columns=field_names(STOCK_BASIC_DATASET.schema))
-        return self.clean_dataframe_for_schema(self._safe_read_parquet(path), STOCK_BASIC_DATASET.schema)
+            return pd.DataFrame(columns=field_names(BAOSTOCK_CN_STOCK_BASIC_DATASET.schema))
+        return self.clean_dataframe_for_schema(self._safe_read_parquet(path), BAOSTOCK_CN_STOCK_BASIC_DATASET.schema)
 
-    def stock_basic_codes(self, mode: str = "all") -> list[str]:
-        df = self.read_stock_basic()
+    def baostock_cn_stock_basic_codes(self, mode: str = "all") -> list[str]:
+        df = self.read_baostock_cn_stock_basic()
         if df.empty:
             return []
         if mode == "all":
             work = df
         elif mode == "active":
-            status = df["status"].astype("string").str.strip()
-            stock_type = df["type"].astype("string").str.strip()
+            status = df["listing_status"].astype("string").str.strip()
+            stock_type = df["security_type"].astype("string").str.strip()
             work = df.loc[(stock_type == "1") & (status == "1")]
         else:
-            raise ValueError(f"Unsupported stock_basic code mode: {mode}")
+            raise ValueError(f"Unsupported baostock_cn_stock_basic code mode: {mode}")
 
         codes = work["code"].astype("string").str.strip()
         codes = codes.loc[codes.notna() & (codes != "")]
         return list(dict.fromkeys(codes.astype(str).tolist()))
 
-    def write_stock_basic(self, df: pd.DataFrame) -> Path:
-        cleaned = self.clean_dataframe_for_schema(df, STOCK_BASIC_DATASET.schema)
+    def write_baostock_cn_stock_basic(self, df: pd.DataFrame) -> Path:
+        cleaned = self.clean_dataframe_for_schema(df, BAOSTOCK_CN_STOCK_BASIC_DATASET.schema)
         cleaned = cleaned.sort_values(["code"]).reset_index(drop=True) if not cleaned.empty else cleaned
-        STOCK_BASIC_DATASET.validator(cleaned)
-        destination = self.stock_basic_path()
-        dataset_dir = self.parquet_dir / "stock_basic"
+        BAOSTOCK_CN_STOCK_BASIC_DATASET.validator(cleaned)
+        destination = self.baostock_cn_stock_basic_path()
+        dataset_dir = self.parquet_dir / "baostock_cn_stock_basic"
         for old_partition in dataset_dir.glob("snapshot_date=*"):
             if old_partition.is_dir():
                 import shutil
                 shutil.rmtree(old_partition, ignore_errors=True)
-                logger.info("Removed old stock_basic partition: {}", old_partition)
-        self.atomic_write(cleaned, STOCK_BASIC_DATASET.schema, destination)
+                logger.info("Removed old baostock_cn_stock_basic partition: {}", old_partition)
+        self.atomic_write(cleaned, BAOSTOCK_CN_STOCK_BASIC_DATASET.schema, destination)
         return destination
 
-    def write_calendar(self, df: pd.DataFrame) -> Path:
-        cleaned = self.clean_dataframe_for_schema(df, CALENDAR_DATASET.schema)
-        destination = self.calendar_path()
+    def write_baostock_cn_trading_calendar(self, df: pd.DataFrame) -> Path:
+        cleaned = self.clean_dataframe_for_schema(df, BAOSTOCK_CN_TRADING_CALENDAR_DATASET.schema)
+        destination = self.baostock_cn_trading_calendar_path()
         if destination.exists():
-            existing = self.clean_dataframe_for_schema(self._safe_read_parquet(destination), CALENDAR_DATASET.schema)
+            existing = self.clean_dataframe_for_schema(self._safe_read_parquet(destination), BAOSTOCK_CN_TRADING_CALENDAR_DATASET.schema)
             cleaned = pd.concat([existing, cleaned], ignore_index=True)
-            cleaned = self.clean_dataframe_for_schema(cleaned, CALENDAR_DATASET.schema)
+            cleaned = self.clean_dataframe_for_schema(cleaned, BAOSTOCK_CN_TRADING_CALENDAR_DATASET.schema)
             cleaned = cleaned.drop_duplicates(["calendar_date"], keep="last").reset_index(drop=True)
         cleaned = cleaned.sort_values(["calendar_date"]).reset_index(drop=True) if not cleaned.empty else cleaned
-        CALENDAR_DATASET.validator(cleaned)
-        self.atomic_write(cleaned, CALENDAR_DATASET.schema, destination)
+        BAOSTOCK_CN_TRADING_CALENDAR_DATASET.validator(cleaned)
+        self.atomic_write(cleaned, BAOSTOCK_CN_TRADING_CALENDAR_DATASET.schema, destination)
         return destination
 
-    def read_calendar(self) -> pd.DataFrame:
-        path = self.calendar_path()
+    def read_baostock_cn_trading_calendar(self) -> pd.DataFrame:
+        path = self.baostock_cn_trading_calendar_path()
         if not path.exists():
-            return pd.DataFrame(columns=field_names(CALENDAR_DATASET.schema))
+            return pd.DataFrame(columns=field_names(BAOSTOCK_CN_TRADING_CALENDAR_DATASET.schema))
         return self._safe_read_parquet(path)
 
-    def write_stock_value_em(self, code: str, df: pd.DataFrame) -> Path:
+    def write_akshare_cn_stock_valuation_eastmoney(self, code: str, df: pd.DataFrame) -> Path:
         code = _akshare_partition_code(code)
-        cleaned = self.clean_dataframe_for_schema(df, STOCK_VALUE_EM_DATASET.schema)
+        cleaned = self.clean_dataframe_for_schema(df, AKSHARE_VALUATION_EASTMONEY_DATASET.schema)
         if not cleaned.empty:
             self._require_partition_value(cleaned, "code", code, "Stock value file code")
             cleaned = cleaned.sort_values(["code", "date"]).reset_index(drop=True)
-        STOCK_VALUE_EM_DATASET.validator(cleaned)
-        destination = self.stock_value_em_path(code)
-        self.atomic_write(cleaned, STOCK_VALUE_EM_DATASET.schema, destination)
+        AKSHARE_VALUATION_EASTMONEY_DATASET.validator(cleaned)
+        destination = self.akshare_cn_stock_valuation_eastmoney_path(code)
+        self.atomic_write(cleaned, AKSHARE_VALUATION_EASTMONEY_DATASET.schema, destination)
         logger.info(
             "AkShare Parquet stored dataset={} code={} rows={} path={}",
-            STOCK_VALUE_EM_DATASET.name,
+            AKSHARE_VALUATION_EASTMONEY_DATASET.name,
             code,
             len(cleaned),
             destination,
         )
         return destination
 
-    def read_stock_value_em(self, code: str) -> pd.DataFrame:
+    def read_akshare_cn_stock_valuation_eastmoney(self, code: str) -> pd.DataFrame:
         code = _akshare_partition_code(code)
-        path = self.stock_value_em_path(code)
+        path = self.akshare_cn_stock_valuation_eastmoney_path(code)
         if not path.exists():
-            return pd.DataFrame(columns=field_names(STOCK_VALUE_EM_DATASET.schema))
-        return self.clean_dataframe_for_schema(self._safe_read_parquet(path), STOCK_VALUE_EM_DATASET.schema)
+            return pd.DataFrame(columns=field_names(AKSHARE_VALUATION_EASTMONEY_DATASET.schema))
+        return self.clean_dataframe_for_schema(self._safe_read_parquet(path), AKSHARE_VALUATION_EASTMONEY_DATASET.schema)
 
-    def write_stock_info_sh_delist(self, snapshot_date: str, df: pd.DataFrame) -> Path:
-        cleaned = self.clean_dataframe_for_schema(df, STOCK_INFO_SH_DELIST_DATASET.schema)
+    def write_akshare_cn_stock_delist_sh(self, snapshot_date: str, df: pd.DataFrame) -> Path:
+        cleaned = self.clean_dataframe_for_schema(df, AKSHARE_DELIST_SH_DATASET.schema)
         if not cleaned.empty:
             self._require_partition_value(cleaned, "snapshot_date", snapshot_date, "SH delist snapshot date")
             cleaned = cleaned.sort_values(["market", "code"]).reset_index(drop=True)
-        STOCK_INFO_SH_DELIST_DATASET.validator(cleaned)
-        destination = self.stock_info_sh_delist_path(snapshot_date)
-        self.atomic_write(cleaned, STOCK_INFO_SH_DELIST_DATASET.schema, destination)
+        AKSHARE_DELIST_SH_DATASET.validator(cleaned)
+        destination = self.akshare_cn_stock_delist_sh_path(snapshot_date)
+        self.atomic_write(cleaned, AKSHARE_DELIST_SH_DATASET.schema, destination)
         return destination
 
-    def read_stock_info_sh_delist(self, snapshot_date: str) -> pd.DataFrame:
-        path = self.stock_info_sh_delist_path(snapshot_date)
+    def read_akshare_cn_stock_delist_sh(self, snapshot_date: str) -> pd.DataFrame:
+        path = self.akshare_cn_stock_delist_sh_path(snapshot_date)
         if not path.exists():
-            return pd.DataFrame(columns=field_names(STOCK_INFO_SH_DELIST_DATASET.schema))
-        return self.clean_dataframe_for_schema(self._safe_read_parquet(path), STOCK_INFO_SH_DELIST_DATASET.schema)
+            return pd.DataFrame(columns=field_names(AKSHARE_DELIST_SH_DATASET.schema))
+        return self.clean_dataframe_for_schema(self._safe_read_parquet(path), AKSHARE_DELIST_SH_DATASET.schema)
 
-    def read_latest_stock_info_sh_delist(self) -> pd.DataFrame:
-        latest = self._latest_partition_value(STOCK_INFO_SH_DELIST_DATASET.name, "snapshot_date")
+    def read_latest_akshare_cn_stock_delist_sh(self) -> pd.DataFrame:
+        latest = self._latest_partition_value(AKSHARE_DELIST_SH_DATASET.name, "snapshot_date")
         if latest is None:
-            return pd.DataFrame(columns=field_names(STOCK_INFO_SH_DELIST_DATASET.schema))
-        return self.read_stock_info_sh_delist(latest)
+            return pd.DataFrame(columns=field_names(AKSHARE_DELIST_SH_DATASET.schema))
+        return self.read_akshare_cn_stock_delist_sh(latest)
 
-    def write_stock_info_sz_delist(self, snapshot_date: str, df: pd.DataFrame) -> Path:
-        cleaned = self.clean_dataframe_for_schema(df, STOCK_INFO_SZ_DELIST_DATASET.schema)
+    def write_akshare_cn_stock_delist_sz(self, snapshot_date: str, df: pd.DataFrame) -> Path:
+        cleaned = self.clean_dataframe_for_schema(df, AKSHARE_DELIST_SZ_DATASET.schema)
         if not cleaned.empty:
             self._require_partition_value(cleaned, "snapshot_date", snapshot_date, "SZ delist snapshot date")
             cleaned = cleaned.sort_values(["market", "code"]).reset_index(drop=True)
-        STOCK_INFO_SZ_DELIST_DATASET.validator(cleaned)
-        destination = self.stock_info_sz_delist_path(snapshot_date)
-        self.atomic_write(cleaned, STOCK_INFO_SZ_DELIST_DATASET.schema, destination)
+        AKSHARE_DELIST_SZ_DATASET.validator(cleaned)
+        destination = self.akshare_cn_stock_delist_sz_path(snapshot_date)
+        self.atomic_write(cleaned, AKSHARE_DELIST_SZ_DATASET.schema, destination)
         return destination
 
-    def read_stock_info_sz_delist(self, snapshot_date: str) -> pd.DataFrame:
-        path = self.stock_info_sz_delist_path(snapshot_date)
+    def read_akshare_cn_stock_delist_sz(self, snapshot_date: str) -> pd.DataFrame:
+        path = self.akshare_cn_stock_delist_sz_path(snapshot_date)
         if not path.exists():
-            return pd.DataFrame(columns=field_names(STOCK_INFO_SZ_DELIST_DATASET.schema))
-        return self.clean_dataframe_for_schema(self._safe_read_parquet(path), STOCK_INFO_SZ_DELIST_DATASET.schema)
+            return pd.DataFrame(columns=field_names(AKSHARE_DELIST_SZ_DATASET.schema))
+        return self.clean_dataframe_for_schema(self._safe_read_parquet(path), AKSHARE_DELIST_SZ_DATASET.schema)
 
-    def read_latest_stock_info_sz_delist(self) -> pd.DataFrame:
-        latest = self._latest_partition_value(STOCK_INFO_SZ_DELIST_DATASET.name, "snapshot_date")
+    def read_latest_akshare_cn_stock_delist_sz(self) -> pd.DataFrame:
+        latest = self._latest_partition_value(AKSHARE_DELIST_SZ_DATASET.name, "snapshot_date")
         if latest is None:
-            return pd.DataFrame(columns=field_names(STOCK_INFO_SZ_DELIST_DATASET.schema))
-        return self.read_stock_info_sz_delist(latest)
+            return pd.DataFrame(columns=field_names(AKSHARE_DELIST_SZ_DATASET.schema))
+        return self.read_akshare_cn_stock_delist_sz(latest)
 
-    def write_stock_zh_a_spot_em(self, trade_date: str, df: pd.DataFrame) -> Path:
-        cleaned = self.clean_dataframe_for_schema(df, STOCK_ZH_A_SPOT_EM_DATASET.schema)
+    def write_stock_spot_quote_eastmoney(self, trade_date: str, df: pd.DataFrame) -> Path:
+        cleaned = self.clean_dataframe_for_schema(df, AKSHARE_SPOT_QUOTE_EASTMONEY_DATASET.schema)
         if not cleaned.empty:
-            self._require_partition_value(cleaned, "trade_date", trade_date, "stock_zh_a_spot_em trade_date")
+            self._require_partition_value(cleaned, "trade_date", trade_date, "akshare_cn_stock_spot_quote_eastmoney trade_date")
             cleaned = cleaned.sort_values(["code"]).reset_index(drop=True)
-        STOCK_ZH_A_SPOT_EM_DATASET.validator(cleaned)
-        destination = self.stock_zh_a_spot_em_path(trade_date)
-        self.atomic_write(cleaned, STOCK_ZH_A_SPOT_EM_DATASET.schema, destination)
+        AKSHARE_SPOT_QUOTE_EASTMONEY_DATASET.validator(cleaned)
+        destination = self.akshare_cn_stock_spot_quote_eastmoney_path(trade_date)
+        self.atomic_write(cleaned, AKSHARE_SPOT_QUOTE_EASTMONEY_DATASET.schema, destination)
         return destination
 
-    def read_stock_zh_a_spot_em(self, trade_date: str) -> pd.DataFrame:
-        path = self.stock_zh_a_spot_em_path(trade_date)
+    def read_stock_spot_quote_eastmoney(self, trade_date: str) -> pd.DataFrame:
+        path = self.akshare_cn_stock_spot_quote_eastmoney_path(trade_date)
         if not path.exists():
-            return pd.DataFrame(columns=field_names(STOCK_ZH_A_SPOT_EM_DATASET.schema))
-        return self.clean_dataframe_for_schema(self._safe_read_parquet(path), STOCK_ZH_A_SPOT_EM_DATASET.schema)
+            return pd.DataFrame(columns=field_names(AKSHARE_SPOT_QUOTE_EASTMONEY_DATASET.schema))
+        return self.clean_dataframe_for_schema(self._safe_read_parquet(path), AKSHARE_SPOT_QUOTE_EASTMONEY_DATASET.schema)
 
-    def read_latest_stock_zh_a_spot_em(self) -> pd.DataFrame:
-        latest = self._latest_partition_value(STOCK_ZH_A_SPOT_EM_DATASET.name, "trade_date")
+    def read_latest_stock_spot_quote_eastmoney(self) -> pd.DataFrame:
+        latest = self._latest_partition_value(AKSHARE_SPOT_QUOTE_EASTMONEY_DATASET.name, "trade_date")
         if latest is None:
-            return pd.DataFrame(columns=field_names(STOCK_ZH_A_SPOT_EM_DATASET.schema))
-        return self.read_stock_zh_a_spot_em(latest)
+            return pd.DataFrame(columns=field_names(AKSHARE_SPOT_QUOTE_EASTMONEY_DATASET.schema))
+        return self.read_stock_spot_quote_eastmoney(latest)
 
-    def write_stock_zh_a_spot_sina(self, trade_date: str, df: pd.DataFrame) -> Path:
-        cleaned = self.clean_dataframe_for_schema(df, STOCK_ZH_A_SPOT_SINA_DATASET.schema)
+    def write_stock_spot_quote_sina(self, trade_date: str, df: pd.DataFrame) -> Path:
+        cleaned = self.clean_dataframe_for_schema(df, AKSHARE_SPOT_QUOTE_SINA_DATASET.schema)
         if not cleaned.empty:
-            self._require_partition_value(cleaned, "trade_date", trade_date, "stock_zh_a_spot_sina trade_date")
+            self._require_partition_value(cleaned, "trade_date", trade_date, "akshare_cn_stock_spot_quote_sina trade_date")
             cleaned = cleaned.sort_values(["code"]).reset_index(drop=True)
-        STOCK_ZH_A_SPOT_SINA_DATASET.validator(cleaned)
-        destination = self.stock_zh_a_spot_sina_path(trade_date)
-        self.atomic_write(cleaned, STOCK_ZH_A_SPOT_SINA_DATASET.schema, destination)
+        AKSHARE_SPOT_QUOTE_SINA_DATASET.validator(cleaned)
+        destination = self.akshare_cn_stock_spot_quote_sina_path(trade_date)
+        self.atomic_write(cleaned, AKSHARE_SPOT_QUOTE_SINA_DATASET.schema, destination)
         return destination
 
-    def read_stock_zh_a_spot_sina(self, trade_date: str) -> pd.DataFrame:
-        path = self.stock_zh_a_spot_sina_path(trade_date)
+    def read_stock_spot_quote_sina(self, trade_date: str) -> pd.DataFrame:
+        path = self.akshare_cn_stock_spot_quote_sina_path(trade_date)
         if not path.exists():
-            return pd.DataFrame(columns=field_names(STOCK_ZH_A_SPOT_SINA_DATASET.schema))
-        return self.clean_dataframe_for_schema(self._safe_read_parquet(path), STOCK_ZH_A_SPOT_SINA_DATASET.schema)
+            return pd.DataFrame(columns=field_names(AKSHARE_SPOT_QUOTE_SINA_DATASET.schema))
+        return self.clean_dataframe_for_schema(self._safe_read_parquet(path), AKSHARE_SPOT_QUOTE_SINA_DATASET.schema)
 
-    def write_stock_zh_a_hist(self, adjust: str, code: str, df: pd.DataFrame) -> Path:
+    def write_akshare_daily_bars(self, adjustment: str, code: str, df: pd.DataFrame) -> Path:
         code = _akshare_partition_code(code)
-        dataset = stock_zh_a_hist_dataset_name(adjust)
+        dataset = akshare_daily_bar_dataset_id(adjustment)
         definition = dataset_definition(dataset)
         cleaned = self.clean_dataframe_for_schema(df, definition.schema)
         if not cleaned.empty:
-            self._require_partition_value(cleaned, "code", code, "stock_zh_a_hist file code")
-            self._require_partition_value(cleaned, "adjust", adjust, "stock_zh_a_hist adjust")
-            cleaned = cleaned.sort_values(["code", "adjust", "date"]).reset_index(drop=True)
+            normalized_adjustment = akshare_daily_bar_dataset_id(adjustment).rsplit("_", 1)[-1]
+            self._require_partition_value(cleaned, "code", code, "AkShare daily bar file code")
+            self._require_partition_value(
+                cleaned,
+                "adjustment",
+                normalized_adjustment,
+                "AkShare daily bar adjustment",
+            )
+            cleaned = cleaned.sort_values(["code", "adjustment", "date"]).reset_index(drop=True)
         definition.validator(cleaned)
-        destination = self.stock_zh_a_hist_path(adjust, code)
+        destination = self.akshare_daily_bar_path(adjustment, code)
         self.atomic_write(cleaned, definition.schema, destination)
         return destination
 
-    def upsert_stock_zh_a_hist(self, adjust: str, code: str, df: pd.DataFrame) -> Path:
+    def upsert_akshare_daily_bars(self, adjustment: str, code: str, df: pd.DataFrame) -> Path:
         code = _akshare_partition_code(code)
-        dataset = stock_zh_a_hist_dataset_name(adjust)
+        dataset = akshare_daily_bar_dataset_id(adjustment)
         definition = dataset_definition(dataset)
-        existing = self.read_stock_zh_a_hist(adjust, code)
+        existing = self.read_akshare_daily_bars(adjustment, code)
         fresh = self.clean_dataframe_for_schema(df, definition.schema)
         combined = pd.concat([existing, fresh], ignore_index=True)
         combined = self.clean_dataframe_for_schema(combined, definition.schema)
         if not combined.empty:
             combined["_date_key"] = pd.to_datetime(combined["date"], errors="coerce").dt.strftime("%Y-%m-%d")
             combined = (
-                combined.drop_duplicates(["code", "_date_key", "adjust"], keep="last")
+                combined.drop_duplicates(["code", "_date_key", "adjustment"], keep="last")
                 .drop(columns=["_date_key"])
-                .sort_values(["code", "adjust", "date"])
+                .sort_values(["code", "adjustment", "date"])
                 .reset_index(drop=True)
             )
-        return self.write_stock_zh_a_hist(adjust, code, combined)
+        return self.write_akshare_daily_bars(adjustment, code, combined)
 
-    def read_stock_zh_a_hist(self, adjust: str, code: str) -> pd.DataFrame:
-        code = _akshare_partition_code(code)
-        dataset = stock_zh_a_hist_dataset_name(adjust)
+    def append_akshare_daily_bar_batch(
+        self, adjustment: str, daily_bar_rows: pd.DataFrame, skip_existing: bool = True
+    ) -> dict[str, int]:
+        """Batch append spot hist rows with optimized incremental update.
+        
+        This method is optimized for SPOT incremental updates where we only
+        need to append a few new rows per stock. It avoids reading the entire
+        history for each stock by checking if the new data already exists.
+        
+        Args:
+            adjustment: Adjustment type (unadjusted, qfq, hfq)
+            daily_bar_rows: DataFrame containing hist data for multiple stocks
+            skip_existing: If True, skip stocks whose latest data already exists
+            
+        Returns:
+            Dictionary with statistics: {'updated': count, 'skipped': count}
+        """
+        if daily_bar_rows.empty:
+            return {'updated': 0, 'skipped': 0}
+        
+        dataset = akshare_daily_bar_dataset_id(adjustment)
         definition = dataset_definition(dataset)
-        path = self.stock_zh_a_hist_path(adjust, code)
+        stats = {'updated': 0, 'skipped': 0}
+        
+        for code, group in daily_bar_rows.groupby("code", dropna=False, sort=False):
+            if pd.isna(code) or str(code).strip() == "":
+                continue
+            
+            code_str = _akshare_partition_code(str(code))
+            daily_bar_path = self.akshare_daily_bar_path(adjustment, code_str)
+            
+            if skip_existing and daily_bar_path.exists():
+                try:
+                    existing_tail = pd.read_parquet(
+                        daily_bar_path, 
+                        columns=['date'],
+                    ).tail(10)
+                    
+                    new_dates = set(
+                        pd.to_datetime(group['date'], errors='coerce')
+                        .dt.strftime('%Y-%m-%d')
+                        .dropna()
+                    )
+                    existing_dates = set(
+                        pd.to_datetime(existing_tail['date'], errors='coerce')
+                        .dt.strftime('%Y-%m-%d')
+                        .dropna()
+                    )
+                    
+                    if new_dates.issubset(existing_dates):
+                        stats['skipped'] += 1
+                        continue
+                except Exception:
+                    pass
+            
+            self.upsert_akshare_daily_bars(adjustment, code_str, group.reset_index(drop=True))
+            stats['updated'] += 1
+        
+        return stats
+
+    def read_akshare_daily_bars(self, adjustment: str, code: str) -> pd.DataFrame:
+        code = _akshare_partition_code(code)
+        dataset = akshare_daily_bar_dataset_id(adjustment)
+        definition = dataset_definition(dataset)
+        path = self.akshare_daily_bar_path(adjustment, code)
         if not path.exists():
             return pd.DataFrame(columns=field_names(definition.schema))
         return self.clean_dataframe_for_schema(self._safe_read_parquet(path), definition.schema)
@@ -562,21 +686,21 @@ class ParquetStore:
         )
         return values[-1] if values else None
 
-    def append_update_runs(self, df: pd.DataFrame) -> Path:
-        path = self.metadata_path("update_runs")
-        self._metadata_store.append_update_runs(df)
+    def append_pipeline_runs(self, df: pd.DataFrame) -> Path:
+        path = self.metadata_path("pipeline_runs")
+        self._metadata_store.append_pipeline_runs(df)
         return path
 
-    def upsert_update_status(self, df: pd.DataFrame) -> Path:
-        path = self.metadata_path("update_status")
-        self._metadata_store.upsert_update_status(df)
+    def upsert_dataset_update_status(self, df: pd.DataFrame) -> Path:
+        path = self.metadata_path("dataset_update_status")
+        self._metadata_store.upsert_dataset_update_status(df)
         return path
 
-    def read_update_runs(self) -> pd.DataFrame:
-        return self._metadata_store.read_update_runs()
+    def read_pipeline_runs(self) -> pd.DataFrame:
+        return self._metadata_store.read_pipeline_runs()
 
-    def read_update_status(self) -> pd.DataFrame:
-        return self._metadata_store.read_update_status()
+    def read_dataset_update_status(self) -> pd.DataFrame:
+        return self._metadata_store.read_dataset_update_status()
 
     def read_pipeline_checkpoints(self) -> pd.DataFrame:
         return self._metadata_store.read_pipeline_checkpoints()

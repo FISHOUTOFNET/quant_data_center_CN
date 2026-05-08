@@ -13,7 +13,7 @@ from src.utils.logging import logger
 from benchmark_utils import (
     BenchmarkEnvironment,
     BenchmarkReporter,
-    generate_daily_k_dataframe,
+    generate_daily_bar_dataframe,
     generate_test_codes,
 )
 
@@ -32,8 +32,8 @@ def benchmark_thread_pool_write(
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             futures = {}
             for code in codes:
-                df = generate_daily_k_dataframe(code, "2024-01-01", "2024-12-31", rows=rows_per_code)
-                future = executor.submit(store.write_daily_k, "daily_k_none", code, df)
+                df = generate_daily_bar_dataframe(code, "2024-01-01", "2024-12-31", rows=rows_per_code)
+                future = executor.submit(store.write_baostock_daily_bars, "baostock_cn_stock_daily_bar_unadjusted", code, df)
                 futures[future] = code
 
             completed = 0
@@ -62,8 +62,8 @@ def benchmark_thread_pool_read(
     results = {"concurrent_reads": []}
 
     for code in codes[:10]:
-        df = generate_daily_k_dataframe(code, "2024-01-01", "2024-12-31", rows=1000)
-        store.write_daily_k("daily_k_none", code, df)
+        df = generate_daily_bar_dataframe(code, "2024-01-01", "2024-12-31", rows=1000)
+        store.write_baostock_daily_bars("baostock_cn_stock_daily_bar_unadjusted", code, df)
 
     for max_workers in max_workers_list:
         times = []
@@ -72,7 +72,7 @@ def benchmark_thread_pool_read(
             start = time.perf_counter()
 
             with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                futures = [executor.submit(store.read_daily_k, "daily_k_none", code) for code in codes[:10]]
+                futures = [executor.submit(store.read_baostock_daily_bars, "baostock_cn_stock_daily_bar_unadjusted", code) for code in codes[:10]]
                 for future in as_completed(futures):
                     try:
                         future.result()
@@ -100,8 +100,8 @@ def benchmark_mixed_operations(
     results = {"mixed_operations": []}
 
     for code in codes[:10]:
-        df = generate_daily_k_dataframe(code, "2024-01-01", "2024-12-31", rows=1000)
-        store.write_daily_k("daily_k_none", code, df)
+        df = generate_daily_bar_dataframe(code, "2024-01-01", "2024-12-31", rows=1000)
+        store.write_baostock_daily_bars("baostock_cn_stock_daily_bar_unadjusted", code, df)
 
     for max_workers in max_workers_list:
         start = time.perf_counter()
@@ -111,10 +111,10 @@ def benchmark_mixed_operations(
             futures = []
             for i, code in enumerate(codes[:20]):
                 if i < int(20 * read_ratio):
-                    future = executor.submit(store.read_daily_k, "daily_k_none", code)
+                    future = executor.submit(store.read_baostock_daily_bars, "baostock_cn_stock_daily_bar_unadjusted", code)
                 else:
-                    df = generate_daily_k_dataframe(code, "2024-01-01", "2024-12-31", rows=100)
-                    future = executor.submit(store.write_daily_k, "daily_k_none", code, df)
+                    df = generate_daily_bar_dataframe(code, "2024-01-01", "2024-12-31", rows=100)
+                    future = executor.submit(store.write_baostock_daily_bars, "baostock_cn_stock_daily_bar_unadjusted", code, df)
                 futures.append(future)
 
             for future in as_completed(futures):
@@ -190,22 +190,22 @@ def benchmark_sequential_vs_parallel(
 
     start = time.perf_counter()
     for code in codes[:20]:
-        df = generate_daily_k_dataframe(code, "2024-01-01", "2024-12-31", rows=rows_per_code)
-        store.write_daily_k("daily_k_none", code, df)
+        df = generate_daily_bar_dataframe(code, "2024-01-01", "2024-12-31", rows=rows_per_code)
+        store.write_baostock_daily_bars("baostock_cn_stock_daily_bar_unadjusted", code, df)
     sequential_time = time.perf_counter() - start
     results["sequential_time"] = sequential_time
     logger.info("Sequential write time: {:.3f}s", sequential_time)
 
     for code in codes[20:40]:
-        df = generate_daily_k_dataframe(code, "2024-01-01", "2024-12-31", rows=rows_per_code)
-        store.write_daily_k("daily_k_none", code, df)
+        df = generate_daily_bar_dataframe(code, "2024-01-01", "2024-12-31", rows=rows_per_code)
+        store.write_baostock_daily_bars("baostock_cn_stock_daily_bar_unadjusted", code, df)
 
     start = time.perf_counter()
     with ThreadPoolExecutor(max_workers=4) as executor:
         futures = []
         for code in codes[40:60]:
-            df = generate_daily_k_dataframe(code, "2024-01-01", "2024-12-31", rows=rows_per_code)
-            future = executor.submit(store.write_daily_k, "daily_k_none", code, df)
+            df = generate_daily_bar_dataframe(code, "2024-01-01", "2024-12-31", rows=rows_per_code)
+            future = executor.submit(store.write_baostock_daily_bars, "baostock_cn_stock_daily_bar_unadjusted", code, df)
             futures.append(future)
         for future in as_completed(futures):
             future.result()

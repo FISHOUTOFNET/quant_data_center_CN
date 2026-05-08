@@ -18,17 +18,18 @@ class ContractConfig:
         values = {
             "api.akshare.max_retries": 3,
             "api.akshare.jitter_seconds": [0, 0],
-            "api.akshare.endpoints.stock_value_em.failure_threshold": 3,
-            "api.akshare.endpoints.stock_value_em.cooldown_minutes": 1,
+            "api.akshare.endpoints.akshare_cn_stock_valuation_eastmoney.failure_threshold": 3,
+            "api.akshare.endpoints.akshare_cn_stock_valuation_eastmoney.cooldown_minutes": 1,
         }
         return values.get(dotted_key, default)
 
 
-def test_akshare_contract_stock_value_em_sample_stock() -> None:
+def test_akshare_contract_akshare_cn_stock_valuation_eastmoney_sample_stock() -> None:
     client = AkShareClient(config=ContractConfig())
 
-    df = client.query_stock_value("300766")
+    df = client.query_stock_valuation("300766")
 
     assert not df.empty
     assert not df.duplicated(["code", "date"]).any()
     assert set(df["code"].dropna().astype(str)) == {"300766"}
+

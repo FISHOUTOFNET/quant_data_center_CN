@@ -54,13 +54,13 @@ def parquet_dataset_dir(dataset: str, root: Path | None = None) -> Path:
     return base / dataset
 
 
-def daily_k_file(dataset: str, code: str, root: Path | None = None) -> Path:
-    """Return the single Parquet file for a daily_k dataset and stock code."""
+def baostock_daily_bar_file(dataset: str, code: str, root: Path | None = None) -> Path:
+    """Return the single Parquet file for a daily_bar dataset and stock code."""
 
     return parquet_dataset_dir(dataset, root) / f"code={code}" / "data.parquet"
 
 
-def calendar_file(root: Path | None = None) -> Path:
-    """Return the trading calendar Parquet file."""
+def baostock_cn_trading_calendar_file(root: Path | None = None) -> Path:
+    """Return the trading baostock_cn_trading_calendar Parquet file."""
 
-    return parquet_dataset_dir("calendar", root) / "data.parquet"
+    return parquet_dataset_dir("baostock_cn_trading_calendar", root) / "data.parquet"

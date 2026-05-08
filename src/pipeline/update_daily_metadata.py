@@ -19,9 +19,9 @@ def _persist_run_status(
     run_row: dict[str, object],
     status_row: dict[str, object] | None = None,
 ) -> None:
-    store.append_update_runs(pd.DataFrame([run_row]))
+    store.append_pipeline_runs(pd.DataFrame([run_row]))
     if status_row is not None:
-        store.upsert_update_status(pd.DataFrame([status_row]))
+        store.upsert_dataset_update_status(pd.DataFrame([status_row]))
 
 
 def _write_daily_success(
@@ -35,7 +35,7 @@ def _write_daily_success(
     df: pd.DataFrame,
     checkpoint_start_date: str,
 ) -> dict[str, object]:
-    output_path = store.write_daily_k(dataset, code, df)
+    output_path = store.write_baostock_daily_bars(dataset, code, df)
     row_count = len(df)
     run_row = _run_row(
         dataset,

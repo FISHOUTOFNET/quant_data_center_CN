@@ -80,7 +80,7 @@ class BaostockClient:
         start_date: str,
         end_date: str,
         frequency: str = "d",
-        adjustflag: str = "3",
+        adjust_flag: str = "3",
     ) -> pd.DataFrame:
         self._ensure_logged_in()
         result = bs.query_history_k_data_plus(
@@ -89,7 +89,7 @@ class BaostockClient:
             start_date=start_date,
             end_date=end_date,
             frequency=frequency,
-            adjustflag=adjustflag,
+            adjustflag=adjust_flag,
         )
         return _result_to_dataframe(result, "query_history_k_data_plus")
 
@@ -99,7 +99,7 @@ class BaostockClient:
         wait=wait_exponential(multiplier=1, min=1, max=8),
         reraise=True,
     )
-    def query_adjust_factor(
+    def query_baostock_cn_stock_adjustment_factor(
         self,
         code: str,
         start_date: str,
@@ -119,7 +119,7 @@ class BaostockClient:
         wait=wait_exponential(multiplier=1, min=1, max=8),
         reraise=True,
     )
-    def query_stock_basic(self, code: str | None = None, code_name: str | None = None) -> pd.DataFrame:
+    def query_baostock_cn_stock_basic(self, code: str | None = None, code_name: str | None = None) -> pd.DataFrame:
         self._ensure_logged_in()
         kwargs: dict[str, str] = {}
         if code:

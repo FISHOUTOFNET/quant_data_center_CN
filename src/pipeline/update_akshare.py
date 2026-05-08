@@ -29,7 +29,7 @@ from src.pipeline.akshare_tasks import AkShareTask, plan_akshare_tasks
 from src.pipeline.common import PipelineCheckpointLookup, checkpoint_row, should_skip_checkpoint
 from src.pipeline.services import PipelineMetadataBatch
 from src.quality.validators import ValidationError
-from src.storage.dataset_catalog import STOCK_VALUE_EM_DATASET
+from src.storage.dataset_catalog import AKSHARE_VALUATION_EASTMONEY_DATASET
 from src.storage.duckdb_store import DuckDBStore
 from src.storage.parquet_store import ParquetStore
 from src.utils.config_mgr import ConfigManager
@@ -40,16 +40,16 @@ PIPELINE_UPDATE_AKSHARE = "update_akshare"
 
 
 def _get_latest_calendar_date(store: ParquetStore) -> str | None:
-    calendar_df = store.read_calendar()
-    if calendar_df.empty or "calendar_date" not in calendar_df.columns:
+    baostock_cn_trading_calendar_df = store.read_baostock_cn_trading_calendar()
+    if baostock_cn_trading_calendar_df.empty or "calendar_date" not in baostock_cn_trading_calendar_df.columns:
         return None
-    dates = calendar_df["calendar_date"]
+    dates = baostock_cn_trading_calendar_df["calendar_date"]
     if dates.empty:
         return None
     return str(dates.max())
 
 
-def _prefilter_stock_value_em_tasks(
+def _prefilter_akshare_cn_stock_valuation_eastmoney_tasks(
     tasks: list[AkShareTask],
     store: ParquetStore,
     checkpoint_lookup: PipelineCheckpointLookup | None,
@@ -59,12 +59,12 @@ def _prefilter_stock_value_em_tasks(
 
     latest_calendar_date = _get_latest_calendar_date(store)
     if latest_calendar_date is None:
-        logger.warning("Calendar is empty, cannot prefilter stock_value_em tasks")
+        logger.warning("Calendar is empty, cannot prefilter akshare_cn_stock_valuation_eastmoney tasks")
         return list(tasks)
 
     remaining_tasks: list[AkShareTask] = []
     skipped_count = 0
-    calendar_warning_shown = False
+    baostock_cn_trading_calendar_warning_shown = False
 
     for task in tasks:
         if task.end_date is None:
@@ -75,14 +75,14 @@ def _prefilter_stock_value_em_tasks(
             if not task.output_path.exists():
                 remaining_tasks.append(task)
                 continue
-            if task.end_date > latest_calendar_date and not calendar_warning_shown:
+            if task.end_date > latest_calendar_date and not baostock_cn_trading_calendar_warning_shown:
                 logger.warning(
-                    "Local calendar is outdated (latest: {}). "
-                    "Some stock_value_em data has dates beyond calendar. "
-                    "Run 'python -m src.cli update-daily --include-calendar' to update calendar.",
+                    "Local baostock_cn_trading_calendar is outdated (latest: {}). "
+                    "Some akshare_cn_stock_valuation_eastmoney data has dates beyond baostock_cn_trading_calendar. "
+                    "Run 'python -m src.cli update-baostock-daily --dataset baostock_cn_trading_calendar' to update baostock_cn_trading_calendar.",
                     latest_calendar_date,
                 )
-                calendar_warning_shown = True
+                baostock_cn_trading_calendar_warning_shown = True
             skipped_count += 1
             continue
 
@@ -91,7 +91,7 @@ def _prefilter_stock_value_em_tasks(
     if skipped_count:
         skipped_ratio = skipped_count / len(tasks) * 100
         logger.info(
-            "Checkpoint prefilter skipped {}/{} stock_value_em tasks ({:.1f}%); processing {} tasks",
+            "Checkpoint prefilter skipped {}/{} akshare_cn_stock_valuation_eastmoney tasks ({:.1f}%); processing {} tasks",
             skipped_count,
             len(tasks),
             skipped_ratio,
@@ -141,13 +141,13 @@ def update_akshare(
         count_by="run",
     )
     run_records: list[dict[str, object]] = []
-    concurrent_stock_value_tasks: list[AkShareTask] = []
+    concurrent_stock_valuation_tasks: list[AkShareTask] = []
 
     planned_task_count = len(tasks)
-    stock_value_em_tasks = [t for t in tasks if t.dataset == STOCK_VALUE_EM_DATASET.name]
-    other_tasks = [t for t in tasks if t.dataset != STOCK_VALUE_EM_DATASET.name]
-    stock_value_em_tasks = _prefilter_stock_value_em_tasks(stock_value_em_tasks, store, checkpoint_lookup)
-    tasks = other_tasks + stock_value_em_tasks
+    akshare_cn_stock_valuation_eastmoney_tasks = [t for t in tasks if t.dataset == AKSHARE_VALUATION_EASTMONEY_DATASET.name]
+    other_tasks = [t for t in tasks if t.dataset != AKSHARE_VALUATION_EASTMONEY_DATASET.name]
+    akshare_cn_stock_valuation_eastmoney_tasks = _prefilter_akshare_cn_stock_valuation_eastmoney_tasks(akshare_cn_stock_valuation_eastmoney_tasks, store, checkpoint_lookup)
+    tasks = other_tasks + akshare_cn_stock_valuation_eastmoney_tasks
     progress_total = len(tasks)
     progress_processed = 0
     progress_success = 0
@@ -183,22 +183,22 @@ def update_akshare(
             row.get("row_count", 0),
         )
 
-    def flush_concurrent_stock_value_tasks() -> None:
-        if not concurrent_stock_value_tasks:
+    def flush_concurrent_stock_valuation_tasks() -> None:
+        if not concurrent_stock_valuation_tasks:
             return
-        _execute_stock_value_tasks_concurrently(
+        _execute_stock_valuation_tasks_concurrently(
             store,
             ak_client,
-            list(concurrent_stock_value_tasks),
+            list(concurrent_stock_valuation_tasks),
             metadata_batch,
             run_records,
             resolved_workers,
             progress_callback=log_progress,
         )
-        concurrent_stock_value_tasks.clear()
+        concurrent_stock_valuation_tasks.clear()
 
     for task in tasks:
-        if task.dataset != STOCK_VALUE_EM_DATASET.name and should_skip_checkpoint(
+        if task.dataset != AKSHARE_VALUATION_EASTMONEY_DATASET.name and should_skip_checkpoint(
             store,
             PIPELINE_UPDATE_AKSHARE,
             task.dataset,
@@ -226,11 +226,11 @@ def update_akshare(
             log_progress(row, task)
             continue
 
-        if task.dataset == STOCK_VALUE_EM_DATASET.name and resolved_workers > 1:
-            concurrent_stock_value_tasks.append(task)
+        if task.dataset == AKSHARE_VALUATION_EASTMONEY_DATASET.name and resolved_workers > 1:
+            concurrent_stock_valuation_tasks.append(task)
             continue
 
-        flush_concurrent_stock_value_tasks()
+        flush_concurrent_stock_valuation_tasks()
         row = _execute_task(store, ak_client, task, run_records)
         metadata_batch.add(
             run_row=row["run_row"],
@@ -239,11 +239,11 @@ def update_akshare(
         )
         log_progress(row["run_row"], task)
 
-    flush_concurrent_stock_value_tasks()
+    flush_concurrent_stock_valuation_tasks()
     metadata_batch.flush()
     store.close()
     if build_views:
-        DuckDBStore(root=config.root).build_views()
+        DuckDBStore(root=config.root).build_views(cleanup_tmp_files=progress_success > 0)
     logger.info(
         "AkShare update completed processed={} success={} failed={} skipped={}",
         progress_processed,
@@ -316,12 +316,12 @@ class _AdaptiveConcurrencyController:
         self._consecutive_successes = 0
         if self.target_workers > 1:
             self.target_workers -= 1
-            logger.warning("AkShare stock_value_em fetch concurrency reduced to {}", self.target_workers)
+            logger.warning("AkShare akshare_cn_stock_valuation_eastmoney fetch concurrency reduced to {}", self.target_workers)
 
     def _increase(self) -> None:
         if self.target_workers < self.max_workers:
             self.target_workers += 1
-            logger.info("AkShare stock_value_em fetch concurrency restored to {}", self.target_workers)
+            logger.info("AkShare akshare_cn_stock_valuation_eastmoney fetch concurrency restored to {}", self.target_workers)
 
 
 def _resolve_akshare_workers(config: ConfigManager, workers: int | None) -> int:
@@ -332,7 +332,7 @@ def _resolve_akshare_workers(config: ConfigManager, workers: int | None) -> int:
         raise ValueError(f"Invalid AkShare workers value: {raw_workers!r}") from exc
 
 
-def _execute_stock_value_tasks_concurrently(
+def _execute_stock_valuation_tasks_concurrently(
     store: ParquetStore,
     client: Any,
     tasks: list[AkShareTask],
@@ -393,7 +393,7 @@ def _execute_stock_value_tasks_concurrently(
                 if isinstance(result.error, AkShareCircuitOpen):
                     stop_submitting = True
                     logger.warning(
-                        "AkShare stock_value_em circuit opened; stopping new submissions after {} attempted tasks",
+                        "AkShare akshare_cn_stock_valuation_eastmoney circuit opened; stopping new submissions after {} attempted tasks",
                         task_index,
                     )
             submit_until_target(executor)
@@ -550,17 +550,17 @@ def _record_fetched_task_result(
 
 
 def _fetch_task(client: Any, task: AkShareTask) -> AkShareResponse:
-    if task.dataset == STOCK_VALUE_EM_DATASET.name:
+    if task.dataset == AKSHARE_VALUATION_EASTMONEY_DATASET.name:
         if task.code is None:
-            raise ValueError("stock_value_em task missing code")
+            raise ValueError("akshare_cn_stock_valuation_eastmoney task missing code")
         result = (
-            client.fetch_stock_value(task.code)
-            if hasattr(client, "fetch_stock_value")
-            else client.query_stock_value(task.code)
+            client.fetch_stock_valuation(task.code)
+            if hasattr(client, "fetch_stock_valuation")
+            else client.query_stock_valuation(task.code)
         )
         return _ensure_response(
             result,
-            endpoint=STOCK_VALUE_EM_DATASET.name,
+            endpoint=AKSHARE_VALUATION_EASTMONEY_DATASET.name,
             params={"symbol": task.code},
             client=client,
         )
@@ -584,34 +584,34 @@ def _ensure_response(result: object, endpoint: str, params: dict[str, object], c
 
 
 def _write_task_data(store: ParquetStore, task: AkShareTask, df: pd.DataFrame) -> tuple[Path, int, str | None]:
-    if task.dataset == STOCK_VALUE_EM_DATASET.name:
+    if task.dataset == AKSHARE_VALUATION_EASTMONEY_DATASET.name:
         if task.code is None:
-            raise ValueError("stock_value_em task missing code")
+            raise ValueError("akshare_cn_stock_valuation_eastmoney task missing code")
         if df.empty and task.active:
-            raise AkShareEmptyDataError(f"stock_value_em returned empty data for active code {task.code}")
-        if _stock_value_em_unchanged(store, task.code, df):
+            raise AkShareEmptyDataError(f"akshare_cn_stock_valuation_eastmoney returned empty data for active code {task.code}")
+        if _akshare_cn_stock_valuation_eastmoney_unchanged(store, task.code, df):
             logger.info(
-                "AkShare stock_value_em unchanged code={} rows={} path={}",
+                "AkShare akshare_cn_stock_valuation_eastmoney unchanged code={} rows={} path={}",
                 task.code,
                 len(df),
                 task.output_path,
             )
             return task.output_path, len(df), _max_date_iso(df) or task.end_date
-        output_path = store.write_stock_value_em(task.code, df)
+        output_path = store.write_akshare_cn_stock_valuation_eastmoney(task.code, df)
         return output_path, len(df), _max_date_iso(df) or task.end_date
 
     raise ValueError(f"Unsupported AkShare task dataset: {task.dataset}")
 
 
-def _stock_value_em_unchanged(store: ParquetStore, code: str, df: pd.DataFrame) -> bool:
-    if not store.stock_value_em_path(code).exists():
+def _akshare_cn_stock_valuation_eastmoney_unchanged(store: ParquetStore, code: str, df: pd.DataFrame) -> bool:
+    if not store.akshare_cn_stock_valuation_eastmoney_path(code).exists():
         return False
-    cleaned = store.clean_dataframe_for_schema(df, STOCK_VALUE_EM_DATASET.schema)
+    cleaned = store.clean_dataframe_for_schema(df, AKSHARE_VALUATION_EASTMONEY_DATASET.schema)
     if not cleaned.empty:
         cleaned = cleaned.sort_values(["code", "date"]).reset_index(drop=True)
-    STOCK_VALUE_EM_DATASET.validator(cleaned)
-    existing = store.read_stock_value_em(code)
-    existing = store.clean_dataframe_for_schema(existing, STOCK_VALUE_EM_DATASET.schema)
+    AKSHARE_VALUATION_EASTMONEY_DATASET.validator(cleaned)
+    existing = store.read_akshare_cn_stock_valuation_eastmoney(code)
+    existing = store.clean_dataframe_for_schema(existing, AKSHARE_VALUATION_EASTMONEY_DATASET.schema)
     if not existing.empty:
         existing = existing.sort_values(["code", "date"]).reset_index(drop=True)
     return dataframe_hash(existing) == dataframe_hash(cleaned) and _max_date_iso(existing) == _max_date_iso(cleaned)
@@ -697,7 +697,7 @@ def _append_manifest_row(store: ParquetStore, row: dict[str, object]) -> None:
 
 
 def _task_params(task: AkShareTask) -> dict[str, object]:
-    if task.dataset == STOCK_VALUE_EM_DATASET.name and task.code is not None:
+    if task.dataset == AKSHARE_VALUATION_EASTMONEY_DATASET.name and task.code is not None:
         return {"symbol": task.code}
     return {}
 

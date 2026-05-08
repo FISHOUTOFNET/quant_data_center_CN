@@ -7,10 +7,10 @@ import pandas as pd
 import pytest
 
 import src.pipeline.update_akshare_delist as update_akshare_delist_module
-import src.pipeline.update_akshare_hist as update_akshare_hist_module
+import src.pipeline.update_akshare_daily_bar as update_akshare_daily_bar_module
 import src.pipeline.update_akshare_spot as update_akshare_spot_module
 from src.api.akshare_client import AkShareResponse, dataframe_hash
-from src.pipeline.update_akshare_hist import update_akshare_hist
+from src.pipeline.update_akshare_daily_bar import update_akshare_daily_bar
 from src.pipeline.update_akshare_spot import update_akshare_spot
 from src.pipeline.update_akshare_delist import update_akshare_delist
 from src.storage.parquet_store import ParquetStore
@@ -43,7 +43,7 @@ class FakeAStockClient:
         self.calls: list[tuple[str, dict[str, object]]] = []
         self.fail_spot_em = False
 
-    def fetch_stock_info_sh_delist(self, symbol: str = "全部", snapshot_date: str | None = None) -> AkShareResponse:
+    def fetch_akshare_cn_stock_delist_sh(self, symbol: str = "全部", snapshot_date: str | None = None) -> AkShareResponse:
         self.calls.append(("stock_info_sh_delist", {"symbol": symbol, "snapshot_date": snapshot_date}))
         data = pd.DataFrame(
             [
@@ -63,7 +63,7 @@ class FakeAStockClient:
         )
         return _response("stock_info_sh_delist", {"symbol": symbol}, data)
 
-    def fetch_stock_info_sz_delist(
+    def fetch_akshare_cn_stock_delist_sz(
         self,
         symbol: str = "终止上市公司",
         snapshot_date: str | None = None,
@@ -87,14 +87,14 @@ class FakeAStockClient:
         )
         return _response("stock_info_sz_delist", {"symbol": symbol}, data)
 
-    def fetch_stock_zh_a_spot_em(self, trade_date: str | None = None) -> AkShareResponse:
+    def fetch_spot_quote_eastmoney(self, trade_date: str | None = None) -> AkShareResponse:
         self.calls.append(("stock_zh_a_spot_em", {"trade_date": trade_date}))
         if self.fail_spot_em:
             raise RuntimeError("planned spot_em failure")
         data = _spot_em_data(trade_date or "2024-01-03")
         return _response("stock_zh_a_spot_em", {"trade_date": trade_date}, data)
 
-    def fetch_stock_zh_a_spot_sina(self, trade_date: str | None = None, fallback_reason: str = "") -> AkShareResponse:
+    def fetch_spot_quote_sina(self, trade_date: str | None = None, fallback_reason: str = "") -> AkShareResponse:
         self.calls.append(
             ("stock_zh_a_spot", {"trade_date": trade_date, "fallback_reason": fallback_reason})
         )
@@ -105,12 +105,12 @@ class FakeAStockClient:
                     "code": "600000",
                     "source_symbol": "sh600000",
                     "name": "PF Bank",
-                    "latest_price": 8.3,
-                    "change_amount": 0.1,
-                    "pct_chg": 1.2,
+                    "last_price": 8.3,
+                    "price_change": 0.1,
+                    "pct_change": 1.2,
                     "bid": 8.29,
                     "ask": 8.31,
-                    "preclose": 8.2,
+                    "prev_close": 8.2,
                     "open": 8.2,
                     "high": 8.4,
                     "low": 8.1,
@@ -126,23 +126,23 @@ class FakeAStockClient:
         )
         return _response("stock_zh_a_spot", {"trade_date": trade_date}, data)
 
-    def fetch_stock_zh_a_hist(
+    def fetch_daily_bars(
         self,
         symbol: str,
         start_date: str,
         end_date: str,
-        adjust: str,
+        adjustment: str,
     ) -> AkShareResponse:
         self.calls.append(
             (
                 "stock_zh_a_hist",
-                {"symbol": symbol, "start_date": start_date, "end_date": end_date, "adjust": adjust},
+                {"symbol": symbol, "start_date": start_date, "end_date": end_date, "adjustment": adjustment},
             )
         )
-        data = pd.DataFrame([_hist_row(symbol, adjust, close=8.31)])
+        data = pd.DataFrame([_daily_bar_row(symbol, adjustment, close=8.31)])
         return _response(
             "stock_zh_a_hist",
-            {"symbol": symbol, "start_date": start_date, "end_date": end_date, "adjust": adjust},
+            {"symbol": symbol, "start_date": start_date, "end_date": end_date, "adjustment": adjustment},
             data,
         )
 
@@ -160,18 +160,18 @@ def test_update_akshare_delist_writes_manual_delist_snapshot(tmp_path) -> None:
     )
 
     store = ParquetStore(root=tmp_path)
-    loaded = store.read_stock_info_sh_delist("2024-01-03")
-    loaded_sz = store.read_stock_info_sz_delist("2024-01-03")
+    loaded = store.read_akshare_cn_stock_delist_sh("2024-01-03")
+    loaded_sz = store.read_akshare_cn_stock_delist_sz("2024-01-03")
     assert [item["status"] for item in records] == ["success", "success"]
     assert loaded.loc[0, "code"] == "600001"
     assert loaded_sz.loc[0, "code"] == "000001"
     assert {item["dataset"] for item in _manifest_rows(tmp_path)} == {
-        "stock_info_sh_delist",
-        "stock_info_sz_delist",
+        "akshare_cn_stock_delist_sh",
+        "akshare_cn_stock_delist_sz",
     }
 
 
-def test_update_akshare_spot_success_writes_snapshot_and_hist_spot_close(tmp_path) -> None:
+def test_update_akshare_spot_success_writes_snapshot_and_hist_spot_quote_close(tmp_path) -> None:
     _write_settings(tmp_path)
     client = FakeAStockClient()
 
@@ -184,12 +184,12 @@ def test_update_akshare_spot_success_writes_snapshot_and_hist_spot_close(tmp_pat
     )
 
     store = ParquetStore(root=tmp_path)
-    spot = store.read_stock_zh_a_spot_em("2024-01-03")
-    hist = store.read_stock_zh_a_hist("none", "600000")
-    assert [item["dataset"] for item in records] == ["stock_zh_a_spot_em", "stock_zh_a_hist_none"]
+    spot = store.read_stock_spot_quote_eastmoney("2024-01-03")
+    hist = store.read_akshare_daily_bars("unadjusted", "600000")
+    assert [item["dataset"] for item in records] == ["akshare_cn_stock_spot_quote_eastmoney", "akshare_cn_stock_daily_bar_unadjusted"]
     assert spot.loc[0, "code"] == "600000"
     assert hist.loc[0, "source_endpoint"] == "stock_zh_a_spot_em"
-    assert hist.loc[0, "quality_status"] == "spot_close"
+    assert hist.loc[0, "quality_status"] == "spot_quote_close"
     assert hist.loc[0, "close"] == 8.3
 
     client.calls.clear()
@@ -218,28 +218,28 @@ def test_update_akshare_spot_fallback_writes_sina_and_hist(tmp_path) -> None:
     )
 
     store = ParquetStore(root=tmp_path)
-    fallback = store.read_stock_zh_a_spot_sina("2024-01-03")
-    hist = store.read_stock_zh_a_hist("none", "600000")
+    fallback = store.read_stock_spot_quote_sina("2024-01-03")
+    hist = store.read_akshare_daily_bars("unadjusted", "600000")
     assert [item["dataset"] for item in records] == [
-        "stock_zh_a_spot_em",
-        "stock_zh_a_spot_sina",
-        "stock_zh_a_hist_none",
+        "akshare_cn_stock_spot_quote_eastmoney",
+        "akshare_cn_stock_spot_quote_sina",
+        "akshare_cn_stock_daily_bar_unadjusted",
     ]
     assert [item["status"] for item in records] == ["failed", "success", "success"]
     assert fallback.loc[0, "source_endpoint"] == "stock_zh_a_spot"
     assert "planned spot_em failure" in fallback.loc[0, "fallback_reason"]
     assert hist.loc[0, "source_endpoint"] == "stock_zh_a_spot"
-    assert hist.loc[0, "quality_status"] == "spot_close"
+    assert hist.loc[0, "quality_status"] == "spot_quote_close"
 
 
 def test_update_akshare_spot_rejects_realtime_window_before_fetch(tmp_path) -> None:
     _write_settings(tmp_path)
     store = ParquetStore(root=tmp_path)
     store.ensure_layout()
-    store.write_calendar(pd.DataFrame([{"calendar_date": "2024-01-03", "is_trading_day": "1"}]))
+    store.write_baostock_cn_trading_calendar(pd.DataFrame([{"calendar_date": "2024-01-03", "is_trading_day": "1"}]))
     client = FakeAStockClient()
 
-    with pytest.raises(RuntimeError, match="can only write hist"):
+    with pytest.raises(RuntimeError, match="can only write daily bars"):
         update_akshare_spot(
             end="2024-01-03",
             root=tmp_path,
@@ -251,17 +251,17 @@ def test_update_akshare_spot_rejects_realtime_window_before_fetch(tmp_path) -> N
     assert client.calls == []
 
 
-def test_update_akshare_hist_force_logs_progress_serial_and_parallel(tmp_path, monkeypatch) -> None:
+def test_update_akshare_daily_bar_force_logs_progress_serial_and_parallel(tmp_path, monkeypatch) -> None:
     _write_settings(tmp_path)
     fake_logger = FakeLogger()
-    monkeypatch.setattr(update_akshare_hist_module, "logger", fake_logger)
+    monkeypatch.setattr(update_akshare_daily_bar_module, "logger", fake_logger)
     client = FakeAStockClient()
 
     for workers in (1, 2):
         fake_logger.clear()
-        records = update_akshare_hist_module.update_akshare_hist(
+        records = update_akshare_daily_bar_module.update_akshare_daily_bar(
             mode="full",
-            adjust="none",
+            adjustment="unadjusted",
             code=("600000", "000001"),
             start="2024-01-01",
             end="2024-01-03",
@@ -274,7 +274,7 @@ def test_update_akshare_hist_force_logs_progress_serial_and_parallel(tmp_path, m
 
         progress_entries = _log_entries(
             fake_logger,
-            "AkShare hist progress {}/{} code={} adjust={} dataset={} status={} rows={}",
+            "AkShare daily bar progress {}/{} code={} adjustment={} dataset={} status={} rows={}",
         )
         assert len(records) == 2
         assert len(progress_entries) == 2
@@ -283,11 +283,11 @@ def test_update_akshare_hist_force_logs_progress_serial_and_parallel(tmp_path, m
         assert all(entry[2][5] == "success" for entry in progress_entries)
         assert _log_entries(
             fake_logger,
-            "AkShare hist update started mode={} adjust={} force={} workers={} planned_tasks={} processing_tasks={}",
+            "AkShare daily bar update started mode={} adjustment={} force={} workers={} planned_tasks={} processing_tasks={}",
         )
         assert _log_entries(
             fake_logger,
-            "AkShare hist update completed processed={} success={} failed={}",
+            "AkShare daily bar update completed processed={} success={} failed={}",
         )
 
 
@@ -349,22 +349,22 @@ def test_update_akshare_delist_and_spot_force_log_progress(tmp_path, monkeypatch
     )
 
 
-def test_update_akshare_hist_full_ignores_spot_close_in_prefilter(tmp_path) -> None:
+def test_update_akshare_daily_bar_full_ignores_spot_quote_close_in_prefilter(tmp_path) -> None:
     _write_settings(tmp_path)
     store = ParquetStore(root=tmp_path)
     store.ensure_layout()
-    store.write_calendar(pd.DataFrame([{"calendar_date": "2024-01-03", "is_trading_day": "1"}]))
-    store.write_stock_zh_a_hist(
-        "none",
+    store.write_baostock_cn_trading_calendar(pd.DataFrame([{"calendar_date": "2024-01-03", "is_trading_day": "1"}]))
+    store.write_akshare_daily_bars(
+        "unadjusted",
         "600000",
         pd.DataFrame(
             [
-                _hist_row(
+                _daily_bar_row(
                     "600000",
-                    "none",
+                    "unadjusted",
                     close=8.3,
                     source_endpoint="stock_zh_a_spot_em",
-                    quality_status="spot_close",
+                    quality_status="spot_quote_close",
                 )
             ]
         ),
@@ -372,9 +372,9 @@ def test_update_akshare_hist_full_ignores_spot_close_in_prefilter(tmp_path) -> N
     store.close()
     client = FakeAStockClient()
 
-    records = update_akshare_hist(
+    records = update_akshare_daily_bar(
         mode="full",
-        adjust="none",
+        adjustment="unadjusted",
         code=("600000",),
         start="2024-01-01",
         end="2024-01-03",
@@ -387,28 +387,28 @@ def test_update_akshare_hist_full_ignores_spot_close_in_prefilter(tmp_path) -> N
     assert [item[0] for item in client.calls] == ["stock_zh_a_hist"]
     assert [item["status"] for item in records] == ["success"]
     read_store = ParquetStore(root=tmp_path)
-    hist = read_store.read_stock_zh_a_hist("none", "600000")
+    hist = read_store.read_akshare_daily_bars("unadjusted", "600000")
     assert hist.loc[0, "close"] == 8.31
     assert hist.loc[0, "source_endpoint"] == "stock_zh_a_hist"
-    assert hist.loc[0, "quality_status"] == "hist_confirmed"
+    assert hist.loc[0, "quality_status"] == "daily_bar_confirmed"
 
 
-def test_update_akshare_hist_prefilter_skips_when_latest_row_is_hist_and_covers_calendar(tmp_path) -> None:
+def test_update_akshare_daily_bar_prefilter_skips_when_latest_row_is_hist_and_covers_baostock_cn_trading_calendar(tmp_path) -> None:
     _write_settings(tmp_path)
     store = ParquetStore(root=tmp_path)
     store.ensure_layout()
-    store.write_calendar(pd.DataFrame([{"calendar_date": "2024-01-03", "is_trading_day": "1"}]))
-    store.write_stock_zh_a_hist(
-        "none",
+    store.write_baostock_cn_trading_calendar(pd.DataFrame([{"calendar_date": "2024-01-03", "is_trading_day": "1"}]))
+    store.write_akshare_daily_bars(
+        "unadjusted",
         "600000",
-        pd.DataFrame([_hist_row("600000", "none", close=8.31, hist_date="2024-01-03")]),
+        pd.DataFrame([_daily_bar_row("600000", "unadjusted", close=8.31, daily_bar_date="2024-01-03")]),
     )
     store.close()
     client = FakeAStockClient()
 
-    records = update_akshare_hist(
+    records = update_akshare_daily_bar(
         mode="full",
-        adjust="none",
+        adjustment="unadjusted",
         code=("600000",),
         start="2024-01-01",
         end="2024-01-03",
@@ -422,26 +422,26 @@ def test_update_akshare_hist_prefilter_skips_when_latest_row_is_hist_and_covers_
     assert client.calls == []
 
 
-def test_update_akshare_hist_prefilter_keeps_when_latest_row_is_spot_even_if_hist_covers_calendar(
+def test_update_akshare_daily_bar_prefilter_keeps_when_latest_row_is_spot_even_if_hist_covers_baostock_cn_trading_calendar(
     tmp_path,
 ) -> None:
     _write_settings(tmp_path)
     store = ParquetStore(root=tmp_path)
     store.ensure_layout()
-    store.write_calendar(pd.DataFrame([{"calendar_date": "2024-01-04", "is_trading_day": "1"}]))
-    store.write_stock_zh_a_hist(
-        "none",
+    store.write_baostock_cn_trading_calendar(pd.DataFrame([{"calendar_date": "2024-01-04", "is_trading_day": "1"}]))
+    store.write_akshare_daily_bars(
+        "unadjusted",
         "600000",
         pd.DataFrame(
             [
-                _hist_row("600000", "none", close=8.31, hist_date="2024-01-04"),
-                _hist_row(
+                _daily_bar_row("600000", "unadjusted", close=8.31, daily_bar_date="2024-01-04"),
+                _daily_bar_row(
                     "600000",
-                    "none",
+                    "unadjusted",
                     close=8.3,
                     source_endpoint="stock_zh_a_spot_em",
-                    quality_status="spot_close",
-                    hist_date="2024-01-05",
+                    quality_status="spot_quote_close",
+                    daily_bar_date="2024-01-05",
                 ),
             ]
         ),
@@ -449,9 +449,9 @@ def test_update_akshare_hist_prefilter_keeps_when_latest_row_is_spot_even_if_his
     store.close()
     client = FakeAStockClient()
 
-    records = update_akshare_hist(
+    records = update_akshare_daily_bar(
         mode="full",
-        adjust="none",
+        adjustment="unadjusted",
         code=("600000",),
         start="2024-01-01",
         end="2024-01-05",
@@ -465,22 +465,22 @@ def test_update_akshare_hist_prefilter_keeps_when_latest_row_is_spot_even_if_his
     assert [item["status"] for item in records] == ["success"]
 
 
-def test_update_akshare_hist_prefilter_keeps_when_latest_hist_is_before_calendar(tmp_path) -> None:
+def test_update_akshare_daily_bar_prefilter_keeps_when_latest_hist_is_before_baostock_cn_trading_calendar(tmp_path) -> None:
     _write_settings(tmp_path)
     store = ParquetStore(root=tmp_path)
     store.ensure_layout()
-    store.write_calendar(pd.DataFrame([{"calendar_date": "2024-01-04", "is_trading_day": "1"}]))
-    store.write_stock_zh_a_hist(
-        "none",
+    store.write_baostock_cn_trading_calendar(pd.DataFrame([{"calendar_date": "2024-01-04", "is_trading_day": "1"}]))
+    store.write_akshare_daily_bars(
+        "unadjusted",
         "600000",
-        pd.DataFrame([_hist_row("600000", "none", close=8.31, hist_date="2024-01-03")]),
+        pd.DataFrame([_daily_bar_row("600000", "unadjusted", close=8.31, daily_bar_date="2024-01-03")]),
     )
     store.close()
     client = FakeAStockClient()
 
-    records = update_akshare_hist(
+    records = update_akshare_daily_bar(
         mode="full",
-        adjust="none",
+        adjustment="unadjusted",
         code=("600000",),
         start="2024-01-01",
         end="2024-01-04",
@@ -494,18 +494,18 @@ def test_update_akshare_hist_prefilter_keeps_when_latest_hist_is_before_calendar
     assert [item["status"] for item in records] == ["success"]
 
 
-def test_update_akshare_hist_incremental_overrides_spot_and_full_writes_adjust(tmp_path) -> None:
+def test_update_akshare_daily_bar_incremental_overrides_spot_and_full_writes_adjust(tmp_path) -> None:
     _write_settings(tmp_path)
     store = ParquetStore(root=tmp_path)
     store.ensure_layout()
-    store.write_stock_zh_a_spot_em("2024-01-03", _spot_em_data("2024-01-03"))
-    store.write_stock_zh_a_hist("none", "600000", pd.DataFrame([_hist_row("600000", "none", close=8.3, source_endpoint="stock_zh_a_spot_em", quality_status="spot_close")]))
+    store.write_stock_spot_quote_eastmoney("2024-01-03", _spot_em_data("2024-01-03"))
+    store.write_akshare_daily_bars("unadjusted", "600000", pd.DataFrame([_daily_bar_row("600000", "unadjusted", close=8.3, source_endpoint="stock_zh_a_spot_em", quality_status="spot_quote_close")]))
     store.close()
     client = FakeAStockClient()
 
-    incremental = update_akshare_hist(
+    incremental = update_akshare_daily_bar(
         mode="incremental",
-        adjust="none",
+        adjustment="unadjusted",
         start="2024-01-03",
         end="2024-01-03",
         root=tmp_path,
@@ -514,15 +514,15 @@ def test_update_akshare_hist_incremental_overrides_spot_and_full_writes_adjust(t
         client=client,
     )
     read_store = ParquetStore(root=tmp_path)
-    hist = read_store.read_stock_zh_a_hist("none", "600000")
+    hist = read_store.read_akshare_daily_bars("unadjusted", "600000")
     assert [item["status"] for item in incremental] == ["success"]
     assert hist.loc[0, "close"] == 8.31
     assert hist.loc[0, "source_endpoint"] == "stock_zh_a_hist"
-    assert hist.loc[0, "quality_status"] == "hist_confirmed"
+    assert hist.loc[0, "quality_status"] == "daily_bar_confirmed"
 
-    full = update_akshare_hist(
+    full = update_akshare_daily_bar(
         mode="full",
-        adjust="qfq",
+        adjustment="qfq",
         code=("600000",),
         start="2024-01-01",
         end="2024-01-03",
@@ -531,9 +531,9 @@ def test_update_akshare_hist_incremental_overrides_spot_and_full_writes_adjust(t
         workers=1,
         client=client,
     )
-    qfq = read_store.read_stock_zh_a_hist("qfq", "600000")
-    assert [item["dataset"] for item in full] == ["stock_zh_a_hist_qfq"]
-    assert qfq.loc[0, "adjust"] == "qfq"
+    qfq = read_store.read_akshare_daily_bars("qfq", "600000")
+    assert [item["dataset"] for item in full] == ["akshare_cn_stock_daily_bar_qfq"]
+    assert qfq.loc[0, "adjustment"] == "qfq"
 
 
 def _response(endpoint: str, params: dict[str, object], data: pd.DataFrame) -> AkShareResponse:
@@ -556,13 +556,13 @@ def _spot_em_data(trade_date: str) -> pd.DataFrame:
                 "code": "600000",
                 "source_symbol": "600000",
                 "name": "PF Bank",
-                "latest_price": 8.3,
-                "change_amount": 0.1,
-                "pct_chg": 1.2,
+                "last_price": 8.3,
+                "price_change": 0.1,
+                "pct_change": 1.2,
                 "open": 8.2,
                 "high": 8.4,
                 "low": 8.1,
-                "preclose": 8.2,
+                "prev_close": 8.2,
                 "volume": 120000.0,
                 "amount": 9960.0,
                 "turnover_rate": 0.12,
@@ -578,16 +578,16 @@ def _spot_em_data(trade_date: str) -> pd.DataFrame:
     )
 
 
-def _hist_row(
+def _daily_bar_row(
     code: str,
-    adjust: str,
+    adjustment: str,
     close: float,
     source_endpoint: str = "stock_zh_a_hist",
-    quality_status: str = "hist_confirmed",
-    hist_date: str = "2024-01-03",
+    quality_status: str = "daily_bar_confirmed",
+    daily_bar_date: str = "2024-01-03",
 ) -> dict[str, object]:
     return {
-        "date": hist_date,
+        "date": daily_bar_date,
         "code": code,
         "source_symbol": code.split(".", 1)[-1],
         "open": 8.2,
@@ -597,10 +597,10 @@ def _hist_row(
         "volume": 120000,
         "amount": 9960.0,
         "amplitude": 3.0,
-        "pct_chg": 1.2,
-        "change_amount": 0.1,
+        "pct_change": 1.2,
+        "price_change": 0.1,
         "turnover_rate": 0.12,
-        "adjust": adjust,
+        "adjustment": adjustment,
         "source_endpoint": source_endpoint,
         "quality_status": quality_status,
         "fetched_at": datetime(2024, 1, 3, 16, 0),
@@ -630,10 +630,10 @@ def _write_settings(root) -> None:
                 "    workers: 1",
                 "    jitter_seconds: [0, 0]",
                 "datasets:",
-                "  stock_zh_a_hist:",
+                "  akshare_cn_stock_daily_bar:",
                 "    full_start: '1990-01-01'",
-                "  stock_zh_a_spot:",
-                "    update_hist_from_spot: true",
+                "  akshare_cn_stock_spot_quote:",
+                "    update_daily_bar_from_spot: true",
                 "pipeline:",
                 "  metadata_flush_size: 1",
                 "",
@@ -641,3 +641,7 @@ def _write_settings(root) -> None:
         ),
         encoding="utf-8",
     )
+
+
+
+

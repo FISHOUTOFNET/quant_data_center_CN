@@ -13,8 +13,8 @@ import pyarrow as pa
 
 from src.storage.schema import (
     PIPELINE_CHECKPOINTS_SCHEMA,
-    UPDATE_RUNS_SCHEMA,
-    UPDATE_STATUS_SCHEMA,
+    PIPELINE_RUNS_SCHEMA,
+    DATASET_UPDATE_STATUS_SCHEMA,
     field_names,
 )
 from src.utils import paths
@@ -49,19 +49,19 @@ class DuckDBMetadataStore:
         self._initialized = False
         self._conn: duckdb.DuckDBPyConnection | None = None
 
-    def append_update_runs(self, df: pd.DataFrame) -> None:
-        cleaned = _clean_dataframe_for_schema(df, UPDATE_RUNS_SCHEMA)
+    def append_pipeline_runs(self, df: pd.DataFrame) -> None:
+        cleaned = _clean_dataframe_for_schema(df, PIPELINE_RUNS_SCHEMA)
         if cleaned.empty:
             return
         with self._connection() as conn:
             self._register_and_execute(
                 conn,
                 cleaned,
-                "INSERT INTO update_runs SELECT * FROM incoming",
+                "INSERT INTO pipeline_runs SELECT * FROM incoming",
             )
 
-    def upsert_update_status(self, df: pd.DataFrame) -> None:
-        incoming = _clean_dataframe_for_schema(df, UPDATE_STATUS_SCHEMA)
+    def upsert_dataset_update_status(self, df: pd.DataFrame) -> None:
+        incoming = _clean_dataframe_for_schema(df, DATASET_UPDATE_STATUS_SCHEMA)
         if incoming.empty:
             return
         with self._connection() as conn:
@@ -69,15 +69,15 @@ class DuckDBMetadataStore:
                 conn,
                 incoming,
                 """
-                DELETE FROM update_status
+                DELETE FROM dataset_update_status
                 WHERE EXISTS (
                     SELECT 1
                     FROM incoming
-                    WHERE incoming.dataset = update_status.dataset
-                      AND incoming.code = update_status.code
+                    WHERE incoming.dataset = dataset_update_status.dataset
+                      AND incoming.code = dataset_update_status.code
                 )
                 """,
-                "INSERT INTO update_status SELECT * FROM incoming",
+                "INSERT INTO dataset_update_status SELECT * FROM incoming",
             )
 
     def upsert_pipeline_checkpoints(self, df: pd.DataFrame) -> None:
@@ -109,8 +109,8 @@ class DuckDBMetadataStore:
         status_rows: list[dict[str, object]],
         checkpoint_rows: list[dict[str, object]],
     ) -> None:
-        runs = _clean_dataframe_for_schema(pd.DataFrame(run_rows), UPDATE_RUNS_SCHEMA) if run_rows else None
-        statuses = _clean_dataframe_for_schema(pd.DataFrame(status_rows), UPDATE_STATUS_SCHEMA) if status_rows else None
+        runs = _clean_dataframe_for_schema(pd.DataFrame(run_rows), PIPELINE_RUNS_SCHEMA) if run_rows else None
+        statuses = _clean_dataframe_for_schema(pd.DataFrame(status_rows), DATASET_UPDATE_STATUS_SCHEMA) if status_rows else None
         checkpoints = (
             _clean_dataframe_for_schema(pd.DataFrame(checkpoint_rows), PIPELINE_CHECKPOINTS_SCHEMA)
             if checkpoint_rows
@@ -118,21 +118,21 @@ class DuckDBMetadataStore:
         )
         with self._connection() as conn:
             if runs is not None and not runs.empty:
-                self._register_and_execute(conn, runs, "INSERT INTO update_runs SELECT * FROM incoming")
+                self._register_and_execute(conn, runs, "INSERT INTO pipeline_runs SELECT * FROM incoming")
             if statuses is not None and not statuses.empty:
                 self._register_and_execute(
                     conn,
                     statuses,
                     """
-                    DELETE FROM update_status
+                    DELETE FROM dataset_update_status
                     WHERE EXISTS (
                         SELECT 1
                         FROM incoming
-                        WHERE incoming.dataset = update_status.dataset
-                          AND incoming.code = update_status.code
+                        WHERE incoming.dataset = dataset_update_status.dataset
+                          AND incoming.code = dataset_update_status.code
                     )
                     """,
-                    "INSERT INTO update_status SELECT * FROM incoming",
+                    "INSERT INTO dataset_update_status SELECT * FROM incoming",
                 )
             if checkpoints is not None and not checkpoints.empty:
                 self._register_and_execute(
@@ -153,18 +153,18 @@ class DuckDBMetadataStore:
                     "INSERT INTO pipeline_checkpoints SELECT * FROM incoming",
                 )
 
-    def read_update_runs(self) -> pd.DataFrame:
+    def read_pipeline_runs(self) -> pd.DataFrame:
         with self._connection() as conn:
             return _clean_dataframe_for_schema(
-                conn.execute("SELECT * FROM update_runs").df(),
-                UPDATE_RUNS_SCHEMA,
+                conn.execute("SELECT * FROM pipeline_runs").df(),
+                PIPELINE_RUNS_SCHEMA,
             )
 
-    def read_update_status(self) -> pd.DataFrame:
+    def read_dataset_update_status(self) -> pd.DataFrame:
         with self._connection() as conn:
             return _clean_dataframe_for_schema(
-                conn.execute("SELECT * FROM update_status").df(),
-                UPDATE_STATUS_SCHEMA,
+                conn.execute("SELECT * FROM dataset_update_status").df(),
+                DATASET_UPDATE_STATUS_SCHEMA,
             )
 
     def read_pipeline_checkpoints(self) -> pd.DataFrame:
@@ -206,7 +206,7 @@ class DuckDBMetadataStore:
     def _create_tables(self, conn: duckdb.DuckDBPyConnection) -> None:
         conn.execute(
             """
-            CREATE TABLE IF NOT EXISTS update_runs (
+            CREATE TABLE IF NOT EXISTS pipeline_runs (
                 task_id VARCHAR,
                 dataset VARCHAR,
                 code VARCHAR,
@@ -222,7 +222,7 @@ class DuckDBMetadataStore:
         )
         conn.execute(
             """
-            CREATE TABLE IF NOT EXISTS update_status (
+            CREATE TABLE IF NOT EXISTS dataset_update_status (
                 dataset VARCHAR,
                 code VARCHAR,
                 last_success_date DATE,
@@ -249,7 +249,7 @@ class DuckDBMetadataStore:
             )
             """
         )
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_update_status_key ON update_status(dataset, code)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_dataset_update_status_key ON dataset_update_status(dataset, code)")
         conn.execute(
             """
             CREATE INDEX IF NOT EXISTS idx_pipeline_checkpoints_key

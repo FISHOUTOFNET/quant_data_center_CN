@@ -13,8 +13,8 @@ paths:
 api:
   provider: baostock
   baostock:
-    adjustflag_map:
-      none: "3"
+    adjust_flag_map:
+      unadjusted: "3"
       qfq: "1"
       hfq: "2"
   akshare:
@@ -48,26 +48,26 @@ api:
         cooldown_minutes: 30
 
 datasets:
-  daily_k:
+  daily_bar:
     names:
-      - daily_k_none
-      - daily_k_qfq
-      - daily_k_hfq
-    fields: "date,code,open,high,low,close,preclose,volume,amount,adjustflag,turn,tradestatus,pctChg,peTTM,pbMRQ,psTTM,pcfNcfTTM,isST"
+      - baostock_cn_stock_daily_bar_unadjusted
+      - baostock_cn_stock_daily_bar_qfq
+      - baostock_cn_stock_daily_bar_hfq
+    fields: "date,code,open,high,low,close,prev_close,volume,amount,adjust_flag,turnover_rate,trade_status,pct_change,pe_ttm,pb_mrq,ps_ttm,pcf_ncf_ttm,is_st"
     frequency: d
-  stock_basic:
-    fields: "code,code_name,ipoDate,outDate,type,status"
-  calendar:
+  baostock_cn_stock_basic:
+    fields: "code,name,ipo_date,delist_date,security_type,listing_status"
+  baostock_cn_trading_calendar:
     fields: "calendar_date,is_trading_day"
-  adjust_factor:
-    fields: "code,dividOperateDate,foreAdjustFactor,backAdjustFactor,adjustFactor"
-  stock_value_em:
+  baostock_cn_stock_adjustment_factor:
+    fields: "code,dividend_operate_date,forward_adjust_factor,backward_adjust_factor,adjustment_factor"
+  akshare_cn_stock_valuation_eastmoney:
     active_only: true
-  stock_zh_a_hist:
-    default_adjusts: ["none"]
+  akshare_cn_stock_daily_bar:
+    default_adjustments: ["unadjusted"]
     full_start: "1990-01-01"
-  stock_zh_a_spot:
-    update_hist_from_spot: true
+  akshare_cn_stock_spot_quote:
+    update_daily_bar_from_spot: true
 
 pipeline:
   lookback_days: 10

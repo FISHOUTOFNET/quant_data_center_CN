@@ -12,15 +12,15 @@ from src.storage.parquet_store import ParquetStore
 def test_duckdb_views_can_be_created_and_queried(
     tmp_path,
     daily_sample,
-    adjust_factor_sample,
-    stock_value_em_sample,
+    baostock_cn_stock_adjustment_factor_sample,
+    akshare_cn_stock_valuation_eastmoney_sample,
 ) -> None:
     store = ParquetStore(root=tmp_path)
     store.ensure_layout()
-    store.write_daily_k("daily_k_qfq", "sh.600000", daily_sample())
-    store.write_adjust_factor("sh.600000", adjust_factor_sample())
-    store.write_stock_value_em("600000", stock_value_em_sample())
-    store.write_stock_zh_a_spot_em(
+    store.write_baostock_daily_bars("baostock_cn_stock_daily_bar_qfq", "sh.600000", daily_sample())
+    store.write_baostock_cn_stock_adjustment_factor("sh.600000", baostock_cn_stock_adjustment_factor_sample())
+    store.write_akshare_cn_stock_valuation_eastmoney("600000", akshare_cn_stock_valuation_eastmoney_sample())
+    store.write_stock_spot_quote_eastmoney(
         "2024-01-03",
         pd.DataFrame(
             [
@@ -29,13 +29,13 @@ def test_duckdb_views_can_be_created_and_queried(
                     "code": "600000",
                     "source_symbol": "600000",
                     "name": "PF Bank",
-                    "latest_price": 8.3,
-                    "change_amount": 0.1,
-                    "pct_chg": 1.2,
+                    "last_price": 8.3,
+                    "price_change": 0.1,
+                    "pct_change": 1.2,
                     "open": 8.2,
                     "high": 8.4,
                     "low": 8.1,
-                    "preclose": 8.2,
+                    "prev_close": 8.2,
                     "volume": 120000.0,
                     "amount": 9960.0,
                     "turnover_rate": 0.12,
@@ -52,18 +52,34 @@ def test_duckdb_views_can_be_created_and_queried(
     )
 
     duck_store = DuckDBStore(root=tmp_path)
+    duckdb_file = tmp_path / "data" / "duckdb" / "quant.duckdb"
+    duckdb_file.parent.mkdir(parents=True, exist_ok=True)
+    with duckdb.connect(str(duckdb_file)) as conn:
+        conn.execute("create view v_daily_k_none as select 1 as stale")
+
     sqls = duck_store.build_views()
 
-    assert any("v_daily_k_qfq" in sql for sql in sqls)
-    assert any("v_adjust_factor" in sql for sql in sqls)
-    assert any("v_stock_value_em" in sql for sql in sqls)
-    assert any("v_stock_zh_a_spot_em" in sql for sql in sqls)
+    assert any("v_baostock_cn_stock_daily_bar_qfq" in sql for sql in sqls)
+    assert any("v_baostock_cn_stock_adjustment_factor" in sql for sql in sqls)
+    assert any("v_akshare_cn_stock_valuation_eastmoney" in sql for sql in sqls)
+    assert any("v_akshare_cn_stock_spot_quote_eastmoney" in sql for sql in sqls)
     with duckdb.connect(str(tmp_path / "data" / "duckdb" / "quant.duckdb")) as conn:
-        result = conn.execute("select count(*) from v_daily_k_qfq where code='sh.600000'").fetchone()
-        factor_result = conn.execute("select count(*) from v_adjust_factor where code='sh.600000'").fetchone()
-        value_result = conn.execute("select count(*) from v_stock_value_em where code='600000'").fetchone()
-        spot_result = conn.execute("select count(*) from v_stock_zh_a_spot_em where code='600000'").fetchone()
+        result = conn.execute("select count(*) from v_baostock_cn_stock_daily_bar_qfq where code='sh.600000'").fetchone()
+        factor_result = conn.execute("select count(*) from v_baostock_cn_stock_adjustment_factor where code='sh.600000'").fetchone()
+        value_result = conn.execute("select count(*) from v_akshare_cn_stock_valuation_eastmoney where code='600000'").fetchone()
+        spot_result = conn.execute("select count(*) from v_akshare_cn_stock_spot_quote_eastmoney where code='600000'").fetchone()
+        old_view_count = conn.execute(
+            """
+            select count(*)
+            from information_schema.tables
+            where table_schema = current_schema()
+              and table_name = 'v_daily_k_none'
+            """
+        ).fetchone()
     assert result == (2,)
     assert factor_result == (1,)
     assert value_result == (2,)
     assert spot_result == (1,)
+    assert old_view_count == (0,)
+
+

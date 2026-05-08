@@ -7,7 +7,7 @@ from collections.abc import Mapping
 import pyarrow as pa
 
 
-DAILY_K_SCHEMA = pa.schema(
+DAILY_BAR_SCHEMA = pa.schema(
     [
         pa.field("date", pa.date32()),
         pa.field("code", pa.string()),
@@ -15,55 +15,55 @@ DAILY_K_SCHEMA = pa.schema(
         pa.field("high", pa.float64()),
         pa.field("low", pa.float64()),
         pa.field("close", pa.float64()),
-        pa.field("preclose", pa.float64()),
+        pa.field("prev_close", pa.float64()),
         pa.field("volume", pa.int64()),
         pa.field("amount", pa.float64()),
-        pa.field("adjustflag", pa.string()),
-        pa.field("turn", pa.float64()),
-        pa.field("tradestatus", pa.string()),
-        pa.field("pctChg", pa.float64()),
-        pa.field("peTTM", pa.float64()),
-        pa.field("pbMRQ", pa.float64()),
-        pa.field("psTTM", pa.float64()),
-        pa.field("pcfNcfTTM", pa.float64()),
-        pa.field("isST", pa.string()),
+        pa.field("adjust_flag", pa.string()),
+        pa.field("turnover_rate", pa.float64()),
+        pa.field("trade_status", pa.string()),
+        pa.field("pct_change", pa.float64()),
+        pa.field("pe_ttm", pa.float64()),
+        pa.field("pb_mrq", pa.float64()),
+        pa.field("ps_ttm", pa.float64()),
+        pa.field("pcf_ncf_ttm", pa.float64()),
+        pa.field("is_st", pa.string()),
     ]
 )
 
-STOCK_BASIC_SCHEMA = pa.schema(
+BAOSTOCK_CN_STOCK_BASIC_SCHEMA = pa.schema(
     [
         pa.field("code", pa.string()),
-        pa.field("code_name", pa.string()),
-        pa.field("ipoDate", pa.date32()),
-        pa.field("outDate", pa.date32()),
-        pa.field("type", pa.string()),
-        pa.field("status", pa.string()),
+        pa.field("name", pa.string()),
+        pa.field("ipo_date", pa.date32()),
+        pa.field("delist_date", pa.date32()),
+        pa.field("security_type", pa.string()),
+        pa.field("listing_status", pa.string()),
     ]
 )
 
-CALENDAR_SCHEMA = pa.schema(
+BAOSTOCK_CN_TRADING_CALENDAR_SCHEMA = pa.schema(
     [
         pa.field("calendar_date", pa.date32()),
         pa.field("is_trading_day", pa.string()),
     ]
 )
 
-ADJUST_FACTOR_SCHEMA = pa.schema(
+BAOSTOCK_CN_STOCK_ADJUSTMENT_FACTOR_SCHEMA = pa.schema(
     [
         pa.field("code", pa.string()),
-        pa.field("dividOperateDate", pa.date32()),
-        pa.field("foreAdjustFactor", pa.float64()),
-        pa.field("backAdjustFactor", pa.float64()),
-        pa.field("adjustFactor", pa.float64()),
+        pa.field("dividend_operate_date", pa.date32()),
+        pa.field("forward_adjust_factor", pa.float64()),
+        pa.field("backward_adjust_factor", pa.float64()),
+        pa.field("adjustment_factor", pa.float64()),
     ]
 )
 
-STOCK_VALUE_EM_SCHEMA = pa.schema(
+AKSHARE_VALUATION_EASTMONEY_SCHEMA = pa.schema(
     [
         pa.field("date", pa.date32()),
         pa.field("code", pa.string()),
         pa.field("close", pa.float64()),
-        pa.field("pct_chg", pa.float64()),
+        pa.field("pct_change", pa.float64()),
         pa.field("total_market_cap", pa.float64()),
         pa.field("float_market_cap", pa.float64()),
         pa.field("total_shares", pa.float64()),
@@ -92,22 +92,22 @@ STOCK_INFO_DELIST_SCHEMA = pa.schema(
     ]
 )
 
-STOCK_INFO_SH_DELIST_SCHEMA = STOCK_INFO_DELIST_SCHEMA
-STOCK_INFO_SZ_DELIST_SCHEMA = STOCK_INFO_DELIST_SCHEMA
+AKSHARE_DELIST_SH_SCHEMA = STOCK_INFO_DELIST_SCHEMA
+AKSHARE_DELIST_SZ_SCHEMA = STOCK_INFO_DELIST_SCHEMA
 
-STOCK_ZH_A_SPOT_EM_SCHEMA = pa.schema(
+AKSHARE_SPOT_QUOTE_EASTMONEY_SCHEMA = pa.schema(
     [
         pa.field("trade_date", pa.date32()),
         pa.field("code", pa.string()),
         pa.field("source_symbol", pa.string()),
         pa.field("name", pa.string()),
-        pa.field("latest_price", pa.float64()),
-        pa.field("change_amount", pa.float64()),
-        pa.field("pct_chg", pa.float64()),
+        pa.field("last_price", pa.float64()),
+        pa.field("price_change", pa.float64()),
+        pa.field("pct_change", pa.float64()),
         pa.field("open", pa.float64()),
         pa.field("high", pa.float64()),
         pa.field("low", pa.float64()),
-        pa.field("preclose", pa.float64()),
+        pa.field("prev_close", pa.float64()),
         pa.field("volume", pa.float64()),
         pa.field("amount", pa.float64()),
         pa.field("turnover_rate", pa.float64()),
@@ -121,18 +121,18 @@ STOCK_ZH_A_SPOT_EM_SCHEMA = pa.schema(
     ]
 )
 
-STOCK_ZH_A_SPOT_SINA_SCHEMA = pa.schema(
+AKSHARE_SPOT_QUOTE_SINA_SCHEMA = pa.schema(
     [
         pa.field("trade_date", pa.date32()),
         pa.field("code", pa.string()),
         pa.field("source_symbol", pa.string()),
         pa.field("name", pa.string()),
-        pa.field("latest_price", pa.float64()),
-        pa.field("change_amount", pa.float64()),
-        pa.field("pct_chg", pa.float64()),
+        pa.field("last_price", pa.float64()),
+        pa.field("price_change", pa.float64()),
+        pa.field("pct_change", pa.float64()),
         pa.field("bid", pa.float64()),
         pa.field("ask", pa.float64()),
-        pa.field("preclose", pa.float64()),
+        pa.field("prev_close", pa.float64()),
         pa.field("open", pa.float64()),
         pa.field("high", pa.float64()),
         pa.field("low", pa.float64()),
@@ -146,7 +146,7 @@ STOCK_ZH_A_SPOT_SINA_SCHEMA = pa.schema(
     ]
 )
 
-STOCK_ZH_A_HIST_SCHEMA = pa.schema(
+AKSHARE_DAILY_BAR_SCHEMA = pa.schema(
     [
         pa.field("date", pa.date32()),
         pa.field("code", pa.string()),
@@ -158,17 +158,32 @@ STOCK_ZH_A_HIST_SCHEMA = pa.schema(
         pa.field("volume", pa.int64()),
         pa.field("amount", pa.float64()),
         pa.field("amplitude", pa.float64()),
-        pa.field("pct_chg", pa.float64()),
-        pa.field("change_amount", pa.float64()),
+        pa.field("pct_change", pa.float64()),
+        pa.field("price_change", pa.float64()),
         pa.field("turnover_rate", pa.float64()),
-        pa.field("adjust", pa.string()),
+        pa.field("adjustment", pa.string()),
         pa.field("source_endpoint", pa.string()),
         pa.field("quality_status", pa.string()),
         pa.field("fetched_at", pa.timestamp("ms")),
     ]
 )
 
-UPDATE_RUNS_SCHEMA = pa.schema(
+AKSHARE_STOCK_INSTITUTION_HOLDING_SCHEMA = pa.schema(
+    [
+        pa.field("report_period", pa.string()),
+        pa.field("period_end_date", pa.date32()),
+        pa.field("code", pa.string()),
+        pa.field("name", pa.string()),
+        pa.field("institution_count", pa.int64()),
+        pa.field("institution_count_change", pa.int64()),
+        pa.field("holding_ratio", pa.float64()),
+        pa.field("holding_ratio_change", pa.float64()),
+        pa.field("float_holding_ratio", pa.float64()),
+        pa.field("float_holding_ratio_change", pa.float64()),
+    ]
+)
+
+PIPELINE_RUNS_SCHEMA = pa.schema(
     [
         pa.field("task_id", pa.string()),
         pa.field("dataset", pa.string()),
@@ -183,7 +198,7 @@ UPDATE_RUNS_SCHEMA = pa.schema(
     ]
 )
 
-UPDATE_STATUS_SCHEMA = pa.schema(
+DATASET_UPDATE_STATUS_SCHEMA = pa.schema(
     [
         pa.field("dataset", pa.string()),
         pa.field("code", pa.string()),
@@ -211,26 +226,27 @@ PIPELINE_CHECKPOINTS_SCHEMA = pa.schema(
 )
 
 METADATA_SCHEMAS: Mapping[str, pa.Schema] = {
-    "update_runs": UPDATE_RUNS_SCHEMA,
-    "update_status": UPDATE_STATUS_SCHEMA,
+    "pipeline_runs": PIPELINE_RUNS_SCHEMA,
+    "dataset_update_status": DATASET_UPDATE_STATUS_SCHEMA,
     "pipeline_checkpoints": PIPELINE_CHECKPOINTS_SCHEMA,
 }
 
 DATASET_SCHEMAS: Mapping[str, pa.Schema] = {
-    "daily_k_none": DAILY_K_SCHEMA,
-    "daily_k_qfq": DAILY_K_SCHEMA,
-    "daily_k_hfq": DAILY_K_SCHEMA,
-    "stock_basic": STOCK_BASIC_SCHEMA,
-    "calendar": CALENDAR_SCHEMA,
-    "adjust_factor": ADJUST_FACTOR_SCHEMA,
-    "stock_value_em": STOCK_VALUE_EM_SCHEMA,
-    "stock_info_sh_delist": STOCK_INFO_SH_DELIST_SCHEMA,
-    "stock_info_sz_delist": STOCK_INFO_SZ_DELIST_SCHEMA,
-    "stock_zh_a_spot_em": STOCK_ZH_A_SPOT_EM_SCHEMA,
-    "stock_zh_a_spot_sina": STOCK_ZH_A_SPOT_SINA_SCHEMA,
-    "stock_zh_a_hist_none": STOCK_ZH_A_HIST_SCHEMA,
-    "stock_zh_a_hist_qfq": STOCK_ZH_A_HIST_SCHEMA,
-    "stock_zh_a_hist_hfq": STOCK_ZH_A_HIST_SCHEMA,
+    "baostock_cn_stock_daily_bar_unadjusted": DAILY_BAR_SCHEMA,
+    "baostock_cn_stock_daily_bar_qfq": DAILY_BAR_SCHEMA,
+    "baostock_cn_stock_daily_bar_hfq": DAILY_BAR_SCHEMA,
+    "baostock_cn_stock_basic": BAOSTOCK_CN_STOCK_BASIC_SCHEMA,
+    "baostock_cn_trading_calendar": BAOSTOCK_CN_TRADING_CALENDAR_SCHEMA,
+    "baostock_cn_stock_adjustment_factor": BAOSTOCK_CN_STOCK_ADJUSTMENT_FACTOR_SCHEMA,
+    "akshare_cn_stock_valuation_eastmoney": AKSHARE_VALUATION_EASTMONEY_SCHEMA,
+    "akshare_cn_stock_delist_sh": AKSHARE_DELIST_SH_SCHEMA,
+    "akshare_cn_stock_delist_sz": AKSHARE_DELIST_SZ_SCHEMA,
+    "akshare_cn_stock_spot_quote_eastmoney": AKSHARE_SPOT_QUOTE_EASTMONEY_SCHEMA,
+    "akshare_cn_stock_spot_quote_sina": AKSHARE_SPOT_QUOTE_SINA_SCHEMA,
+    "akshare_cn_stock_daily_bar_unadjusted": AKSHARE_DAILY_BAR_SCHEMA,
+    "akshare_cn_stock_daily_bar_qfq": AKSHARE_DAILY_BAR_SCHEMA,
+    "akshare_cn_stock_daily_bar_hfq": AKSHARE_DAILY_BAR_SCHEMA,
+    "akshare_cn_stock_institution_holding": AKSHARE_STOCK_INSTITUTION_HOLDING_SCHEMA,
     **METADATA_SCHEMAS,
 }
 

@@ -11,7 +11,7 @@ def test_repair_normalizes_non_trading_range_to_trading_bounds(
     daily_sample,
 ) -> None:
     _write_settings(tmp_path)
-    state: dict[str, list[dict[str, str]]] = {"history_params": [], "adjust_factor_params": []}
+    state: dict[str, list[dict[str, str]]] = {"history_params": [], "baostock_cn_stock_adjustment_factor_params": []}
 
     class FakeProvider:
         name = "fake"
@@ -41,33 +41,33 @@ def test_repair_normalizes_non_trading_range_to_trading_bounds(
                 ]
             )
 
-        def query_stock_basic(
+        def query_baostock_cn_stock_basic(
             self,
             code: str | None = None,
             code_name: str | None = None,
         ) -> pd.DataFrame:
             return pd.DataFrame()
 
-        def query_daily_k(
+        def query_daily_bars(
             self,
             request,
         ) -> pd.DataFrame:
-            adjustflag = {"daily_k_none": "3", "daily_k_qfq": "1", "daily_k_hfq": "2"}[request.dataset]
+            adjust_flag = {"baostock_cn_stock_daily_bar_unadjusted": "3", "baostock_cn_stock_daily_bar_qfq": "1", "baostock_cn_stock_daily_bar_hfq": "2"}[request.dataset]
             state["history_params"].append(
                 {
                     "code": request.code,
                     "start_date": request.start_date,
                     "end_date": request.end_date,
-                    "adjustflag": adjustflag,
+                    "adjust_flag": adjust_flag,
                 }
             )
             return daily_sample().assign(
                 code=request.code,
-                adjustflag=adjustflag,
+                adjust_flag=adjust_flag,
             )
 
-        def query_adjust_factor(self, code: str, start_date: str, end_date: str) -> pd.DataFrame:
-            state["adjust_factor_params"].append(
+        def query_baostock_cn_stock_adjustment_factor(self, code: str, start_date: str, end_date: str) -> pd.DataFrame:
+            state["baostock_cn_stock_adjustment_factor_params"].append(
                 {
                     "code": code,
                     "start_date": start_date,
@@ -78,10 +78,10 @@ def test_repair_normalizes_non_trading_range_to_trading_bounds(
                 [
                     {
                         "code": code,
-                        "dividOperateDate": "2024-01-08",
-                        "foreAdjustFactor": 1.0,
-                        "backAdjustFactor": 1.0,
-                        "adjustFactor": 1.0,
+                        "dividend_operate_date": "2024-01-08",
+                        "forward_adjust_factor": 1.0,
+                        "backward_adjust_factor": 1.0,
+                        "adjustment_factor": 1.0,
                     }
                 ]
             )
@@ -95,7 +95,7 @@ def test_repair_normalizes_non_trading_range_to_trading_bounds(
         code="sh.600000",
         start="2024-01-06",
         end="2024-01-14",
-        dataset="daily_k_qfq",
+        dataset="baostock_cn_stock_daily_bar_qfq",
         root=tmp_path,
         build_views=False,
     )
@@ -105,10 +105,10 @@ def test_repair_normalizes_non_trading_range_to_trading_bounds(
             "code": "sh.600000",
             "start_date": "2024-01-08",
             "end_date": "2024-01-12",
-            "adjustflag": "3",
+            "adjust_flag": "3",
         }
     ]
-    assert state["adjust_factor_params"] == [
+    assert state["baostock_cn_stock_adjustment_factor_params"] == [
         {
             "code": "sh.600000",
             "start_date": "1990-01-01",
@@ -125,13 +125,13 @@ def _write_settings(root) -> None:
             [
                 "api:",
                 "  baostock:",
-                "    adjustflag_map:",
-                '      none: "3"',
+                "    adjust_flag_map:",
+                '      unadjusted: "3"',
                 '      qfq: "1"',
                 '      hfq: "2"',
                 "datasets:",
-                "  daily_k:",
-                '    fields: "date,code,open,high,low,close,preclose,volume,amount,adjustflag,turn,tradestatus,pctChg,peTTM,pbMRQ,psTTM,pcfNcfTTM,isST"',
+                "  daily_bar:",
+                '    fields: "date,code,open,high,low,close,prev_close,volume,amount,adjust_flag,turn,trade_status,pct_change,pe_ttm,pb_mrq,ps_ttm,pcf_ncf_ttm,is_st"',
                 "    frequency: d",
                 "pipeline:",
                 "  max_retries: 1",
@@ -140,3 +140,4 @@ def _write_settings(root) -> None:
         ),
         encoding="utf-8",
     )
+

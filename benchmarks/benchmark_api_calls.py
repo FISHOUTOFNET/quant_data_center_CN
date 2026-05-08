@@ -6,7 +6,7 @@ import statistics
 import time
 from pathlib import Path
 
-from src.api.market_data import DailyKRequest, create_provider
+from src.api.market_data import DailyBarRequest, create_provider
 from src.utils.config_mgr import ConfigManager
 from src.utils.logging import logger
 from src.utils.performance import PerformanceCollector, get_collector
@@ -17,7 +17,7 @@ from benchmark_utils import (
 )
 
 
-def benchmark_api_adjust_factor(
+def benchmark_api_baostock_cn_stock_adjustment_factor(
     codes: list[str],
     start_date: str = "1990-01-01",
     end_date: str = "2024-12-31",
@@ -35,11 +35,11 @@ def benchmark_api_adjust_factor(
         for code in test_codes:
             try:
                 start = time.perf_counter()
-                provider.query_adjust_factor(code, start_date, end_date)
+                provider.query_baostock_cn_stock_adjustment_factor(code, start_date, end_date)
                 elapsed = time.perf_counter() - start
                 times.append(elapsed)
                 collector.add(
-                    type("TimingResult", (), {"name": "adjust_factor_api", "elapsed": elapsed, "metadata": {}})()
+                    type("TimingResult", (), {"name": "baostock_cn_stock_adjustment_factor_api", "elapsed": elapsed, "metadata": {}})()
                 )
             except Exception as e:
                 logger.error("API call failed for {}: {}", code, e)
@@ -61,7 +61,7 @@ def benchmark_api_adjust_factor(
     }
 
 
-def benchmark_api_daily_k(
+def benchmark_api_daily_bar(
     codes: list[str],
     start_date: str = "2024-01-01",
     end_date: str = "2024-01-31",
@@ -79,23 +79,23 @@ def benchmark_api_daily_k(
     with create_provider(config) as provider:
         for code in test_codes:
             try:
-                request = DailyKRequest(
-                    dataset="daily_k_none",
+                request = DailyBarRequest(
+                    dataset="baostock_cn_stock_daily_bar_unadjusted",
                     code=code,
                     start_date=start_date,
                     end_date=end_date,
-                    fields=config.daily_k_fields(),
+                    fields=config.daily_bar_fields(),
                     frequency="d",
                 )
 
                 start = time.perf_counter()
-                df = provider.query_daily_k(request)
+                df = provider.query_daily_bars(request)
                 elapsed = time.perf_counter() - start
 
                 times.append(elapsed)
                 total_rows += len(df)
                 collector.add(
-                    type("TimingResult", (), {"name": "daily_k_api", "elapsed": elapsed, "metadata": {}})()
+                    type("TimingResult", (), {"name": "daily_bar_api", "elapsed": elapsed, "metadata": {}})()
                 )
             except Exception as e:
                 logger.error("API call failed for {}: {}", code, e)
@@ -119,7 +119,7 @@ def benchmark_api_daily_k(
     }
 
 
-def benchmark_api_stock_basic() -> dict[str, float]:
+def benchmark_api_baostock_cn_stock_basic() -> dict[str, float]:
     config = ConfigManager()
 
     times = []
@@ -130,7 +130,7 @@ def benchmark_api_stock_basic() -> dict[str, float]:
         for i in range(5):
             try:
                 start = time.perf_counter()
-                df = provider.query_stock_basic()
+                df = provider.query_baostock_cn_stock_basic()
                 elapsed = time.perf_counter() - start
 
                 times.append(elapsed)
@@ -202,19 +202,19 @@ def run_api_benchmarks(output_dir: Path) -> None:
     logger.info("API PERFORMANCE BENCHMARKS")
     logger.info("=" * 80)
 
-    logger.info("\n1. Benchmarking adjust_factor API (20 samples)...")
-    result = benchmark_api_adjust_factor(codes, sample_size=20)
-    reporter.add_result("api_adjust_factor", result)
+    logger.info("\n1. Benchmarking baostock_cn_stock_adjustment_factor API (20 samples)...")
+    result = benchmark_api_baostock_cn_stock_adjustment_factor(codes, sample_size=20)
+    reporter.add_result("api_baostock_cn_stock_adjustment_factor", result)
     logger.info("   Mean: {:.3f}s, Median: {:.3f}s, Throughput: {:.2f} calls/s", result.get("mean", 0), result.get("median", 0), result.get("throughput", 0))
 
-    logger.info("\n2. Benchmarking daily_k API (20 samples)...")
-    result = benchmark_api_daily_k(codes, sample_size=20)
-    reporter.add_result("api_daily_k", result)
+    logger.info("\n2. Benchmarking daily_bar API (20 samples)...")
+    result = benchmark_api_daily_bar(codes, sample_size=20)
+    reporter.add_result("api_daily_bar", result)
     logger.info("   Mean: {:.3f}s, Median: {:.3f}s, Rows/sec: {:.0f}", result.get("mean", 0), result.get("median", 0), result.get("rows_per_second", 0))
 
-    logger.info("\n3. Benchmarking stock_basic API (5 samples)...")
-    result = benchmark_api_stock_basic()
-    reporter.add_result("api_stock_basic", result)
+    logger.info("\n3. Benchmarking baostock_cn_stock_basic API (5 samples)...")
+    result = benchmark_api_baostock_cn_stock_basic()
+    reporter.add_result("api_baostock_cn_stock_basic", result)
     logger.info("   Mean: {:.3f}s, Rows: {}", result.get("mean", 0), result.get("total_rows", 0))
 
     logger.info("\n4. Benchmarking trade_dates API (5 samples)...")

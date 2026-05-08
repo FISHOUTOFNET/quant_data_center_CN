@@ -12,18 +12,18 @@ def daily_sample():
 
 
 @pytest.fixture
-def stock_basic_sample():
-    return _stock_basic_sample
+def baostock_cn_stock_basic_sample():
+    return _baostock_cn_stock_basic_sample
 
 
 @pytest.fixture
-def adjust_factor_sample():
-    return _adjust_factor_sample
+def baostock_cn_stock_adjustment_factor_sample():
+    return _baostock_cn_stock_adjustment_factor_sample
 
 
 @pytest.fixture
-def stock_value_em_sample():
-    return _stock_value_em_sample
+def akshare_cn_stock_valuation_eastmoney_sample():
+    return _akshare_cn_stock_valuation_eastmoney_sample
 
 
 def _daily_sample() -> pd.DataFrame:
@@ -36,18 +36,18 @@ def _daily_sample() -> pd.DataFrame:
                 "high": 8.3,
                 "low": 8.0,
                 "close": 8.2,
-                "preclose": 8.0,
+                "prev_close": 8.0,
                 "volume": 1000,
                 "amount": 8200.0,
-                "adjustflag": "2",
-                "turn": 0.1,
-                "tradestatus": "1",
-                "pctChg": 2.5,
-                "peTTM": 5.0,
-                "pbMRQ": 0.7,
-                "psTTM": 1.2,
-                "pcfNcfTTM": 3.0,
-                "isST": "0",
+                "adjust_flag": "2",
+                "turnover_rate": 0.1,
+                "trade_status": "1",
+                "pct_change": 2.5,
+                "pe_ttm": 5.0,
+                "pb_mrq": 0.7,
+                "ps_ttm": 1.2,
+                "pcf_ncf_ttm": 3.0,
+                "is_st": "0",
             },
             {
                 "date": date(2024, 1, 3),
@@ -56,76 +56,76 @@ def _daily_sample() -> pd.DataFrame:
                 "high": 8.4,
                 "low": 8.1,
                 "close": 8.3,
-                "preclose": 8.2,
+                "prev_close": 8.2,
                 "volume": 1200,
                 "amount": 9960.0,
-                "adjustflag": "2",
-                "turn": 0.12,
-                "tradestatus": "1",
-                "pctChg": 1.2,
-                "peTTM": 5.1,
-                "pbMRQ": 0.71,
-                "psTTM": 1.21,
-                "pcfNcfTTM": 3.1,
-                "isST": "0",
+                "adjust_flag": "2",
+                "turnover_rate": 0.12,
+                "trade_status": "1",
+                "pct_change": 1.2,
+                "pe_ttm": 5.1,
+                "pb_mrq": 0.71,
+                "ps_ttm": 1.21,
+                "pcf_ncf_ttm": 3.1,
+                "is_st": "0",
             },
         ]
     )
 
 
-def _stock_basic_sample() -> pd.DataFrame:
+def _baostock_cn_stock_basic_sample() -> pd.DataFrame:
     return pd.DataFrame(
         [
             {
                 "code": "sh.600000",
-                "code_name": "PF Bank",
-                "ipoDate": date(1999, 11, 10),
-                "outDate": None,
-                "type": "1",
-                "status": "1",
+                "name": "PF Bank",
+                "ipo_date": date(1999, 11, 10),
+                "delist_date": None,
+                "security_type": "1",
+                "listing_status": "1",
             },
             {
                 "code": "sz.000001",
-                "code_name": "PA Bank",
-                "ipoDate": date(1991, 4, 3),
-                "outDate": None,
-                "type": "1",
-                "status": "0",
+                "name": "PA Bank",
+                "ipo_date": date(1991, 4, 3),
+                "delist_date": None,
+                "security_type": "1",
+                "listing_status": "0",
             },
             {
                 "code": "sh.000001",
-                "code_name": "SSE Composite",
-                "ipoDate": date(1991, 7, 15),
-                "outDate": None,
-                "type": "2",
-                "status": "1",
+                "name": "SSE Composite",
+                "ipo_date": date(1991, 7, 15),
+                "delist_date": None,
+                "security_type": "2",
+                "listing_status": "1",
             },
         ]
     )
 
 
-def _adjust_factor_sample() -> pd.DataFrame:
+def _baostock_cn_stock_adjustment_factor_sample() -> pd.DataFrame:
     return pd.DataFrame(
         [
             {
                 "code": "sh.600000",
-                "dividOperateDate": date(2024, 1, 2),
-                "foreAdjustFactor": 1.0,
-                "backAdjustFactor": 1.0,
-                "adjustFactor": 1.0,
+                "dividend_operate_date": date(2024, 1, 2),
+                "forward_adjust_factor": 1.0,
+                "backward_adjust_factor": 1.0,
+                "adjustment_factor": 1.0,
             }
         ]
     )
 
 
-def _stock_value_em_sample(code: str = "600000") -> pd.DataFrame:
+def _akshare_cn_stock_valuation_eastmoney_sample(code: str = "600000") -> pd.DataFrame:
     return pd.DataFrame(
         [
             {
                 "date": date(2024, 1, 2),
                 "code": code,
                 "close": 8.2,
-                "pct_chg": 2.5,
+                "pct_change": 2.5,
                 "total_market_cap": 100000000.0,
                 "float_market_cap": 80000000.0,
                 "total_shares": 12000000.0,
@@ -141,7 +141,7 @@ def _stock_value_em_sample(code: str = "600000") -> pd.DataFrame:
                 "date": date(2024, 1, 3),
                 "code": code,
                 "close": 8.3,
-                "pct_chg": 1.2,
+                "pct_change": 1.2,
                 "total_market_cap": 101000000.0,
                 "float_market_cap": 81000000.0,
                 "total_shares": 12000000.0,
@@ -155,3 +155,4 @@ def _stock_value_em_sample(code: str = "600000") -> pd.DataFrame:
             },
         ]
     )
+

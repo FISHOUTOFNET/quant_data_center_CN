@@ -53,7 +53,7 @@ python tests/run_all_benchmarks.py --skip-long-tests
 
 Tests API call performance:
 - Adjust factor API latency
-- Daily K API latency
+- Daily bar API latency
 - Stock basic API latency
 - Trade dates API latency
 

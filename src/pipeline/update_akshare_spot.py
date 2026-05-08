@@ -23,11 +23,16 @@ from src.pipeline.akshare_common import (
     success_metadata,
     write_raw_response,
 )
-from src.pipeline.common import default_candidate_date, is_trading_day, should_skip_checkpoint
+from src.pipeline.common import (
+    default_candidate_date,
+    is_trading_day,
+    latest_trading_day_on_or_before,
+    should_skip_checkpoint,
+)
 from src.storage.dataset_catalog import (
-    STOCK_ZH_A_SPOT_EM_DATASET,
-    STOCK_ZH_A_SPOT_SINA_DATASET,
-    stock_zh_a_hist_dataset_name,
+    AKSHARE_SPOT_QUOTE_EASTMONEY_DATASET,
+    AKSHARE_SPOT_QUOTE_SINA_DATASET,
+    akshare_daily_bar_dataset_id,
 )
 from src.storage.duckdb_store import DuckDBStore
 from src.storage.parquet_store import ParquetStore
@@ -46,15 +51,15 @@ def update_akshare_spot(
     client_factory: Callable[[ConfigManager], Any] | None = None,
     now: Callable[[], datetime] | None = None,
 ) -> list[dict[str, object]]:
-    """Fetch stock_zh_a_spot_em and map successful close snapshots into hist_none."""
+    """Fetch akshare_cn_stock_spot_quote_eastmoney and map successful close snapshots into daily_bar_unadjusted."""
 
     config = ConfigManager(root)
     store = ParquetStore(root=config.root)
-    _ensure_spot_close_window(config, now, store)
+    _ensure_spot_quote_close_window(config, now, store)
     store.ensure_layout()
     trade_date = _resolve_trade_date(config, end)
-    dataset = STOCK_ZH_A_SPOT_EM_DATASET.name
-    output_path = store.stock_zh_a_spot_em_path(trade_date)
+    dataset = AKSHARE_SPOT_QUOTE_EASTMONEY_DATASET.name
+    output_path = store.akshare_cn_stock_spot_quote_eastmoney_path(trade_date)
     progress_processed = 0
     progress_success = 0
     progress_failed = 0
@@ -121,7 +126,7 @@ def update_akshare_spot(
 
     started_at = datetime.now()
     try:
-        response = ak_client.fetch_stock_zh_a_spot_em(trade_date=trade_date)
+        response = ak_client.fetch_spot_quote_eastmoney(trade_date=trade_date)
     except Exception as exc:
         ended_at = datetime.now()
         stack = error_stack(exc)
@@ -152,23 +157,23 @@ def update_akshare_spot(
             )
         )
         log_spot_progress(1, 2, metadata[-1][0])
-        update_hist_from_spot = bool(config.get("datasets.stock_zh_a_spot.update_hist_from_spot", True))
+        update_daily_bar_from_spot = bool(config.get("datasets.akshare_cn_stock_spot_quote.update_daily_bar_from_spot", True))
         logger.info("AkShare spot fallback started trade_date={} reason={}", trade_date, str(exc))
         fallback_metadata_start = len(metadata)
-        _run_sina_fallback(store, ak_client, trade_date, str(exc), metadata, update_hist_from_spot)
+        _run_sina_fallback(store, ak_client, trade_date, str(exc), metadata, update_daily_bar_from_spot)
         if len(metadata) > fallback_metadata_start:
             log_spot_progress(2, 2, metadata[fallback_metadata_start][0])
     else:
         raw_path: Path | None = None
         try:
             raw_path = write_raw_response(store.root, response, started_at)
-            output_path = store.write_stock_zh_a_spot_em(trade_date, response.data)
-            hist_rows = _drop_delisted_hist_rows(store, spot_em_to_hist_none(response.data))
-            update_hist_from_spot = bool(config.get("datasets.stock_zh_a_spot.update_hist_from_spot", True))
-            hist_output_path = (
-                _write_spot_hist_rows(store, hist_rows)
-                if update_hist_from_spot
-                else store.parquet_dir / stock_zh_a_hist_dataset_name("none")
+            output_path = store.write_stock_spot_quote_eastmoney(trade_date, response.data)
+            daily_bar_rows = _drop_delisted_daily_bar_rows(store, spot_em_to_daily_bar_unadjusted(response.data))
+            update_daily_bar_from_spot = bool(config.get("datasets.akshare_cn_stock_spot_quote.update_daily_bar_from_spot", True))
+            daily_bar_output_path = (
+                _write_spot_daily_bar_rows(store, daily_bar_rows)
+                if update_daily_bar_from_spot
+                else store.parquet_dir / akshare_daily_bar_dataset_id("unadjusted")
             )
             ended_at = datetime.now()
             append_response_manifest(
@@ -198,19 +203,19 @@ def update_akshare_spot(
                 )
             )
             log_spot_progress(1, 1, metadata[-1][0])
-            if update_hist_from_spot:
-                hist_dataset = stock_zh_a_hist_dataset_name("none")
+            if update_daily_bar_from_spot:
+                daily_bar_dataset = akshare_daily_bar_dataset_id("unadjusted")
                 metadata.append(
                     success_metadata(
                         PIPELINE_UPDATE_AKSHARE_SPOT,
-                        hist_dataset,
+                        daily_bar_dataset,
                         "*",
                         trade_date,
                         trade_date,
                         started_at,
                         ended_at,
-                        len(hist_rows),
-                        hist_output_path,
+                        len(daily_bar_rows),
+                        daily_bar_output_path,
                     )
                 )
         except Exception as exc:
@@ -247,7 +252,7 @@ def update_akshare_spot(
     records = persist_metadata(store, metadata)
     store.close()
     if build_views:
-        DuckDBStore(root=config.root).build_views()
+        DuckDBStore(root=config.root).build_views(cleanup_tmp_files=progress_success > 0)
     logger.info(
         "AkShare spot update completed processed={} success={} failed={} skipped={}",
         progress_processed,
@@ -258,11 +263,11 @@ def update_akshare_spot(
     return records
 
 
-def spot_em_to_hist_none(df: pd.DataFrame) -> pd.DataFrame:
-    schema = schema_for_dataset(stock_zh_a_hist_dataset_name("none"))
+def spot_em_to_daily_bar_unadjusted(df: pd.DataFrame) -> pd.DataFrame:
+    schema = schema_for_dataset(akshare_daily_bar_dataset_id("unadjusted"))
     if df.empty:
         return pd.DataFrame(columns=field_names(schema))
-    hist = pd.DataFrame(
+    daily_bar = pd.DataFrame(
         {
             "date": df["trade_date"],
             "code": df["code"],
@@ -270,27 +275,27 @@ def spot_em_to_hist_none(df: pd.DataFrame) -> pd.DataFrame:
             "open": df["open"],
             "high": df["high"],
             "low": df["low"],
-            "close": df["latest_price"],
+            "close": df["last_price"],
             "volume": pd.to_numeric(df["volume"], errors="coerce").round().astype("Int64"),
             "amount": df["amount"],
             "amplitude": df["amplitude"],
-            "pct_chg": df["pct_chg"],
-            "change_amount": df["change_amount"],
+            "pct_change": df["pct_change"],
+            "price_change": df["price_change"],
             "turnover_rate": df["turnover_rate"],
-            "adjust": "none",
+            "adjustment": "unadjusted",
             "source_endpoint": "stock_zh_a_spot_em",
-            "quality_status": "spot_close",
+            "quality_status": "spot_quote_close",
             "fetched_at": df["fetched_at"],
         }
     )
-    return hist[field_names(schema)].reset_index(drop=True)
+    return daily_bar[field_names(schema)].reset_index(drop=True)
 
 
-def spot_sina_to_hist_none(df: pd.DataFrame) -> pd.DataFrame:
-    schema = schema_for_dataset(stock_zh_a_hist_dataset_name("none"))
+def spot_sina_to_daily_bar_unadjusted(df: pd.DataFrame) -> pd.DataFrame:
+    schema = schema_for_dataset(akshare_daily_bar_dataset_id("unadjusted"))
     if df.empty:
         return pd.DataFrame(columns=field_names(schema))
-    hist = pd.DataFrame(
+    daily_bar = pd.DataFrame(
         {
             "date": df["trade_date"],
             "code": df["code"],
@@ -298,32 +303,38 @@ def spot_sina_to_hist_none(df: pd.DataFrame) -> pd.DataFrame:
             "open": df["open"],
             "high": df["high"],
             "low": df["low"],
-            "close": df["latest_price"],
+            "close": df["last_price"],
             "volume": pd.to_numeric(df["volume"], errors="coerce").round().astype("Int64"),
             "amount": df["amount"],
             "amplitude": pd.NA,
-            "pct_chg": df["pct_chg"],
-            "change_amount": df["change_amount"],
+            "pct_change": df["pct_change"],
+            "price_change": df["price_change"],
             "turnover_rate": pd.NA,
-            "adjust": "none",
+            "adjustment": "unadjusted",
             "source_endpoint": "stock_zh_a_spot",
-            "quality_status": "spot_close",
+            "quality_status": "spot_quote_close",
             "fetched_at": df["fetched_at"],
         }
     )
-    return hist[field_names(schema)].reset_index(drop=True)
+    return daily_bar[field_names(schema)].reset_index(drop=True)
 
 
-def _write_spot_hist_rows(store: ParquetStore, hist_rows: pd.DataFrame) -> Path:
-    dataset = stock_zh_a_hist_dataset_name("none")
+def _write_spot_daily_bar_rows(store: ParquetStore, daily_bar_rows: pd.DataFrame) -> Path:
+    dataset = akshare_daily_bar_dataset_id("unadjusted")
     dataset_dir = store.parquet_dir / dataset
-    if hist_rows.empty:
+    if daily_bar_rows.empty:
         dataset_dir.mkdir(parents=True, exist_ok=True)
         return dataset_dir
-    for code, group in hist_rows.groupby("code", dropna=False, sort=False):
-        if pd.isna(code) or str(code).strip() == "":
-            continue
-        store.upsert_stock_zh_a_hist("none", str(code), group.reset_index(drop=True))
+    
+    stats = store.append_akshare_daily_bar_batch("unadjusted", daily_bar_rows, skip_existing=True)
+    
+    if stats['skipped'] > 0:
+        logger.info(
+            "Spot daily-bar batch append completed updated={} skipped={}",
+            stats['updated'],
+            stats['skipped'],
+        )
+    
     return dataset_dir
 
 
@@ -333,23 +344,23 @@ def _run_sina_fallback(
     trade_date: str,
     fallback_reason: str,
     metadata: list[tuple[dict[str, object], dict[str, object], dict[str, object]]],
-    update_hist_from_spot: bool,
+    update_daily_bar_from_spot: bool,
 ) -> None:
-    dataset = STOCK_ZH_A_SPOT_SINA_DATASET.name
-    output_path = store.stock_zh_a_spot_sina_path(trade_date)
+    dataset = AKSHARE_SPOT_QUOTE_SINA_DATASET.name
+    output_path = store.akshare_cn_stock_spot_quote_sina_path(trade_date)
     started_at = datetime.now()
     try:
-        response = client.fetch_stock_zh_a_spot_sina(
+        response = client.fetch_spot_quote_sina(
             trade_date=trade_date,
             fallback_reason=fallback_reason,
         )
         raw_path = write_raw_response(store.root, response, started_at)
-        output_path = store.write_stock_zh_a_spot_sina(trade_date, response.data)
-        hist_rows = spot_sina_to_hist_none(response.data)
-        hist_output_path = (
-            _write_spot_hist_rows(store, hist_rows)
-            if update_hist_from_spot
-            else store.parquet_dir / stock_zh_a_hist_dataset_name("none")
+        output_path = store.write_stock_spot_quote_sina(trade_date, response.data)
+        daily_bar_rows = spot_sina_to_daily_bar_unadjusted(response.data)
+        daily_bar_output_path = (
+            _write_spot_daily_bar_rows(store, daily_bar_rows)
+            if update_daily_bar_from_spot
+            else store.parquet_dir / akshare_daily_bar_dataset_id("unadjusted")
         )
         ended_at = datetime.now()
         append_response_manifest(
@@ -378,19 +389,19 @@ def _run_sina_fallback(
                 output_path,
             )
         )
-        if update_hist_from_spot:
-            hist_dataset = stock_zh_a_hist_dataset_name("none")
+        if update_daily_bar_from_spot:
+            daily_bar_dataset = akshare_daily_bar_dataset_id("unadjusted")
             metadata.append(
                 success_metadata(
                     PIPELINE_UPDATE_AKSHARE_SPOT,
-                    hist_dataset,
+                    daily_bar_dataset,
                     "*",
                     trade_date,
                     trade_date,
                     started_at,
                     ended_at,
-                    len(hist_rows),
-                    hist_output_path,
+                    len(daily_bar_rows),
+                    daily_bar_output_path,
                 )
             )
     except Exception as exc:
@@ -425,12 +436,33 @@ def _run_sina_fallback(
 
 
 def _resolve_trade_date(config: ConfigManager, end: str | date | None) -> str:
-    if end is not None:
-        return _date_iso(end, default_candidate_date(config))
-    return default_candidate_date(config)
+    candidate = _date_iso(end, default_candidate_date(config)) if end is not None else default_candidate_date(config)
+    store = ParquetStore(root=config.root)
+    try:
+        baostock_cn_trading_calendar_df = store.read_baostock_cn_trading_calendar()
+    except Exception:
+        raise RuntimeError(
+            "Cannot resolve trade date without baostock_cn_trading_calendar data. "
+            "Please run baostock_cn_trading_calendar update first."
+        )
+    if is_trading_day(baostock_cn_trading_calendar_df, candidate):
+        return candidate
+    try:
+        resolved = latest_trading_day_on_or_before(baostock_cn_trading_calendar_df, candidate)
+        logger.info(
+            "Spot trade_date resolved from {} to {} (non-trading day)",
+            candidate,
+            resolved,
+        )
+        return resolved
+    except ValueError:
+        raise RuntimeError(
+            f"No trading day found on or before {candidate}. "
+            "Please check baostock_cn_trading_calendar data."
+        )
 
 
-def _ensure_spot_close_window(
+def _ensure_spot_quote_close_window(
     config: ConfigManager,
     now: Callable[[], datetime] | None = None,
     store: ParquetStore | None = None,
@@ -452,31 +484,31 @@ def _ensure_spot_close_window(
         store = ParquetStore(root=config.root)
 
     try:
-        calendar_df = store.read_calendar()
+        baostock_cn_trading_calendar_df = store.read_baostock_cn_trading_calendar()
     except Exception:
         raise RuntimeError(
             "stock_zh_a_spot_em/stock_zh_a_spot cannot verify trading day "
-            "without calendar data. Please run calendar update first."
+            "without baostock_cn_trading_calendar data. Please run baostock_cn_trading_calendar update first."
         )
 
-    if not is_trading_day(calendar_df, current_date):
+    if not is_trading_day(baostock_cn_trading_calendar_df, current_date):
         return
 
     raise RuntimeError(
-        "stock_zh_a_spot_em/stock_zh_a_spot can only write hist after 18:00 "
+        "stock_zh_a_spot_em/stock_zh_a_spot can only write daily bars after 18:00 "
         "and before 08:00 Asia/Shanghai on trading days"
     )
 
 
-def _drop_delisted_hist_rows(store: ParquetStore, hist_rows: pd.DataFrame) -> pd.DataFrame:
-    delist_df = store.read_latest_stock_info_sh_delist()
-    if hist_rows.empty or delist_df.empty or "code" not in delist_df.columns:
-        return hist_rows
+def _drop_delisted_daily_bar_rows(store: ParquetStore, daily_bar_rows: pd.DataFrame) -> pd.DataFrame:
+    delist_df = store.read_latest_akshare_cn_stock_delist_sh()
+    if daily_bar_rows.empty or delist_df.empty or "code" not in delist_df.columns:
+        return daily_bar_rows
     delisted = set(normalize_akshare_code_list(delist_df["code"].dropna().astype(str).tolist()))
     if not delisted:
-        return hist_rows
-    codes = hist_rows["code"].astype("string").map(lambda value: str(value).strip())
-    return hist_rows.loc[~codes.isin(delisted)].reset_index(drop=True)
+        return daily_bar_rows
+    codes = daily_bar_rows["code"].astype("string").map(lambda value: str(value).strip())
+    return daily_bar_rows.loc[~codes.isin(delisted)].reset_index(drop=True)
 
 
 def _date_iso(value: str | date | None, default: str) -> str:
@@ -487,3 +519,5 @@ def _date_iso(value: str | date | None, default: str) -> str:
     if isinstance(value, date):
         return value.isoformat()
     return pd.to_datetime(value, errors="raise").date().isoformat()
+
+

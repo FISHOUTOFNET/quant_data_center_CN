@@ -9,19 +9,19 @@ from zoneinfo import ZoneInfo
 import pandas as pd
 
 from src.storage.parquet_store import ParquetStore
-from src.storage.schema import DAILY_K_SCHEMA
+from src.storage.schema import DAILY_BAR_SCHEMA
 from src.storage.dataset_catalog import (
-    STOCK_VALUE_EM_DATASET,
-    daily_k_dataset_names,
-    expand_daily_k_selection,
-    is_daily_k_dataset,
+    AKSHARE_VALUATION_EASTMONEY_DATASET,
+    daily_bar_dataset_names,
+    expand_daily_bar_selection,
+    is_daily_bar_dataset,
 )
-from src.pipeline.adjustments import ADJUST_FACTOR_DATASET
+from src.pipeline.adjustments import BAOSTOCK_CN_STOCK_ADJUSTMENT_FACTOR_DATASET
 from src.utils.config_mgr import ConfigManager
 from src.utils.logging import logger
 
 
-DAILY_K_DATASETS = daily_k_dataset_names()
+DAILY_BAR_DATASETS = daily_bar_dataset_names()
 FULL_HISTORY_START_DATE = "1990-01-01"
 PIPELINE_UPDATE_DAILY = "update_daily"
 MARKET_DATE_CUTOFF = time(18, 0)
@@ -91,7 +91,7 @@ def today_iso() -> str:
 
 
 def default_candidate_date(config: ConfigManager, now: datetime | None = None) -> str:
-    """Return the natural date to resolve through the trading calendar.
+    """Return the natural date to resolve through the trading baostock_cn_trading_calendar.
 
     Data may still change before 18:00 local exchange time, so unattended runs
     before that cutoff target the previous natural date first.
@@ -130,13 +130,13 @@ def subtract_days(value: str, days: int) -> str:
     return (parsed - timedelta(days=days)).isoformat()
 
 
-def calendar_fetch_start(candidate_date: str, lookback_days: int = 0) -> str:
-    calendar_days = max(int(lookback_days) * 3 + 14, 90)
-    return subtract_days(candidate_date, calendar_days)
+def baostock_cn_trading_calendar_fetch_start(candidate_date: str, lookback_days: int = 0) -> str:
+    baostock_cn_trading_calendar_days = max(int(lookback_days) * 3 + 14, 90)
+    return subtract_days(candidate_date, baostock_cn_trading_calendar_days)
 
 
-def is_trading_day(calendar_df: pd.DataFrame, value: str | date) -> bool:
-    work = _calendar_with_keys(calendar_df)
+def is_trading_day(baostock_cn_trading_calendar_df: pd.DataFrame, value: str | date) -> bool:
+    work = _baostock_cn_trading_calendar_with_keys(baostock_cn_trading_calendar_df)
     if work.empty:
         return False
     target = pd.Timestamp(date_iso(value))
@@ -144,8 +144,8 @@ def is_trading_day(calendar_df: pd.DataFrame, value: str | date) -> bool:
     return not matches.empty and bool(matches.iloc[-1])
 
 
-def calendar_covers_range(calendar_df: pd.DataFrame, start_date: str | date, end_date: str | date) -> bool:
-    work = _calendar_with_keys(calendar_df)
+def baostock_cn_trading_calendar_covers_range(baostock_cn_trading_calendar_df: pd.DataFrame, start_date: str | date, end_date: str | date) -> bool:
+    work = _baostock_cn_trading_calendar_with_keys(baostock_cn_trading_calendar_df)
     if work.empty:
         return False
     start_ts = pd.Timestamp(date_iso(start_date))
@@ -153,39 +153,39 @@ def calendar_covers_range(calendar_df: pd.DataFrame, start_date: str | date, end
     return bool(work["_calendar_date"].min() <= start_ts and work["_calendar_date"].max() >= end_ts)
 
 
-def latest_trading_day_on_or_before(calendar_df: pd.DataFrame, value: str | date) -> str:
-    work = _calendar_with_keys(calendar_df)
+def latest_trading_day_on_or_before(baostock_cn_trading_calendar_df: pd.DataFrame, value: str | date) -> str:
+    work = _baostock_cn_trading_calendar_with_keys(baostock_cn_trading_calendar_df)
     if work.empty:
-        raise ValueError("No calendar rows available to resolve trading day")
+        raise ValueError("No baostock_cn_trading_calendar rows available to resolve trading day")
 
     target = pd.Timestamp(date_iso(value))
     matches = work.loc[(work["_calendar_date"] <= target) & work["_is_trading_day"]]
     if matches.empty:
-        raise ValueError(f"No trading day found on or before {target.date().isoformat()} in calendar")
+        raise ValueError(f"No trading day found on or before {target.date().isoformat()} in baostock_cn_trading_calendar")
     return matches.sort_values("_calendar_date").iloc[-1]["_calendar_date"].date().isoformat()
 
 
-def first_trading_day_on_or_after(calendar_df: pd.DataFrame, value: str | date) -> str:
-    work = _calendar_with_keys(calendar_df)
+def first_trading_day_on_or_after(baostock_cn_trading_calendar_df: pd.DataFrame, value: str | date) -> str:
+    work = _baostock_cn_trading_calendar_with_keys(baostock_cn_trading_calendar_df)
     if work.empty:
-        raise ValueError("No calendar rows available to resolve trading day")
+        raise ValueError("No baostock_cn_trading_calendar rows available to resolve trading day")
 
     target = pd.Timestamp(date_iso(value))
     matches = work.loc[(work["_calendar_date"] >= target) & work["_is_trading_day"]]
     if matches.empty:
-        raise ValueError(f"No trading day found on or after {target.date().isoformat()} in calendar")
+        raise ValueError(f"No trading day found on or after {target.date().isoformat()} in baostock_cn_trading_calendar")
     return matches.sort_values("_calendar_date").iloc[0]["_calendar_date"].date().isoformat()
 
 
-def trading_day_lookback_start(calendar_df: pd.DataFrame, end_date: str | date, lookback_days: int) -> str:
+def trading_day_lookback_start(baostock_cn_trading_calendar_df: pd.DataFrame, end_date: str | date, lookback_days: int) -> str:
     if lookback_days < 0:
         raise ValueError("lookback_days must be non-negative")
 
-    work = _calendar_with_keys(calendar_df)
+    work = _baostock_cn_trading_calendar_with_keys(baostock_cn_trading_calendar_df)
     if work.empty:
-        raise ValueError("No calendar rows available to resolve trading day lookback")
+        raise ValueError("No baostock_cn_trading_calendar rows available to resolve trading day lookback")
 
-    resolved_end = latest_trading_day_on_or_before(calendar_df, end_date)
+    resolved_end = latest_trading_day_on_or_before(baostock_cn_trading_calendar_df, end_date)
     end_ts = pd.Timestamp(resolved_end)
     trading_days = work.loc[(work["_calendar_date"] <= end_ts) & work["_is_trading_day"], "_calendar_date"]
     trading_days = trading_days.drop_duplicates().sort_values().reset_index(drop=True)
@@ -196,9 +196,9 @@ def trading_day_lookback_start(calendar_df: pd.DataFrame, end_date: str | date, 
     return trading_days.iloc[index].date().isoformat()
 
 
-def trading_range_bounds(calendar_df: pd.DataFrame, start_date: str | date, end_date: str | date) -> tuple[str, str]:
-    resolved_start = first_trading_day_on_or_after(calendar_df, start_date)
-    resolved_end = latest_trading_day_on_or_before(calendar_df, end_date)
+def trading_range_bounds(baostock_cn_trading_calendar_df: pd.DataFrame, start_date: str | date, end_date: str | date) -> tuple[str, str]:
+    resolved_start = first_trading_day_on_or_after(baostock_cn_trading_calendar_df, start_date)
+    resolved_end = latest_trading_day_on_or_before(baostock_cn_trading_calendar_df, end_date)
     if resolved_start > resolved_end:
         raise ValueError(
             f"No trading days found between {date_iso(start_date)} and {date_iso(end_date)}"
@@ -210,23 +210,23 @@ def resolve_codes(
     config: ConfigManager,
     store: ParquetStore,
     code: tuple[str, ...] | list[str] | str | None,
-    stock_basic_mode: str,
+    baostock_cn_stock_basic_mode: str,
 ) -> list[str]:
     if isinstance(code, str):
         return [code]
     if code:
         return [str(item) for item in code]
-    codes = store.stock_basic_codes(stock_basic_mode)
+    codes = store.baostock_cn_stock_basic_codes(baostock_cn_stock_basic_mode)
     if not codes:
-        raise ValueError("No stock codes found in stock_basic data")
+        raise ValueError("No stock codes found in baostock_cn_stock_basic data")
     return codes
 
 
-def _calendar_with_keys(calendar_df: pd.DataFrame) -> pd.DataFrame:
-    if calendar_df.empty or "calendar_date" not in calendar_df.columns:
+def _baostock_cn_trading_calendar_with_keys(baostock_cn_trading_calendar_df: pd.DataFrame) -> pd.DataFrame:
+    if baostock_cn_trading_calendar_df.empty or "calendar_date" not in baostock_cn_trading_calendar_df.columns:
         return pd.DataFrame(columns=["_calendar_date", "_is_trading_day"])
 
-    work = calendar_df.copy()
+    work = baostock_cn_trading_calendar_df.copy()
     work["_calendar_date"] = pd.to_datetime(work["calendar_date"], errors="coerce").dt.normalize()
     status = work.get("is_trading_day", pd.Series("", index=work.index))
     work["_is_trading_day"] = status.astype("string").str.strip().str.lower().isin({"1", "true", "t", "yes"})
@@ -234,16 +234,16 @@ def _calendar_with_keys(calendar_df: pd.DataFrame) -> pd.DataFrame:
 
 
 def checkpoint_output_path(store: ParquetStore, dataset: str, code: str, end_date: str) -> Path:
-    if is_daily_k_dataset(dataset):
-        return store.daily_k_path(dataset, code)
-    if dataset == ADJUST_FACTOR_DATASET:
-        return store.adjust_factor_path(code)
-    if dataset == "stock_basic":
-        return store.stock_basic_path()
-    if dataset == "calendar":
-        return store.calendar_path()
-    if dataset == STOCK_VALUE_EM_DATASET.name:
-        return store.stock_value_em_path(code)
+    if is_daily_bar_dataset(dataset):
+        return store.baostock_daily_bar_path(dataset, code)
+    if dataset == BAOSTOCK_CN_STOCK_ADJUSTMENT_FACTOR_DATASET:
+        return store.baostock_cn_stock_adjustment_factor_path(code)
+    if dataset == "baostock_cn_stock_basic":
+        return store.baostock_cn_stock_basic_path()
+    if dataset == "baostock_cn_trading_calendar":
+        return store.baostock_cn_trading_calendar_path()
+    if dataset == AKSHARE_VALUATION_EASTMONEY_DATASET.name:
+        return store.akshare_cn_stock_valuation_eastmoney_path(code)
     raise ValueError(f"Unsupported checkpoint dataset: {dataset}")
 
 
@@ -329,12 +329,12 @@ def write_checkpoint(
 
 
 def expand_daily_datasets(dataset: str) -> list[str]:
-    return expand_daily_k_selection(dataset)
+    return expand_daily_bar_selection(dataset)
 
 
 def merge_daily_frames(store: ParquetStore, existing: pd.DataFrame, fresh: pd.DataFrame) -> pd.DataFrame:
-    existing_clean = store.clean_dataframe_for_schema(existing, DAILY_K_SCHEMA)
-    fresh_clean = store.clean_dataframe_for_schema(fresh, DAILY_K_SCHEMA)
+    existing_clean = store.clean_dataframe_for_schema(existing, DAILY_BAR_SCHEMA)
+    fresh_clean = store.clean_dataframe_for_schema(fresh, DAILY_BAR_SCHEMA)
     combined = pd.concat([existing_clean, fresh_clean], ignore_index=True)
     if combined.empty:
         return combined
@@ -378,7 +378,7 @@ def daily_frames_differ_on_overlap(
     if len(common_index) == 0:
         return False
 
-    compare_columns = [name for name in DAILY_K_SCHEMA.names if name not in {"code", "date"}]
+    compare_columns = [name for name in DAILY_BAR_SCHEMA.names if name not in {"code", "date"}]
     existing_compare = existing_window.loc[common_index, compare_columns].sort_index()
     fresh_compare = fresh_window.loc[common_index, compare_columns].sort_index()
     return not _daily_values_equal(existing_compare, fresh_compare)
@@ -398,7 +398,7 @@ def _daily_window_by_key(
     start_date: str,
     end_date: str,
 ) -> pd.DataFrame:
-    clean = store.clean_dataframe_for_schema(df, DAILY_K_SCHEMA)
+    clean = store.clean_dataframe_for_schema(df, DAILY_BAR_SCHEMA)
     if clean.empty:
         empty = clean.iloc[0:0].copy()
         empty.index = pd.MultiIndex.from_arrays([[], []], names=["_code_key", "_date_key"])
@@ -429,7 +429,7 @@ def replace_daily_range(
     start_date: str,
     end_date: str,
 ) -> pd.DataFrame:
-    existing_clean = store.clean_dataframe_for_schema(existing, DAILY_K_SCHEMA)
+    existing_clean = store.clean_dataframe_for_schema(existing, DAILY_BAR_SCHEMA)
     if not existing_clean.empty:
         dates = pd.to_datetime(existing_clean["date"], errors="coerce")
         start_ts = pd.to_datetime(start_date)

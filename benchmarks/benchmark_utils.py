@@ -13,7 +13,7 @@ from typing import Any
 import pandas as pd
 import pyarrow as pa
 
-from src.storage.dataset_catalog import daily_k_definition
+from src.storage.dataset_catalog import daily_bar_definition
 from src.storage.parquet_store import ParquetStore
 from src.utils.config_mgr import ConfigManager
 from src.utils.logging import logger
@@ -29,7 +29,7 @@ def generate_test_codes(count: int = 100) -> list[str]:
     return codes
 
 
-def generate_daily_k_dataframe(
+def generate_daily_bar_dataframe(
     code: str,
     start_date: str,
     end_date: str,
@@ -71,18 +71,18 @@ def generate_daily_k_dataframe(
                 "high": f"{high_price:.2f}",
                 "low": f"{low_price:.2f}",
                 "close": f"{close_price:.2f}",
-                "preclose": f"{base_price:.2f}",
+                "prev_close": f"{base_price:.2f}",
                 "volume": str(volume),
                 "amount": f"{amount:.2f}",
-                "adjustflag": "3",
+                "adjust_flag": "3",
                 "turn": f"{random.uniform(0.5, 5.0):.2f}",
-                "tradestatus": "1",
-                "pctChg": f"{change * 100:.2f}",
-                "peTTM": f"{random.uniform(10.0, 100.0):.2f}",
-                "pbMRQ": f"{random.uniform(1.0, 10.0):.2f}",
-                "psTTM": f"{random.uniform(1.0, 10.0):.2f}",
-                "pcfNcfTTM": f"{random.uniform(1.0, 20.0):.2f}",
-                "isST": "0",
+                "trade_status": "1",
+                "pct_change": f"{change * 100:.2f}",
+                "pe_ttm": f"{random.uniform(10.0, 100.0):.2f}",
+                "pb_mrq": f"{random.uniform(1.0, 10.0):.2f}",
+                "ps_ttm": f"{random.uniform(1.0, 10.0):.2f}",
+                "pcf_ncf_ttm": f"{random.uniform(1.0, 20.0):.2f}",
+                "is_st": "0",
             }
         )
         base_price = close_price
@@ -90,7 +90,7 @@ def generate_daily_k_dataframe(
     return pd.DataFrame(data[:rows])
 
 
-def generate_adjust_factor_dataframe(
+def generate_baostock_cn_stock_adjustment_factor_dataframe(
     code: str,
     start_date: str,
     end_date: str,
@@ -118,25 +118,25 @@ def generate_adjust_factor_dataframe(
         data.append(
             {
                 "code": code,
-                "dividOperateDate": factor_date,
-                "foreAdjustFactor": f"{cumulative_factor:.6f}",
-                "backAdjustFactor": f"{1.0 / cumulative_factor:.6f}",
-                "adjustFactor": f"{adjustment:.6f}",
+                "dividend_operate_date": factor_date,
+                "forward_adjust_factor": f"{cumulative_factor:.6f}",
+                "backward_adjust_factor": f"{1.0 / cumulative_factor:.6f}",
+                "adjustment_factor": f"{adjustment:.6f}",
             }
         )
 
     return pd.DataFrame(data)
 
 
-def generate_stock_basic_dataframe(codes: list[str]) -> pd.DataFrame:
+def generate_baostock_cn_stock_basic_dataframe(codes: list[str]) -> pd.DataFrame:
     data = []
     for code in codes:
         data.append(
             {
                 "code": code,
                 "code_name": f"Stock_{code.replace('.', '_')}",
-                "ipoDate": "2020-01-01",
-                "outDate": "",
+                "ipo_date": "2020-01-01",
+                "delist_date": "",
                 "type": "1",
                 "status": "1",
             }
@@ -144,7 +144,7 @@ def generate_stock_basic_dataframe(codes: list[str]) -> pd.DataFrame:
     return pd.DataFrame(data)
 
 
-def generate_calendar_dataframe(
+def generate_baostock_cn_trading_calendar_dataframe(
     start_date: str,
     end_date: str,
 ) -> pd.DataFrame:
@@ -177,7 +177,7 @@ class BenchmarkEnvironment:
         self.root.mkdir(parents=True, exist_ok=True)
         self.store.ensure_layout()
         self._write_settings()
-        self._write_calendar()
+        self._write_baostock_cn_trading_calendar()
 
     def teardown(self) -> None:
         self.store.close()
@@ -201,21 +201,21 @@ class BenchmarkEnvironment:
             "api": {
                 "provider": "baostock",
                 "baostock": {
-                    "adjustflag_map": {"none": "3", "qfq": "1", "hfq": "2"}
+                    "adjust_flag_map": {"none": "3", "qfq": "1", "hfq": "2"}
                 },
             },
             "datasets": {
-                "daily_k": {
-                    "names": ["daily_k_none", "daily_k_qfq", "daily_k_hfq"],
-                    "fields": "date,code,open,high,low,close,preclose,volume,amount,adjustflag,turn,tradestatus,pctChg,peTTM,pbMRQ,psTTM,pcfNcfTTM,isST",
+                "daily_bar": {
+                    "names": ["baostock_cn_stock_daily_bar_unadjusted", "baostock_cn_stock_daily_bar_qfq", "baostock_cn_stock_daily_bar_hfq"],
+                    "fields": "date,code,open,high,low,close,prev_close,volume,amount,adjust_flag,turn,trade_status,pct_change,pe_ttm,pb_mrq,ps_ttm,pcf_ncf_ttm,is_st",
                     "frequency": "d",
                 },
-                "stock_basic": {
-                    "fields": "code,code_name,ipoDate,outDate,type,status"
+                "baostock_cn_stock_basic": {
+                    "fields": "code,code_name,ipo_date,delist_date,type,status"
                 },
-                "calendar": {"fields": "calendar_date,is_trading_day"},
-                "adjust_factor": {
-                    "fields": "code,dividOperateDate,foreAdjustFactor,backAdjustFactor,adjustFactor"
+                "baostock_cn_trading_calendar": {"fields": "calendar_date,is_trading_day"},
+                "baostock_cn_stock_adjustment_factor": {
+                    "fields": "code,dividend_operate_date,forward_adjust_factor,backward_adjust_factor,adjustment_factor"
                 },
             },
             "pipeline": {
@@ -242,29 +242,29 @@ class BenchmarkEnvironment:
 
             yaml.dump(universe, f, default_flow_style=False)
 
-    def _write_calendar(self) -> None:
-        calendar_df = generate_calendar_dataframe("2020-01-01", "2024-12-31")
-        self.store.write_calendar(calendar_df)
+    def _write_baostock_cn_trading_calendar(self) -> None:
+        baostock_cn_trading_calendar_df = generate_baostock_cn_trading_calendar_dataframe("2020-01-01", "2024-12-31")
+        self.store.write_baostock_cn_trading_calendar(baostock_cn_trading_calendar_df)
 
     def populate_test_data(
         self,
         codes: list[str] | None = None,
         start_date: str = "2024-01-01",
         end_date: str = "2024-01-31",
-        include_adjust_factors: bool = True,
+        include_baostock_cn_stock_adjustment_factors: bool = True,
     ) -> None:
         codes = codes or self.codes[:10]
 
-        stock_basic_df = generate_stock_basic_dataframe(codes)
-        self.store.write_stock_basic(stock_basic_df)
+        baostock_cn_stock_basic_df = generate_baostock_cn_stock_basic_dataframe(codes)
+        self.store.write_baostock_cn_stock_basic(baostock_cn_stock_basic_df)
 
         for code in codes:
-            daily_df = generate_daily_k_dataframe(code, start_date, end_date)
-            self.store.write_daily_k("daily_k_none", code, daily_df)
+            daily_df = generate_daily_bar_dataframe(code, start_date, end_date)
+            self.store.write_baostock_daily_bars("baostock_cn_stock_daily_bar_unadjusted", code, daily_df)
 
-            if include_adjust_factors:
-                factor_df = generate_adjust_factor_dataframe(code, start_date, end_date)
-                self.store.write_adjust_factor(code, factor_df)
+            if include_baostock_cn_stock_adjustment_factors:
+                factor_df = generate_baostock_cn_stock_adjustment_factor_dataframe(code, start_date, end_date)
+                self.store.write_baostock_cn_stock_adjustment_factor(code, factor_df)
 
 
 class BenchmarkReporter:

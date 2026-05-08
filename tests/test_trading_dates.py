@@ -24,24 +24,24 @@ def test_default_candidate_date_uses_1800_cutoff(tmp_path) -> None:
 
 
 def test_non_trading_candidate_resolves_to_previous_trading_day() -> None:
-    calendar = _calendar("2024-01-04", "2024-01-08")
+    baostock_cn_trading_calendar = _baostock_cn_trading_calendar("2024-01-04", "2024-01-08")
 
-    assert latest_trading_day_on_or_before(calendar, "2024-01-07") == "2024-01-05"
+    assert latest_trading_day_on_or_before(baostock_cn_trading_calendar, "2024-01-07") == "2024-01-05"
 
 
 def test_trading_day_lookback_crosses_weekend() -> None:
-    calendar = _calendar("2024-01-04", "2024-01-08")
+    baostock_cn_trading_calendar = _baostock_cn_trading_calendar("2024-01-04", "2024-01-08")
 
-    assert trading_day_lookback_start(calendar, "2024-01-08", 1) == "2024-01-05"
+    assert trading_day_lookback_start(baostock_cn_trading_calendar, "2024-01-08", 1) == "2024-01-05"
 
 
 def test_trading_range_bounds_stay_inside_requested_range() -> None:
-    calendar = _calendar("2024-01-06", "2024-01-14")
+    baostock_cn_trading_calendar = _baostock_cn_trading_calendar("2024-01-06", "2024-01-14")
 
-    assert trading_range_bounds(calendar, "2024-01-06", "2024-01-14") == ("2024-01-08", "2024-01-12")
+    assert trading_range_bounds(baostock_cn_trading_calendar, "2024-01-06", "2024-01-14") == ("2024-01-08", "2024-01-12")
 
 
-def _calendar(start: str, end: str) -> pd.DataFrame:
+def _baostock_cn_trading_calendar(start: str, end: str) -> pd.DataFrame:
     dates = pd.date_range(start, end, freq="D")
     return pd.DataFrame(
         [
@@ -67,3 +67,4 @@ def _write_settings(root) -> None:
         ),
         encoding="utf-8",
     )
+

@@ -51,25 +51,28 @@ class ConfigManager:
             raise ConfigError(f"Missing path setting: {dotted_key}")
         return paths.resolve_path(value, self.root)
 
-    def daily_k_fields(self) -> str:
-        fields = self.get("datasets.daily_k.fields")
+    def daily_bar_fields(self) -> str:
+        fields = self.get("datasets.daily_bar.fields")
         if not fields:
-            raise ConfigError("Missing datasets.daily_k.fields")
+            raise ConfigError("Missing datasets.daily_bar.fields")
         return str(fields)
 
-    def stock_basic_fields(self) -> str:
-        fields = self.get("datasets.stock_basic.fields")
+    def baostock_cn_stock_basic_fields(self) -> str:
+        fields = self.get("datasets.baostock_cn_stock_basic.fields")
         if not fields:
-            raise ConfigError("Missing datasets.stock_basic.fields")
+            raise ConfigError("Missing datasets.baostock_cn_stock_basic.fields")
         return str(fields)
 
-    def adjustflag_for_dataset(self, dataset: str) -> str:
-        suffix = dataset.replace("daily_k_", "")
-        mapping = self.get("api.baostock.adjustflag_map", {})
+    def adjust_flag_for_dataset(self, dataset: str) -> str:
+        prefix = "baostock_cn_stock_daily_bar_"
+        if not dataset.startswith(prefix):
+            raise ConfigError(f"Unsupported daily_bar dataset: {dataset}")
+        suffix = dataset.removeprefix(prefix)
+        mapping = self.get("api.baostock.adjust_flag_map", {})
         try:
             return str(mapping[suffix])
         except KeyError as exc:
-            raise ConfigError(f"Unsupported daily_k dataset: {dataset}") from exc
+            raise ConfigError(f"Unsupported daily_bar dataset: {dataset}") from exc
 
 
 def load_settings(root: Path | None = None) -> dict[str, Any]:

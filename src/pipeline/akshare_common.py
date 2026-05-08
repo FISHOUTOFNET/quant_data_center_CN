@@ -20,7 +20,7 @@ from src.storage.parquet_store import ParquetStore
 
 PIPELINE_UPDATE_AKSHARE_DELIST = "update_akshare_delist"
 PIPELINE_UPDATE_AKSHARE_SPOT = "update_akshare_spot"
-PIPELINE_UPDATE_AKSHARE_HIST = "update_akshare_hist"
+PIPELINE_UPDATE_AKSHARE_DAILY_BAR = "update_akshare_daily_bar"
 
 
 def write_raw_response(root: Path, response: AkShareResponse, started_at: datetime) -> Path:
@@ -237,3 +237,4 @@ def error_type(exc: Exception) -> str:
 def error_stack(exc: Exception) -> str:
     stack = traceback.format_exc()
     return stack if stack and stack != "NoneType: None\n" else f"{type(exc).__name__}: {exc}"
+

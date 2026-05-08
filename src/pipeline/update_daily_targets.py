@@ -5,9 +5,9 @@ from __future__ import annotations
 from datetime import datetime
 
 from src.api.market_data import MarketDataProvider
-from src.pipeline.adjustments import ADJUST_FACTOR_DATASET
+from src.pipeline.adjustments import BAOSTOCK_CN_STOCK_ADJUSTMENT_FACTOR_DATASET
 from src.pipeline.common import (
-    DAILY_K_DATASETS,
+    DAILY_BAR_DATASETS,
     FULL_HISTORY_START_DATE,
     PIPELINE_UPDATE_DAILY,
     PipelineCheckpointLookup,
@@ -16,7 +16,7 @@ from src.pipeline.common import (
     should_skip_checkpoint,
     write_checkpoint,
 )
-from src.pipeline.services import fetch_stock_basic, log_api_fetch
+from src.pipeline.services import fetch_baostock_cn_stock_basic, log_api_fetch
 from src.pipeline.update_daily_metadata import (
     _add_skipped_run,
     _add_success_run,
@@ -57,7 +57,7 @@ def _prefilter_checkpointed_codes(
     store: ParquetStore,
     codes: list[str],
     daily_targets: list[str],
-    needs_adjust_factor_api: bool,
+    needs_baostock_cn_stock_adjustment_factor_api: bool,
     mode: str,
     start_date: str,
     end_date: str,
@@ -74,7 +74,7 @@ def _prefilter_checkpointed_codes(
             checkpoint_lookup,
             stock_code,
             daily_targets,
-            needs_adjust_factor_api,
+            needs_baostock_cn_stock_adjustment_factor_api,
             mode,
             start_date,
             end_date,
@@ -98,15 +98,15 @@ def _code_checkpoints_complete(
     checkpoint_lookup: PipelineCheckpointLookup,
     code: str,
     daily_targets: list[str],
-    needs_adjust_factor_api: bool,
+    needs_baostock_cn_stock_adjustment_factor_api: bool,
     mode: str,
     start_date: str,
     end_date: str,
 ) -> bool:
-    if needs_adjust_factor_api and not _checkpoint_lookup_succeeded(
+    if needs_baostock_cn_stock_adjustment_factor_api and not _checkpoint_lookup_succeeded(
         store,
         checkpoint_lookup,
-        ADJUST_FACTOR_DATASET,
+        BAOSTOCK_CN_STOCK_ADJUSTMENT_FACTOR_DATASET,
         code,
         FULL_HISTORY_START_DATE,
         end_date,
@@ -124,7 +124,7 @@ def _code_checkpoints_complete(
             end_date,
         ):
             return False
-    return bool(needs_adjust_factor_api or daily_targets)
+    return bool(needs_baostock_cn_stock_adjustment_factor_api or daily_targets)
 
 
 def _checkpoint_lookup_succeeded(
@@ -148,19 +148,19 @@ def _checkpoint_lookup_succeeded(
 
 def _dataset_targets(dataset: str) -> tuple[bool, bool, bool, list[str]]:
     if dataset == "all":
-        return True, True, True, list(DAILY_K_DATASETS)
-    if dataset == "calendar":
+        return True, True, True, list(DAILY_BAR_DATASETS)
+    if dataset == "baostock_cn_trading_calendar":
         return True, False, False, []
-    if dataset == "stock_basic":
+    if dataset == "baostock_cn_stock_basic":
         return False, True, False, []
-    if dataset == ADJUST_FACTOR_DATASET:
+    if dataset == BAOSTOCK_CN_STOCK_ADJUSTMENT_FACTOR_DATASET:
         return False, False, True, []
-    if dataset in {"daily_k_all", "daily_k"} or dataset in DAILY_K_DATASETS:
+    if dataset in DAILY_BAR_DATASETS:
         return False, False, False, expand_daily_datasets(dataset)
     raise ValueError(f"Unsupported update dataset: {dataset}")
 
 
-def _write_stock_basic_target(
+def _write_baostock_cn_stock_basic_target(
     store: ParquetStore,
     provider: MarketDataProvider,
     run_records: list[dict[str, object]],
@@ -170,37 +170,37 @@ def _write_stock_basic_target(
     force: bool,
     checkpoint_lookup: PipelineCheckpointLookup | None,
 ) -> None:
-    stock_basic_path = checkpoint_output_path(store, "stock_basic", "*", end_date)
+    baostock_cn_stock_basic_path = checkpoint_output_path(store, "baostock_cn_stock_basic", "*", end_date)
     if should_skip_checkpoint(
         store,
         PIPELINE_UPDATE_DAILY,
-        "stock_basic",
+        "baostock_cn_stock_basic",
         "*",
         start_date,
         end_date,
-        stock_basic_path,
+        baostock_cn_stock_basic_path,
         resume,
         force,
         checkpoint_lookup,
     ):
-        run_row = _add_skipped_run(run_records, "stock_basic", "*", start_date, end_date, "checkpoint")
+        run_row = _add_skipped_run(run_records, "baostock_cn_stock_basic", "*", start_date, end_date, "checkpoint")
         _persist_run_status(store, run_row)
         return
 
-    basic_df = fetch_stock_basic(provider)
-    log_api_fetch("stock_basic", "*", start_date, end_date, basic_df)
-    stock_basic_path = store.write_stock_basic(basic_df)
-    run_row = _add_success_run(run_records, "stock_basic", "*", start_date, end_date, len(basic_df))
-    status_row = _status_row("stock_basic", "*", end_date, len(basic_df), "success", "")
+    basic_df = fetch_baostock_cn_stock_basic(provider)
+    log_api_fetch("baostock_cn_stock_basic", "*", start_date, end_date, basic_df)
+    baostock_cn_stock_basic_path = store.write_baostock_cn_stock_basic(basic_df)
+    run_row = _add_success_run(run_records, "baostock_cn_stock_basic", "*", start_date, end_date, len(basic_df))
+    status_row = _status_row("baostock_cn_stock_basic", "*", end_date, len(basic_df), "success", "")
     _persist_run_status(store, run_row, status_row)
     write_checkpoint(
         store,
         PIPELINE_UPDATE_DAILY,
-        "stock_basic",
+        "baostock_cn_stock_basic",
         "*",
         start_date,
         end_date,
         "success",
         len(basic_df),
-        stock_basic_path,
+        baostock_cn_stock_basic_path,
     )

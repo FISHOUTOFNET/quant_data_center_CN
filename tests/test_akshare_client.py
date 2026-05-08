@@ -27,7 +27,7 @@ class FakeConfig:
         return self._values.get(dotted_key, default)
 
 
-def test_akshare_client_maps_stock_value_and_stores_source_code() -> None:
+def test_akshare_client_maps_stock_valuation_and_stores_source_code() -> None:
     calls: list[str] = []
 
     class FakeAk:
@@ -57,7 +57,7 @@ def test_akshare_client_maps_stock_value_and_stores_source_code() -> None:
 
     client = AkShareClient(config=FakeConfig(), ak_module=FakeAk())
 
-    df = client.query_stock_value("600000")
+    df = client.query_stock_valuation("600000")
 
     assert calls == ["600000"]
     assert df.loc[0, "code"] == "600000"
@@ -73,13 +73,13 @@ def test_akshare_client_handles_empty_data() -> None:
 
     client = AkShareClient(config=FakeConfig(), ak_module=FakeAk())
 
-    value_df = client.query_stock_value("600000")
+    value_df = client.query_stock_valuation("600000")
     assert value_df.empty
     assert list(value_df.columns) == [
         "date",
         "code",
         "close",
-        "pct_chg",
+        "pct_change",
         "total_market_cap",
         "float_market_cap",
         "total_shares",
@@ -103,11 +103,11 @@ def test_akshare_client_retries_failures() -> None:
             calls["count"] += 1
             if calls["count"] < 3:
                 raise OSError("temporary")
-            return _stock_value_raw()
+            return _stock_valuation_raw()
 
     client = AkShareClient(config=FakeConfig(), ak_module=FakeAk())
 
-    df = client.query_stock_value("600000")
+    df = client.query_stock_valuation("600000")
 
     assert len(df) == 1
     assert calls["count"] == 3
@@ -136,11 +136,11 @@ def test_akshare_client_opens_endpoint_circuit() -> None:
     )
 
     with pytest.raises(AkShareNetworkError):
-        client.query_stock_value("600000")
+        client.query_stock_valuation("600000")
     with pytest.raises(AkShareNetworkError):
-        client.query_stock_value("600000")
+        client.query_stock_valuation("600000")
     with pytest.raises(AkShareCircuitOpen):
-        client.query_stock_value("600000")
+        client.query_stock_valuation("600000")
     assert calls["count"] == 2
 
 
@@ -153,14 +153,14 @@ def test_akshare_client_handles_none_type_subscript_error() -> None:
 
     client = AkShareClient(config=FakeConfig(), ak_module=FakeAk())
 
-    df = client.query_stock_value("600000")
+    df = client.query_stock_valuation("600000")
 
     assert df.empty
     assert list(df.columns) == [
         "date",
         "code",
         "close",
-        "pct_chg",
+        "pct_change",
         "total_market_cap",
         "float_market_cap",
         "total_shares",
@@ -286,10 +286,10 @@ def test_akshare_client_normalizes_source_symbols_from_a_stock_endpoints() -> No
         now=lambda: datetime(2024, 1, 3, 16, 0),
     )
 
-    delist = client.fetch_stock_info_sh_delist(symbol="全部", snapshot_date="2024-01-03").data
-    spot_em = client.fetch_stock_zh_a_spot_em(trade_date="2024-01-03").data
-    spot_sina = client.fetch_stock_zh_a_spot_sina(trade_date="2024-01-03", fallback_reason="planned").data
-    hist = client.fetch_stock_zh_a_hist("000001", "2024-01-01", "2024-01-03", "none").data
+    delist = client.fetch_akshare_cn_stock_delist_sh(symbol="全部", snapshot_date="2024-01-03").data
+    spot_em = client.fetch_spot_quote_eastmoney(trade_date="2024-01-03").data
+    spot_sina = client.fetch_spot_quote_sina(trade_date="2024-01-03", fallback_reason="planned").data
+    hist = client.fetch_daily_bars("000001", "2024-01-01", "2024-01-03", "unadjusted").data
 
     assert calls["delist_symbol"] == "全部"
     assert delist.loc[0, "code"] == "600001"
@@ -302,7 +302,7 @@ def test_akshare_client_normalizes_source_symbols_from_a_stock_endpoints() -> No
     assert calls["hist"] == ("000001", "daily", "20240101", "20240103", "")
     assert hist.loc[0, "code"] == "000001"
     assert hist.loc[0, "volume"] == 1000
-    assert hist.loc[0, "quality_status"] == "hist_confirmed"
+    assert hist.loc[0, "quality_status"] == "daily_bar_confirmed"
 
 
 def test_akshare_code_normalizer_accepts_only_explicit_six_digit_codes() -> None:
@@ -312,7 +312,7 @@ def test_akshare_code_normalizer_accepts_only_explicit_six_digit_codes() -> None
             normalize_akshare_code(code)
 
 
-def _stock_value_raw() -> pd.DataFrame:
+def _stock_valuation_raw() -> pd.DataFrame:
     return pd.DataFrame(
         [
             {
@@ -332,3 +332,4 @@ def _stock_value_raw() -> pd.DataFrame:
             }
         ]
     )
+

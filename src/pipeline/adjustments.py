@@ -5,35 +5,35 @@ from __future__ import annotations
 import pandas as pd
 
 
-ADJUST_FACTOR_DATASET = "adjust_factor"
-UNADJUSTED_DAILY_DATASET = "daily_k_none"
+BAOSTOCK_CN_STOCK_ADJUSTMENT_FACTOR_DATASET = "baostock_cn_stock_adjustment_factor"
+UNADJUSTED_DAILY_DATASET = "baostock_cn_stock_daily_bar_unadjusted"
 ADJUSTED_DAILY_FACTOR_COLUMNS = {
-    "daily_k_qfq": "foreAdjustFactor",
-    "daily_k_hfq": "backAdjustFactor",
+    "baostock_cn_stock_daily_bar_qfq": "forward_adjust_factor",
+    "baostock_cn_stock_daily_bar_hfq": "backward_adjust_factor",
 }
-PRICE_COLUMNS = ("open", "high", "low", "close", "preclose")
+PRICE_COLUMNS = ("open", "high", "low", "close", "prev_close")
 
 
 def is_adjusted_daily_dataset(dataset: str) -> bool:
     return dataset in ADJUSTED_DAILY_FACTOR_COLUMNS
 
 
-def calculate_adjusted_daily_k(
+def calculate_adjusted_daily_bar(
     unadjusted: pd.DataFrame,
-    adjust_factors: pd.DataFrame,
+    baostock_cn_stock_adjustment_factors: pd.DataFrame,
     dataset: str,
-    adjustflag: str,
+    adjust_flag: str,
 ) -> pd.DataFrame:
     """Calculate qfq/hfq daily bars from unadjusted bars and local factors."""
 
     try:
         factor_column = ADJUSTED_DAILY_FACTOR_COLUMNS[dataset]
     except KeyError as exc:
-        raise ValueError(f"Unsupported adjusted daily_k dataset: {dataset}") from exc
+        raise ValueError(f"Unsupported adjusted daily_bar dataset: {dataset}") from exc
 
     result = unadjusted.copy()
-    if "adjustflag" in result.columns:
-        result["adjustflag"] = str(adjustflag)
+    if "adjust_flag" in result.columns:
+        result["adjust_flag"] = str(adjust_flag)
     if result.empty:
         return result
 
@@ -42,7 +42,7 @@ def calculate_adjusted_daily_k(
     result["_code_key"] = result["code"].astype("string")
     result["_adj_factor"] = 1.0
 
-    factor_values = _factor_values(adjust_factors, factor_column)
+    factor_values = _factor_values(baostock_cn_stock_adjustment_factors, factor_column)
     if not factor_values.empty:
         for code_key, row_index in result.groupby("_code_key", dropna=False).groups.items():
             daily_dates = (
@@ -77,12 +77,12 @@ def calculate_adjusted_daily_k(
     return result.drop(columns=["_row_order", "_date_key", "_code_key", "_adj_factor"])
 
 
-def _factor_values(adjust_factors: pd.DataFrame, factor_column: str) -> pd.DataFrame:
-    if adjust_factors.empty or factor_column not in adjust_factors.columns:
+def _factor_values(baostock_cn_stock_adjustment_factors: pd.DataFrame, factor_column: str) -> pd.DataFrame:
+    if baostock_cn_stock_adjustment_factors.empty or factor_column not in baostock_cn_stock_adjustment_factors.columns:
         return pd.DataFrame(columns=["_code_key", "_factor_date", "_factor_value"])
 
-    work = adjust_factors.copy()
+    work = baostock_cn_stock_adjustment_factors.copy()
     work["_code_key"] = work["code"].astype("string")
-    work["_factor_date"] = pd.to_datetime(work["dividOperateDate"], errors="coerce").astype("datetime64[ns]")
+    work["_factor_date"] = pd.to_datetime(work["dividend_operate_date"], errors="coerce").astype("datetime64[ns]")
     work["_factor_value"] = pd.to_numeric(work[factor_column], errors="coerce")
     return work.dropna(subset=["_code_key", "_factor_date", "_factor_value"])

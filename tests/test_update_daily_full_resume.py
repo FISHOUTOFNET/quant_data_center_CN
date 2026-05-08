@@ -6,18 +6,18 @@ import pandas as pd
 
 import src.pipeline.update_daily as update_daily_module
 import src.pipeline.update_daily_worker as update_daily_worker_module
-from src.pipeline.adjustments import ADJUST_FACTOR_DATASET
+from src.pipeline.adjustments import BAOSTOCK_CN_STOCK_ADJUSTMENT_FACTOR_DATASET
 from src.storage.parquet_store import ParquetStore
 from update_daily_fakes import _fake_provider_factory, _provider_factory_for, _write_settings
 
 
-def test_update_daily_full_resumes_failed_code(tmp_path, monkeypatch, daily_sample, stock_basic_sample) -> None:
+def test_update_daily_full_resumes_failed_code(tmp_path, monkeypatch, daily_sample, baostock_cn_stock_basic_sample) -> None:
     _write_settings(tmp_path)
-    provider_factory, state = _fake_provider_factory(stock_basic_sample(), daily_sample(), fail_once={"sz.000001"})
+    provider_factory, state = _fake_provider_factory(baostock_cn_stock_basic_sample(), daily_sample(), fail_once={"sz.000001"})
     monkeypatch.setattr(update_daily_module, "create_provider", provider_factory)
 
     first = update_daily_module.update_daily(
-        dataset="daily_k_qfq",
+        dataset="baostock_cn_stock_daily_bar_qfq",
         mode="full",
         start="2024-01-01",
         end="2024-01-31",
@@ -27,7 +27,7 @@ def test_update_daily_full_resumes_failed_code(tmp_path, monkeypatch, daily_samp
     first_history_calls = list(state["history_calls"])
 
     second = update_daily_module.update_daily(
-        dataset="daily_k_qfq",
+        dataset="baostock_cn_stock_daily_bar_qfq",
         mode="full",
         start="2024-01-01",
         end="2024-01-31",
@@ -35,34 +35,34 @@ def test_update_daily_full_resumes_failed_code(tmp_path, monkeypatch, daily_samp
         build_views=False,
     )
 
-    assert [item["status"] for item in first if item["dataset"] == "daily_k_qfq"] == [
+    assert [item["status"] for item in first if item["dataset"] == "baostock_cn_stock_daily_bar_qfq"] == [
         "success",
         "success",
         "failed",
     ]
     assert first_history_calls == ["sh.000001", "sh.600000", "sz.000001"]
     assert state["history_calls"][len(first_history_calls) :] == ["sz.000001"]
-    assert [item["status"] for item in second if item["dataset"] == "daily_k_qfq"] == ["success"]
+    assert [item["status"] for item in second if item["dataset"] == "baostock_cn_stock_daily_bar_qfq"] == ["success"]
 
 
-def test_update_daily_full_resumes_write_failure(tmp_path, monkeypatch, daily_sample, stock_basic_sample) -> None:
+def test_update_daily_full_resumes_write_failure(tmp_path, monkeypatch, daily_sample, baostock_cn_stock_basic_sample) -> None:
     _write_settings(tmp_path)
-    provider_factory, state = _fake_provider_factory(stock_basic_sample(), daily_sample())
+    provider_factory, state = _fake_provider_factory(baostock_cn_stock_basic_sample(), daily_sample())
     monkeypatch.setattr(update_daily_module, "create_provider", provider_factory)
 
-    original_write_daily_k = ParquetStore.write_daily_k
+    original_write_baostock_daily_bars = ParquetStore.write_baostock_daily_bars
     failed_once = {"value": False}
 
-    def flaky_write_daily_k(self, dataset: str, code: str, df: pd.DataFrame):
+    def flaky_write_baostock_daily_bars(self, dataset: str, code: str, df: pd.DataFrame):
         if code == "sz.000001" and not failed_once["value"]:
             failed_once["value"] = True
             raise RuntimeError("temporary parquet write failure")
-        return original_write_daily_k(self, dataset, code, df)
+        return original_write_baostock_daily_bars(self, dataset, code, df)
 
-    monkeypatch.setattr(ParquetStore, "write_daily_k", flaky_write_daily_k)
+    monkeypatch.setattr(ParquetStore, "write_baostock_daily_bars", flaky_write_baostock_daily_bars)
 
     first = update_daily_module.update_daily(
-        dataset="daily_k_qfq",
+        dataset="baostock_cn_stock_daily_bar_qfq",
         mode="full",
         start="2024-01-01",
         end="2024-01-31",
@@ -71,7 +71,7 @@ def test_update_daily_full_resumes_write_failure(tmp_path, monkeypatch, daily_sa
         build_views=False,
     )
     second = update_daily_module.update_daily(
-        dataset="daily_k_qfq",
+        dataset="baostock_cn_stock_daily_bar_qfq",
         mode="full",
         start="2024-01-01",
         end="2024-01-31",
@@ -80,8 +80,8 @@ def test_update_daily_full_resumes_write_failure(tmp_path, monkeypatch, daily_sa
         build_views=False,
     )
 
-    assert [item["status"] for item in first if item["dataset"] == "daily_k_qfq"] == ["success", "failed"]
-    assert [item["status"] for item in second if item["dataset"] == "daily_k_qfq"] == ["success"]
+    assert [item["status"] for item in first if item["dataset"] == "baostock_cn_stock_daily_bar_qfq"] == ["success", "failed"]
+    assert [item["status"] for item in second if item["dataset"] == "baostock_cn_stock_daily_bar_qfq"] == ["success"]
     assert state["history_calls"] == ["sh.600000", "sz.000001", "sz.000001"]
 
 
@@ -89,41 +89,41 @@ def test_update_daily_full_fetches_next_code_while_previous_write_is_pending(
     tmp_path,
     monkeypatch,
     daily_sample,
-    stock_basic_sample,
+    baostock_cn_stock_basic_sample,
 ) -> None:
     _write_settings(tmp_path)
-    provider_factory, _state = _fake_provider_factory(stock_basic_sample(), daily_sample())
+    provider_factory, _state = _fake_provider_factory(baostock_cn_stock_basic_sample(), daily_sample())
 
     first_write_started = threading.Event()
     release_first_write = threading.Event()
     second_fetch_seen = threading.Event()
-    original_write_daily_k = ParquetStore.write_daily_k
+    original_write_baostock_daily_bars = ParquetStore.write_baostock_daily_bars
 
     def slow_first_write(self, dataset: str, code: str, df: pd.DataFrame):
         if code == "sh.600000":
             first_write_started.set()
             release_first_write.wait(timeout=5)
-        return original_write_daily_k(self, dataset, code, df)
+        return original_write_baostock_daily_bars(self, dataset, code, df)
 
     class ObservingProvider(provider_factory.provider_cls):
-        def query_daily_k(
+        def query_daily_bars(
             self,
             request,
         ) -> pd.DataFrame:
-            result = super().query_daily_k(request)
+            result = super().query_daily_bars(request)
             if request.code == "sz.000001":
                 second_fetch_seen.set()
             return result
 
     monkeypatch.setattr(update_daily_module, "create_provider", _provider_factory_for(ObservingProvider))
-    monkeypatch.setattr(ParquetStore, "write_daily_k", slow_first_write)
+    monkeypatch.setattr(ParquetStore, "write_baostock_daily_bars", slow_first_write)
 
     errors = []
 
     def run_pipeline() -> None:
         try:
             update_daily_module.update_daily(
-                dataset="daily_k_qfq",
+                dataset="baostock_cn_stock_daily_bar_qfq",
                 mode="full",
                 start="2024-01-01",
                 end="2024-01-31",
@@ -151,10 +151,10 @@ def test_update_daily_background_executor_uses_configured_default_workers(
     tmp_path,
     monkeypatch,
     daily_sample,
-    stock_basic_sample,
+    baostock_cn_stock_basic_sample,
 ) -> None:
     _write_settings(tmp_path)
-    provider_factory, _state = _fake_provider_factory(stock_basic_sample(), daily_sample())
+    provider_factory, _state = _fake_provider_factory(baostock_cn_stock_basic_sample(), daily_sample())
     monkeypatch.setattr(update_daily_module, "create_provider", provider_factory)
 
     max_workers_seen = []
@@ -171,7 +171,7 @@ def test_update_daily_background_executor_uses_configured_default_workers(
     monkeypatch.setattr(update_daily_module, "ThreadPoolExecutor", ObservingExecutor)
 
     update_daily_module.update_daily(
-        dataset="daily_k_none",
+        dataset="baostock_cn_stock_daily_bar_unadjusted",
         mode="full",
         start="2024-01-01",
         end="2024-01-31",
@@ -183,11 +183,11 @@ def test_update_daily_background_executor_uses_configured_default_workers(
     assert max_workers_seen == [4]
 
 
-def test_update_daily_waits_for_adjust_factor_before_adjusted_calculation(
+def test_update_daily_waits_for_baostock_cn_stock_adjustment_factor_before_adjusted_calculation(
     tmp_path,
     monkeypatch,
     daily_sample,
-    stock_basic_sample,
+    baostock_cn_stock_basic_sample,
 ) -> None:
     _write_settings(tmp_path)
     code = "sh.600000"
@@ -195,17 +195,17 @@ def test_update_daily_waits_for_adjust_factor_before_adjusted_calculation(
         [
             {
                 "code": code,
-                "dividOperateDate": "2024-01-02",
-                "foreAdjustFactor": 2.0,
-                "backAdjustFactor": 3.0,
-                "adjustFactor": 2.0,
+                "dividend_operate_date": "2024-01-02",
+                "forward_adjust_factor": 2.0,
+                "backward_adjust_factor": 3.0,
+                "adjustment_factor": 2.0,
             }
         ]
     )
     provider_factory, _state = _fake_provider_factory(
-        stock_basic_sample(),
+        baostock_cn_stock_basic_sample(),
         daily_sample(),
-        adjust_factor_df=factor_df,
+        baostock_cn_stock_adjustment_factor_df=factor_df,
     )
     monkeypatch.setattr(update_daily_module, "create_provider", provider_factory)
 
@@ -213,22 +213,22 @@ def test_update_daily_waits_for_adjust_factor_before_adjusted_calculation(
     release_factor_write = threading.Event()
     adjusted_calculation_started = threading.Event()
     factor_rows_seen = []
-    original_write_adjust_factor = ParquetStore.write_adjust_factor
-    original_calculate_adjusted = update_daily_worker_module.calculate_adjusted_daily_k
+    original_write_baostock_cn_stock_adjustment_factor = ParquetStore.write_baostock_cn_stock_adjustment_factor
+    original_calculate_adjusted = update_daily_worker_module.calculate_adjusted_daily_bar
 
-    def slow_write_adjust_factor(self, stock_code: str, df: pd.DataFrame):
+    def slow_write_baostock_cn_stock_adjustment_factor(self, stock_code: str, df: pd.DataFrame):
         if stock_code == code:
             factor_write_started.set()
             release_factor_write.wait(timeout=5)
-        return original_write_adjust_factor(self, stock_code, df)
+        return original_write_baostock_cn_stock_adjustment_factor(self, stock_code, df)
 
-    def observing_calculate_adjusted(unadjusted, adjust_factors, dataset, adjustflag):
+    def observing_calculate_adjusted(unadjusted, baostock_cn_stock_adjustment_factors, dataset, adjust_flag):
         adjusted_calculation_started.set()
-        factor_rows_seen.append(len(adjust_factors))
-        return original_calculate_adjusted(unadjusted, adjust_factors, dataset, adjustflag)
+        factor_rows_seen.append(len(baostock_cn_stock_adjustment_factors))
+        return original_calculate_adjusted(unadjusted, baostock_cn_stock_adjustment_factors, dataset, adjust_flag)
 
-    monkeypatch.setattr(ParquetStore, "write_adjust_factor", slow_write_adjust_factor)
-    monkeypatch.setattr(update_daily_worker_module, "calculate_adjusted_daily_k", observing_calculate_adjusted)
+    monkeypatch.setattr(ParquetStore, "write_baostock_cn_stock_adjustment_factor", slow_write_baostock_cn_stock_adjustment_factor)
+    monkeypatch.setattr(update_daily_worker_module, "calculate_adjusted_daily_bar", observing_calculate_adjusted)
 
     records = []
     errors = []
@@ -237,7 +237,7 @@ def test_update_daily_waits_for_adjust_factor_before_adjusted_calculation(
         try:
             records.extend(
                 update_daily_module.update_daily(
-                    dataset="daily_k_qfq",
+                    dataset="baostock_cn_stock_daily_bar_qfq",
                     mode="full",
                     start="2024-01-01",
                     end="2024-01-31",
@@ -260,24 +260,24 @@ def test_update_daily_waits_for_adjust_factor_before_adjusted_calculation(
 
     assert not thread.is_alive()
     assert errors == []
-    assert [item["status"] for item in records if item["dataset"] == "daily_k_qfq"] == ["success"]
+    assert [item["status"] for item in records if item["dataset"] == "baostock_cn_stock_daily_bar_qfq"] == ["success"]
     assert factor_rows_seen == [1]
-    assert ParquetStore(root=tmp_path).read_daily_k("daily_k_qfq", code).loc[0, "close"] == 16.4
+    assert ParquetStore(root=tmp_path).read_baostock_daily_bars("baostock_cn_stock_daily_bar_qfq", code).loc[0, "close"] == 16.4
 
 
 def test_update_daily_parallel_metadata_writes_do_not_drop_rows(
     tmp_path,
     monkeypatch,
     daily_sample,
-    stock_basic_sample,
+    baostock_cn_stock_basic_sample,
 ) -> None:
     _write_settings(tmp_path, metadata_flush_size=1)
     codes = tuple(f"sh.60000{index}" for index in range(8))
-    provider_factory, _state = _fake_provider_factory(stock_basic_sample(), daily_sample())
+    provider_factory, _state = _fake_provider_factory(baostock_cn_stock_basic_sample(), daily_sample())
     monkeypatch.setattr(update_daily_module, "create_provider", provider_factory)
 
     records = update_daily_module.update_daily(
-        dataset="daily_k_qfq",
+        dataset="baostock_cn_stock_daily_bar_qfq",
         mode="full",
         start="2024-01-01",
         end="2024-01-31",
@@ -287,14 +287,14 @@ def test_update_daily_parallel_metadata_writes_do_not_drop_rows(
     )
 
     store = ParquetStore(root=tmp_path)
-    update_runs = store.read_update_runs()
-    update_status = store.read_update_status()
+    pipeline_runs = store.read_pipeline_runs()
+    dataset_update_status = store.read_dataset_update_status()
     checkpoints = store.read_pipeline_checkpoints()
-    expected_pairs = {(ADJUST_FACTOR_DATASET, code) for code in codes} | {("daily_k_qfq", code) for code in codes}
+    expected_pairs = {(BAOSTOCK_CN_STOCK_ADJUSTMENT_FACTOR_DATASET, code) for code in codes} | {("baostock_cn_stock_daily_bar_qfq", code) for code in codes}
 
     assert {(item["dataset"], item["code"]) for item in records} == expected_pairs
-    assert len(update_runs.loc[update_runs["dataset"].isin({ADJUST_FACTOR_DATASET, "daily_k_qfq"})]) == 16
-    assert set(zip(update_status["dataset"].astype(str), update_status["code"].astype(str))) >= expected_pairs
+    assert len(pipeline_runs.loc[pipeline_runs["dataset"].isin({BAOSTOCK_CN_STOCK_ADJUSTMENT_FACTOR_DATASET, "baostock_cn_stock_daily_bar_qfq"})]) == 16
+    assert set(zip(dataset_update_status["dataset"].astype(str), dataset_update_status["code"].astype(str))) >= expected_pairs
     assert set(zip(checkpoints["dataset"].astype(str), checkpoints["code"].astype(str))) >= expected_pairs
 
 
@@ -302,14 +302,14 @@ def test_update_daily_full_resolves_non_trading_end_to_trading_bound(
     tmp_path,
     monkeypatch,
     daily_sample,
-    stock_basic_sample,
+    baostock_cn_stock_basic_sample,
 ) -> None:
     _write_settings(tmp_path)
-    provider_factory, state = _fake_provider_factory(stock_basic_sample(), daily_sample())
+    provider_factory, state = _fake_provider_factory(baostock_cn_stock_basic_sample(), daily_sample())
     monkeypatch.setattr(update_daily_module, "create_provider", provider_factory)
 
     update_daily_module.update_daily(
-        dataset="daily_k_qfq",
+        dataset="baostock_cn_stock_daily_bar_qfq",
         mode="full",
         start="2024-01-01",
         end="2024-01-06",
@@ -323,10 +323,10 @@ def test_update_daily_full_resolves_non_trading_end_to_trading_bound(
             "code": "sh.600000",
             "start_date": "1990-01-01",
             "end_date": "2024-01-05",
-            "adjustflag": "3",
+            "adjust_flag": "3",
         }
     ]
-    assert state["adjust_factor_params"] == [
+    assert state["baostock_cn_stock_adjustment_factor_params"] == [
         {
             "code": "sh.600000",
             "start_date": "1990-01-01",
@@ -339,14 +339,14 @@ def test_update_daily_full_checkpoint_lookup_reads_checkpoints_once_per_run(
     tmp_path,
     monkeypatch,
     daily_sample,
-    stock_basic_sample,
+    baostock_cn_stock_basic_sample,
 ) -> None:
     _write_settings(tmp_path)
-    provider_factory, state = _fake_provider_factory(stock_basic_sample(), daily_sample())
+    provider_factory, state = _fake_provider_factory(baostock_cn_stock_basic_sample(), daily_sample())
     monkeypatch.setattr(update_daily_module, "create_provider", provider_factory)
 
     update_daily_module.update_daily(
-        dataset="daily_k_qfq",
+        dataset="baostock_cn_stock_daily_bar_qfq",
         mode="full",
         start="2024-01-01",
         end="2024-01-31",
@@ -366,7 +366,7 @@ def test_update_daily_full_checkpoint_lookup_reads_checkpoints_once_per_run(
     monkeypatch.setattr(ParquetStore, "read_pipeline_checkpoints", counted_read_pipeline_checkpoints)
 
     update_daily_module.update_daily(
-        dataset="daily_k_qfq",
+        dataset="baostock_cn_stock_daily_bar_qfq",
         mode="full",
         start="2024-01-01",
         end="2024-01-31",
@@ -383,10 +383,10 @@ def test_update_daily_full_batches_daily_checkpoints_by_flush_size(
     tmp_path,
     monkeypatch,
     daily_sample,
-    stock_basic_sample,
+    baostock_cn_stock_basic_sample,
 ) -> None:
     _write_settings(tmp_path, metadata_flush_size=2)
-    provider_factory, state = _fake_provider_factory(stock_basic_sample(), daily_sample())
+    provider_factory, state = _fake_provider_factory(baostock_cn_stock_basic_sample(), daily_sample())
     monkeypatch.setattr(update_daily_module, "create_provider", provider_factory)
 
     flush_sizes = []
@@ -399,7 +399,7 @@ def test_update_daily_full_batches_daily_checkpoints_by_flush_size(
     monkeypatch.setattr(ParquetStore, "persist_update_metadata", counted_persist_update_metadata)
 
     records = update_daily_module.update_daily(
-        dataset="daily_k_qfq",
+        dataset="baostock_cn_stock_daily_bar_qfq",
         mode="full",
         start="2024-01-01",
         end="2024-01-31",
@@ -408,7 +408,7 @@ def test_update_daily_full_batches_daily_checkpoints_by_flush_size(
         build_views=False,
     )
 
-    daily_records = [item for item in records if item["dataset"] == "daily_k_qfq"]
+    daily_records = [item for item in records if item["dataset"] == "baostock_cn_stock_daily_bar_qfq"]
     assert [item["status"] for item in daily_records] == ["success", "success", "success"]
     assert state["history_calls"] == ["sh.000001", "sh.600000", "sz.000001"]
     assert sum(flush_sizes) == 6
@@ -416,4 +416,5 @@ def test_update_daily_full_batches_daily_checkpoints_by_flush_size(
 
     checkpoints = ParquetStore(root=tmp_path).read_pipeline_checkpoints()
     assert set(checkpoints["code"].astype(str)) == {"sh.000001", "sh.600000", "sz.000001"}
-    assert set(checkpoints["dataset"].astype(str)) == {ADJUST_FACTOR_DATASET, "daily_k_qfq"}
+    assert set(checkpoints["dataset"].astype(str)) == {BAOSTOCK_CN_STOCK_ADJUSTMENT_FACTOR_DATASET, "baostock_cn_stock_daily_bar_qfq"}
+

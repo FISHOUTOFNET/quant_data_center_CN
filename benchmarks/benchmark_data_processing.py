@@ -10,15 +10,15 @@ from pathlib import Path
 import pandas as pd
 import pyarrow as pa
 
-from src.pipeline.adjustments import calculate_adjusted_daily_k
-from src.storage.dataset_catalog import daily_k_definition
+from src.pipeline.adjustments import calculate_adjusted_daily_bar
+from src.storage.dataset_catalog import daily_bar_definition
 from src.storage.parquet_store import ParquetStore
 from src.utils.logging import logger
 from benchmark_utils import (
     BenchmarkEnvironment,
     BenchmarkReporter,
-    generate_daily_k_dataframe,
-    generate_adjust_factor_dataframe,
+    generate_daily_bar_dataframe,
+    generate_baostock_cn_stock_adjustment_factor_dataframe,
 )
 
 
@@ -27,10 +27,10 @@ def benchmark_clean_dataframe(
     sizes: list[int],
 ) -> dict[str, list[tuple[int, float]]]:
     results = {"clean_times": []}
-    schema = daily_k_definition("daily_k_none").schema
+    schema = daily_bar_definition("baostock_cn_stock_daily_bar_unadjusted").schema
 
     for size in sizes:
-        df = generate_daily_k_dataframe("sh.600000", "2020-01-01", "2024-12-31", rows=size)
+        df = generate_daily_bar_dataframe("sh.600000", "2020-01-01", "2024-12-31", rows=size)
 
         start = time.perf_counter()
         cleaned = store.clean_dataframe_for_schema(df, schema)
@@ -49,11 +49,11 @@ def benchmark_adjust_calculation(
     results = {"adjust_times": []}
 
     for size in sizes:
-        unadjusted = generate_daily_k_dataframe("sh.600000", "2020-01-01", "2024-12-31", rows=size)
-        factors = generate_adjust_factor_dataframe("sh.600000", "2020-01-01", "2024-12-31", num_factors=num_factors)
+        unadjusted = generate_daily_bar_dataframe("sh.600000", "2020-01-01", "2024-12-31", rows=size)
+        factors = generate_baostock_cn_stock_adjustment_factor_dataframe("sh.600000", "2020-01-01", "2024-12-31", num_factors=num_factors)
 
         start = time.perf_counter()
-        adjusted = calculate_adjusted_daily_k(unadjusted, factors, "daily_k_qfq", "2")
+        adjusted = calculate_adjusted_daily_bar(unadjusted, factors, "baostock_cn_stock_daily_bar_qfq", "2")
         elapsed = time.perf_counter() - start
 
         results["adjust_times"].append((size, elapsed))
@@ -71,8 +71,8 @@ def benchmark_merge_operations(
     results = {"merge_times": []}
 
     for size in sizes:
-        existing = generate_daily_k_dataframe("sh.600000", "2020-01-01", "2023-12-31", rows=size // 2)
-        fresh = generate_daily_k_dataframe("sh.600000", "2024-01-01", "2024-12-31", rows=size // 2)
+        existing = generate_daily_bar_dataframe("sh.600000", "2020-01-01", "2023-12-31", rows=size // 2)
+        fresh = generate_daily_bar_dataframe("sh.600000", "2024-01-01", "2024-12-31", rows=size // 2)
 
         start = time.perf_counter()
         merged = merge_daily_frames(store, existing, fresh)
@@ -90,7 +90,7 @@ def benchmark_sorting_operations(
     results = {"sort_times": []}
 
     for size in sizes:
-        df = generate_daily_k_dataframe("sh.600000", "2020-01-01", "2024-12-31", rows=size)
+        df = generate_daily_bar_dataframe("sh.600000", "2020-01-01", "2024-12-31", rows=size)
         df = df.sample(frac=1).reset_index(drop=True)
 
         start = time.perf_counter()
@@ -109,8 +109,8 @@ def benchmark_deduplication_operations(
     results = {"dedup_times": []}
 
     for size in sizes:
-        df1 = generate_daily_k_dataframe("sh.600000", "2020-01-01", "2024-12-31", rows=size)
-        df2 = generate_daily_k_dataframe("sh.600000", "2024-01-01", "2024-12-31", rows=size // 4)
+        df1 = generate_daily_bar_dataframe("sh.600000", "2020-01-01", "2024-12-31", rows=size)
+        df2 = generate_daily_bar_dataframe("sh.600000", "2024-01-01", "2024-12-31", rows=size // 4)
         df = pd.concat([df1, df2], ignore_index=True)
 
         start = time.perf_counter()
@@ -129,9 +129,9 @@ def benchmark_type_conversion(
     results = {"conversion_times": []}
 
     for size in sizes:
-        df = generate_daily_k_dataframe("sh.600000", "2020-01-01", "2024-12-31", rows=size)
+        df = generate_daily_bar_dataframe("sh.600000", "2020-01-01", "2024-12-31", rows=size)
 
-        numeric_columns = ["open", "high", "low", "close", "preclose", "volume", "amount"]
+        numeric_columns = ["open", "high", "low", "close", "prev_close", "volume", "amount"]
 
         start = time.perf_counter()
         for col in numeric_columns:
@@ -150,7 +150,7 @@ def benchmark_dataframe_copy(
     results = {"copy_times": []}
 
     for size in sizes:
-        df = generate_daily_k_dataframe("sh.600000", "2020-01-01", "2024-12-31", rows=size)
+        df = generate_daily_bar_dataframe("sh.600000", "2020-01-01", "2024-12-31", rows=size)
 
         start = time.perf_counter()
         copied = df.copy()
@@ -169,11 +169,11 @@ def benchmark_merge_asof_operations(
     results = {"merge_asof_times": []}
 
     for size in sizes:
-        daily_df = generate_daily_k_dataframe("sh.600000", "2020-01-01", "2024-12-31", rows=size)
-        factor_df = generate_adjust_factor_dataframe("sh.600000", "2020-01-01", "2024-12-31", num_factors=num_factors)
+        daily_df = generate_daily_bar_dataframe("sh.600000", "2020-01-01", "2024-12-31", rows=size)
+        factor_df = generate_baostock_cn_stock_adjustment_factor_dataframe("sh.600000", "2020-01-01", "2024-12-31", num_factors=num_factors)
 
         daily_df["_date_key"] = pd.to_datetime(daily_df["date"], errors="coerce")
-        factor_df["_factor_date"] = pd.to_datetime(factor_df["dividOperateDate"], errors="coerce")
+        factor_df["_factor_date"] = pd.to_datetime(factor_df["dividend_operate_date"], errors="coerce")
 
         daily_sorted = daily_df.dropna(subset=["_date_key"]).sort_values("_date_key")
         factor_sorted = factor_df.dropna(subset=["_factor_date"]).sort_values("_factor_date")
@@ -181,7 +181,7 @@ def benchmark_merge_asof_operations(
         start = time.perf_counter()
         merged = pd.merge_asof(
             daily_sorted,
-            factor_sorted[["_factor_date", "foreAdjustFactor"]],
+            factor_sorted[["_factor_date", "forward_adjust_factor"]],
             left_on="_date_key",
             right_on="_factor_date",
             direction="backward",

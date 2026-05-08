@@ -12,8 +12,8 @@ from src.utils.config_mgr import ConfigError, ConfigManager
 
 
 @dataclass(frozen=True)
-class DailyKRequest:
-    """Provider-neutral request for one daily K dataset/code/date window."""
+class DailyBarRequest:
+    """Provider-neutral request for one daily bar dataset/code/date window."""
 
     dataset: str
     code: str
@@ -41,17 +41,17 @@ class MarketDataProvider(Protocol):
     ) -> pd.DataFrame:
         ...
 
-    def query_stock_basic(
+    def query_baostock_cn_stock_basic(
         self,
         code: str | None = None,
         code_name: str | None = None,
     ) -> pd.DataFrame:
         ...
 
-    def query_daily_k(self, request: DailyKRequest) -> pd.DataFrame:
+    def query_daily_bars(self, request: DailyBarRequest) -> pd.DataFrame:
         ...
 
-    def query_adjust_factor(self, code: str, start_date: str, end_date: str) -> pd.DataFrame:
+    def query_baostock_cn_stock_adjustment_factor(self, code: str, start_date: str, end_date: str) -> pd.DataFrame:
         ...
 
 

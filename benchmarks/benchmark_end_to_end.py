@@ -35,7 +35,7 @@ def benchmark_first_full_update(
 
     start = time.perf_counter()
     records = update_daily(
-        dataset="daily_k_none",
+        dataset="baostock_cn_stock_daily_bar_unadjusted",
         code=codes[:10],
         end=end_date,
         lookback_days=30,
@@ -72,7 +72,7 @@ def benchmark_incremental_update(
 
     start = time.perf_counter()
     records = update_daily(
-        dataset="daily_k_none",
+        dataset="baostock_cn_stock_daily_bar_unadjusted",
         code=codes[:10],
         end=end_date,
         lookback_days=30,
@@ -101,7 +101,7 @@ def benchmark_resume_mode(
     logger.info("Running resume mode benchmark...")
 
     update_daily(
-        dataset="daily_k_none",
+        dataset="baostock_cn_stock_daily_bar_unadjusted",
         code=codes[:5],
         end=end_date,
         lookback_days=30,
@@ -116,7 +116,7 @@ def benchmark_resume_mode(
 
     start = time.perf_counter()
     records = update_daily(
-        dataset="daily_k_none",
+        dataset="baostock_cn_stock_daily_bar_unadjusted",
         code=codes[:10],
         end=end_date,
         lookback_days=30,
@@ -151,7 +151,7 @@ def benchmark_with_profiling(
 
     start = time.perf_counter()
     records = update_daily(
-        dataset="daily_k_none",
+        dataset="baostock_cn_stock_daily_bar_unadjusted",
         code=codes[:5],
         end=end_date,
         lookback_days=30,
@@ -226,7 +226,7 @@ def benchmark_large_scale(
 
     start = time.perf_counter()
     records = update_daily(
-        dataset="daily_k_none",
+        dataset="baostock_cn_stock_daily_bar_unadjusted",
         code=codes[:50],
         end=end_date,
         lookback_days=30,

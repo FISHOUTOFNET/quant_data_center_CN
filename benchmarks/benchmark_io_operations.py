@@ -14,8 +14,8 @@ from src.utils.logging import logger
 from benchmark_utils import (
     BenchmarkEnvironment,
     BenchmarkReporter,
-    generate_daily_k_dataframe,
-    generate_adjust_factor_dataframe,
+    generate_daily_bar_dataframe,
+    generate_baostock_cn_stock_adjustment_factor_dataframe,
 )
 
 
@@ -27,10 +27,10 @@ def benchmark_parquet_write(
     results = {"write_times": []}
 
     for size in sizes:
-        df = generate_daily_k_dataframe(code, "2020-01-01", "2024-12-31", rows=size)
+        df = generate_daily_bar_dataframe(code, "2020-01-01", "2024-12-31", rows=size)
 
         start = time.perf_counter()
-        store.write_daily_k("daily_k_none", code, df)
+        store.write_baostock_daily_bars("baostock_cn_stock_daily_bar_unadjusted", code, df)
         elapsed = time.perf_counter() - start
 
         results["write_times"].append((size, elapsed))
@@ -48,7 +48,7 @@ def benchmark_parquet_read(
 
     for _ in range(iterations):
         start = time.perf_counter()
-        df = store.read_daily_k("daily_k_none", code)
+        df = store.read_baostock_daily_bars("baostock_cn_stock_daily_bar_unadjusted", code)
         elapsed = time.perf_counter() - start
         times.append(elapsed)
 
@@ -64,7 +64,7 @@ def benchmark_parquet_read(
     }
 
 
-def benchmark_adjust_factor_write(
+def benchmark_baostock_cn_stock_adjustment_factor_write(
     store: ParquetStore,
     code: str,
     sizes: list[int],
@@ -72,10 +72,10 @@ def benchmark_adjust_factor_write(
     results = {"write_times": []}
 
     for size in sizes:
-        df = generate_adjust_factor_dataframe(code, "2020-01-01", "2024-12-31", num_factors=size)
+        df = generate_baostock_cn_stock_adjustment_factor_dataframe(code, "2020-01-01", "2024-12-31", num_factors=size)
 
         start = time.perf_counter()
-        store.write_adjust_factor(code, df)
+        store.write_baostock_cn_stock_adjustment_factor(code, df)
         elapsed = time.perf_counter() - start
 
         results["write_times"].append((size, elapsed))
@@ -84,7 +84,7 @@ def benchmark_adjust_factor_write(
     return results
 
 
-def benchmark_adjust_factor_read(
+def benchmark_baostock_cn_stock_adjustment_factor_read(
     store: ParquetStore,
     code: str,
     iterations: int = 100,
@@ -93,7 +93,7 @@ def benchmark_adjust_factor_read(
 
     for _ in range(iterations):
         start = time.perf_counter()
-        df = store.read_adjust_factor(code)
+        df = store.read_baostock_cn_stock_adjustment_factor(code)
         elapsed = time.perf_counter() - start
         times.append(elapsed)
 
@@ -131,7 +131,7 @@ def benchmark_metadata_operations(
         }
 
         start = time.perf_counter()
-        store.append_update_runs(pd.DataFrame([run_row]))
+        store.append_pipeline_runs(pd.DataFrame([run_row]))
         write_times.append(time.perf_counter() - start)
 
         start = time.perf_counter()
@@ -159,7 +159,7 @@ def benchmark_batch_writes(
     for batch_size in batch_sizes:
         dfs = []
         for i in range(batch_size):
-            df = generate_daily_k_dataframe(
+            df = generate_daily_bar_dataframe(
                 f"sh.{600000 + i}",
                 "2024-01-01",
                 "2024-01-31",
@@ -169,7 +169,7 @@ def benchmark_batch_writes(
 
         start = time.perf_counter()
         for i, df in enumerate(dfs):
-            store.write_daily_k("daily_k_none", f"sh.{600000 + i}", df)
+            store.write_baostock_daily_bars("baostock_cn_stock_daily_bar_unadjusted", f"sh.{600000 + i}", df)
         elapsed = time.perf_counter() - start
 
         results["batch_write_times"].append((batch_size, elapsed))
@@ -187,10 +187,10 @@ def benchmark_atomic_write_overhead(
     times = []
 
     for i in range(iterations):
-        df = generate_daily_k_dataframe(code, "2024-01-01", "2024-12-31", rows=rows)
+        df = generate_daily_bar_dataframe(code, "2024-01-01", "2024-12-31", rows=rows)
 
         start = time.perf_counter()
-        store.write_daily_k("daily_k_none", code, df)
+        store.write_baostock_daily_bars("baostock_cn_stock_daily_bar_unadjusted", code, df)
         elapsed = time.perf_counter() - start
         times.append(elapsed)
 
@@ -230,15 +230,15 @@ def run_io_benchmarks(output_dir: Path) -> None:
         reporter.add_result("parquet_read", result)
         logger.info("   Mean: {:.4f}s, Median: {:.4f}s, Throughput: {:.1f} reads/s", result["mean"], result["median"], result["throughput"])
 
-        logger.info("\n3. Benchmarking adjust_factor write performance...")
-        result = benchmark_adjust_factor_write(store, code, [10, 50, 100, 500])
-        reporter.add_result("adjust_factor_write", result)
+        logger.info("\n3. Benchmarking baostock_cn_stock_adjustment_factor write performance...")
+        result = benchmark_baostock_cn_stock_adjustment_factor_write(store, code, [10, 50, 100, 500])
+        reporter.add_result("baostock_cn_stock_adjustment_factor_write", result)
         for size, elapsed in result["write_times"]:
             logger.info("   {} factors: {:.3f}s", size, elapsed)
 
-        logger.info("\n4. Benchmarking adjust_factor read performance (100 iterations)...")
-        result = benchmark_adjust_factor_read(store, code, iterations=100)
-        reporter.add_result("adjust_factor_read", result)
+        logger.info("\n4. Benchmarking baostock_cn_stock_adjustment_factor read performance (100 iterations)...")
+        result = benchmark_baostock_cn_stock_adjustment_factor_read(store, code, iterations=100)
+        reporter.add_result("baostock_cn_stock_adjustment_factor_read", result)
         logger.info("   Mean: {:.4f}s, Median: {:.4f}s", result["mean"], result["median"])
 
         logger.info("\n5. Benchmarking metadata operations (50 iterations)...")

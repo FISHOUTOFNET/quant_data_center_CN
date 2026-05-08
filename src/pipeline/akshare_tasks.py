@@ -10,7 +10,7 @@ from src.api.akshare_client import (
 )
 from src.pipeline.akshare_universe import latest_active_akshare_codes, resolve_akshare_universe_codes
 from src.storage.dataset_catalog import (
-    STOCK_VALUE_EM_DATASET,
+    AKSHARE_VALUATION_EASTMONEY_DATASET,
     expand_akshare_selection,
 )
 from src.storage.parquet_store import ParquetStore
@@ -45,9 +45,9 @@ def plan_akshare_tasks(
     active_codes = latest_active_akshare_codes(store)
 
     for selected_dataset in selected:
-        if selected_dataset == STOCK_VALUE_EM_DATASET.name:
+        if selected_dataset == AKSHARE_VALUATION_EASTMONEY_DATASET.name:
             tasks.extend(
-                _stock_value_em_tasks(
+                _akshare_cn_stock_valuation_eastmoney_tasks(
                     config,
                     store,
                     mode,
@@ -64,7 +64,7 @@ def plan_akshare_tasks(
     return tasks
 
 
-def _stock_value_em_tasks(
+def _akshare_cn_stock_valuation_eastmoney_tasks(
     config: ConfigManager,
     store: ParquetStore,
     mode: str,
@@ -77,23 +77,23 @@ def _stock_value_em_tasks(
     elif code:
         codes = [normalize_akshare_code(item) for item in code]
     else:
-        active_only = bool(config.get("datasets.stock_value_em.active_only", True))
+        active_only = bool(config.get("datasets.akshare_cn_stock_valuation_eastmoney.active_only", True))
         codes = resolve_akshare_universe_codes(
             store,
             include_delisted=mode == "full" or include_inactive or not active_only,
-            context="stock_value_em",
+            context="akshare_cn_stock_valuation_eastmoney",
         )
 
     codes = list(dict.fromkeys(item for item in codes if item))
     if not codes:
-        raise ValueError("No AkShare stock codes found for stock_value_em")
+        raise ValueError("No AkShare stock codes found for akshare_cn_stock_valuation_eastmoney")
     tasks: list[AkShareTask] = []
     for stock_code in codes:
-        output_path = store.stock_value_em_path(stock_code)
-        start_date, end_date = _stock_value_em_date_range(store, stock_code)
+        output_path = store.akshare_cn_stock_valuation_eastmoney_path(stock_code)
+        start_date, end_date = _akshare_cn_stock_valuation_eastmoney_date_range(store, stock_code)
         tasks.append(
             AkShareTask(
-                dataset=STOCK_VALUE_EM_DATASET.name,
+                dataset=AKSHARE_VALUATION_EASTMONEY_DATASET.name,
                 key=stock_code,
                 code=stock_code,
                 start_date=start_date,
@@ -105,14 +105,14 @@ def _stock_value_em_tasks(
     return tasks
 
 
-def _stock_value_em_date_range(
+def _akshare_cn_stock_valuation_eastmoney_date_range(
     store: ParquetStore,
     code: str,
 ) -> tuple[str | None, str | None]:
-    path = store.stock_value_em_path(code)
+    path = store.akshare_cn_stock_valuation_eastmoney_path(code)
     if not path.exists():
         return None, None
-    df = store.read_stock_value_em(code)
+    df = store.read_akshare_cn_stock_valuation_eastmoney(code)
     if df.empty or "date" not in df.columns:
         return None, None
     dates = df["date"]
