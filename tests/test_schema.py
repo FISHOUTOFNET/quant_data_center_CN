@@ -3,6 +3,7 @@ from __future__ import annotations
 import pyarrow as pa
 
 from src.storage.schema import (
+    BAOSTOCK_CN_STOCK_VALUATION_PERCENTILE_SCHEMA,
     BAOSTOCK_CN_STOCK_ADJUSTMENT_FACTOR_SCHEMA,
     BAOSTOCK_CN_TRADING_CALENDAR_SCHEMA,
     DAILY_BAR_SCHEMA,
@@ -59,6 +60,40 @@ def test_baostock_cn_stock_adjustment_factor_schema_core_fields() -> None:
         "forward_adjust_factor",
         "backward_adjust_factor",
         "adjustment_factor",
+    ]
+
+
+def test_baostock_cn_stock_valuation_percentile_schema_core_fields() -> None:
+    assert BAOSTOCK_CN_STOCK_VALUATION_PERCENTILE_SCHEMA.field("date").type == pa.date32()
+    assert BAOSTOCK_CN_STOCK_VALUATION_PERCENTILE_SCHEMA.field("code").type == pa.string()
+    assert BAOSTOCK_CN_STOCK_VALUATION_PERCENTILE_SCHEMA.field("pe_ttm_percentile_1y").type == pa.float64()
+    assert BAOSTOCK_CN_STOCK_VALUATION_PERCENTILE_SCHEMA.names == [
+        "date",
+        "code",
+        "pe_ttm",
+        "pb_mrq",
+        "ps_ttm",
+        "pcf_ncf_ttm",
+        "pe_ttm_percentile_1y",
+        "pe_ttm_percentile_3y",
+        "pe_ttm_percentile_5y",
+        "pe_ttm_percentile_10y",
+        "pe_ttm_percentile_all_history",
+        "pb_mrq_percentile_1y",
+        "pb_mrq_percentile_3y",
+        "pb_mrq_percentile_5y",
+        "pb_mrq_percentile_10y",
+        "pb_mrq_percentile_all_history",
+        "ps_ttm_percentile_1y",
+        "ps_ttm_percentile_3y",
+        "ps_ttm_percentile_5y",
+        "ps_ttm_percentile_10y",
+        "ps_ttm_percentile_all_history",
+        "pcf_ncf_ttm_percentile_1y",
+        "pcf_ncf_ttm_percentile_3y",
+        "pcf_ncf_ttm_percentile_5y",
+        "pcf_ncf_ttm_percentile_10y",
+        "pcf_ncf_ttm_percentile_all_history",
     ]
 
 

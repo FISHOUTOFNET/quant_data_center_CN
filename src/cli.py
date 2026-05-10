@@ -13,6 +13,7 @@ from src.pipeline.update_akshare import update_akshare as run_update_akshare
 from src.pipeline.update_akshare_daily_bar import update_akshare_daily_bar as run_update_akshare_daily_bar
 from src.pipeline.update_akshare_spot import update_akshare_spot as run_update_akshare_spot
 from src.pipeline.update_akshare_delist import update_akshare_delist as run_update_akshare_delist
+from src.pipeline.update_baostock_valuation_percentile import update_baostock_valuation_percentile as run_update_baostock_valuation_percentile
 from src.pipeline.update_daily import update_daily as run_update_daily
 from src.registry_server import serve_registry
 from src.storage.duckdb_store import DuckDBStore
@@ -209,6 +210,35 @@ def update_akshare_daily_bar(
         end=end,
         max_tasks=max_tasks,
         workers=workers,
+        resume=resume,
+        force=force,
+        build_views=build_views,
+    )
+    for item in records:
+        click.echo(f"{item['dataset']} {item['code']} status={item['status']} rows={item['row_count']}")
+
+
+@cli.command("update-baostock-valuation-percentile")
+@click.option("--mode", type=click.Choice(["partial", "full"]), default="partial", show_default=True, help="Update mode.")
+@click.option("--code", multiple=True, help="Baostock stock code, e.g. sh.600000. Can be repeated.")
+@click.option("--start", default=None, help="Partial recompute start date, YYYY-MM-DD.")
+@click.option("--resume/--no-resume", default=True, show_default=True, help="Resume from successful checkpoints.")
+@click.option("--force", is_flag=True, help="Ignore checkpoints and recompute selected tasks.")
+@click.option("--build-duckdb-views/--no-build-duckdb-views", "build_views", default=True, show_default=True)
+def update_baostock_valuation_percentile(
+    mode: str,
+    code: tuple[str, ...],
+    start: str | None,
+    resume: bool,
+    force: bool,
+    build_views: bool,
+) -> None:
+    """Compute Baostock valuation percentile derived dataset."""
+
+    records = run_update_baostock_valuation_percentile(
+        mode=mode,
+        code=code,
+        start=start,
         resume=resume,
         force=force,
         build_views=build_views,

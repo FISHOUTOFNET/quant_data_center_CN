@@ -3,6 +3,7 @@ from __future__ import annotations
 import pytest
 
 from src.storage.dataset_catalog import (
+    BAOSTOCK_CN_STOCK_VALUATION_PERCENTILE_DATASET,
     BAOSTOCK_CN_STOCK_ADJUSTMENT_FACTOR_DATASET,
     AKSHARE_DELIST_SH_DATASET,
     AKSHARE_DELIST_SZ_DATASET,
@@ -55,6 +56,7 @@ def test_storage_layout_uses_daily_bar_catalog(tmp_path) -> None:
     for definition in daily_bar_definitions():
         assert (tmp_path / "data" / "parquet" / definition.name).is_dir()
     assert (tmp_path / "data" / "parquet" / BAOSTOCK_CN_STOCK_ADJUSTMENT_FACTOR_DATASET.name).is_dir()
+    assert (tmp_path / "data" / "parquet" / BAOSTOCK_CN_STOCK_VALUATION_PERCENTILE_DATASET.name).is_dir()
     assert (tmp_path / "data" / "parquet" / AKSHARE_VALUATION_EASTMONEY_DATASET.name).is_dir()
     for definition in akshare_a_stock_definitions():
         assert (tmp_path / "data" / "parquet" / definition.name).is_dir()
@@ -66,6 +68,7 @@ def test_duckdb_views_use_daily_bar_catalog(tmp_path) -> None:
     for definition in daily_bar_definitions():
         assert any((definition.view_name or f"v_{definition.name}") in sql for sql in sqls)
     assert any((BAOSTOCK_CN_STOCK_ADJUSTMENT_FACTOR_DATASET.view_name or "v_baostock_cn_stock_adjustment_factor") in sql for sql in sqls)
+    assert any((BAOSTOCK_CN_STOCK_VALUATION_PERCENTILE_DATASET.view_name or "v_baostock_cn_stock_valuation_percentile") in sql for sql in sqls)
     assert any((AKSHARE_VALUATION_EASTMONEY_DATASET.view_name or "v_akshare_cn_stock_valuation_eastmoney") in sql for sql in sqls)
     assert any("v_akshare_cn_stock_spot_quote_eastmoney" in sql for sql in sqls)
     assert any("v_akshare_cn_stock_daily_bar_unadjusted" in sql for sql in sqls)

@@ -58,6 +58,37 @@ BAOSTOCK_CN_STOCK_ADJUSTMENT_FACTOR_SCHEMA = pa.schema(
     ]
 )
 
+BAOSTOCK_CN_STOCK_VALUATION_PERCENTILE_SCHEMA = pa.schema(
+    [
+        pa.field("date", pa.date32()),
+        pa.field("code", pa.string()),
+        pa.field("pe_ttm", pa.float64()),
+        pa.field("pb_mrq", pa.float64()),
+        pa.field("ps_ttm", pa.float64()),
+        pa.field("pcf_ncf_ttm", pa.float64()),
+        pa.field("pe_ttm_percentile_1y", pa.float64()),
+        pa.field("pe_ttm_percentile_3y", pa.float64()),
+        pa.field("pe_ttm_percentile_5y", pa.float64()),
+        pa.field("pe_ttm_percentile_10y", pa.float64()),
+        pa.field("pe_ttm_percentile_all_history", pa.float64()),
+        pa.field("pb_mrq_percentile_1y", pa.float64()),
+        pa.field("pb_mrq_percentile_3y", pa.float64()),
+        pa.field("pb_mrq_percentile_5y", pa.float64()),
+        pa.field("pb_mrq_percentile_10y", pa.float64()),
+        pa.field("pb_mrq_percentile_all_history", pa.float64()),
+        pa.field("ps_ttm_percentile_1y", pa.float64()),
+        pa.field("ps_ttm_percentile_3y", pa.float64()),
+        pa.field("ps_ttm_percentile_5y", pa.float64()),
+        pa.field("ps_ttm_percentile_10y", pa.float64()),
+        pa.field("ps_ttm_percentile_all_history", pa.float64()),
+        pa.field("pcf_ncf_ttm_percentile_1y", pa.float64()),
+        pa.field("pcf_ncf_ttm_percentile_3y", pa.float64()),
+        pa.field("pcf_ncf_ttm_percentile_5y", pa.float64()),
+        pa.field("pcf_ncf_ttm_percentile_10y", pa.float64()),
+        pa.field("pcf_ncf_ttm_percentile_all_history", pa.float64()),
+    ]
+)
+
 AKSHARE_VALUATION_EASTMONEY_SCHEMA = pa.schema(
     [
         pa.field("date", pa.date32()),
@@ -238,6 +269,7 @@ DATASET_SCHEMAS: Mapping[str, pa.Schema] = {
     "baostock_cn_stock_basic": BAOSTOCK_CN_STOCK_BASIC_SCHEMA,
     "baostock_cn_trading_calendar": BAOSTOCK_CN_TRADING_CALENDAR_SCHEMA,
     "baostock_cn_stock_adjustment_factor": BAOSTOCK_CN_STOCK_ADJUSTMENT_FACTOR_SCHEMA,
+    "baostock_cn_stock_valuation_percentile": BAOSTOCK_CN_STOCK_VALUATION_PERCENTILE_SCHEMA,
     "akshare_cn_stock_valuation_eastmoney": AKSHARE_VALUATION_EASTMONEY_SCHEMA,
     "akshare_cn_stock_delist_sh": AKSHARE_DELIST_SH_SCHEMA,
     "akshare_cn_stock_delist_sz": AKSHARE_DELIST_SZ_SCHEMA,

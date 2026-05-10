@@ -8,6 +8,7 @@ import pandas as pd
 import pyarrow as pa
 
 from src.storage.schema import (
+    BAOSTOCK_CN_STOCK_VALUATION_PERCENTILE_SCHEMA,
     BAOSTOCK_CN_STOCK_ADJUSTMENT_FACTOR_SCHEMA,
     BAOSTOCK_CN_TRADING_CALENDAR_SCHEMA,
     DAILY_BAR_SCHEMA,
@@ -158,6 +159,21 @@ def validate_baostock_cn_stock_adjustment_factor(df: pd.DataFrame, schema: pa.Sc
     for code, group in work.groupby("code", dropna=False, sort=False):
         if not group["_divid_operate_date"].is_monotonic_increasing:
             raise ValidationError(f"dividend_operate_date is not monotonically increasing for code={code}")
+
+
+def validate_baostock_cn_stock_valuation_percentile(
+    df: pd.DataFrame,
+    schema: pa.Schema = BAOSTOCK_CN_STOCK_VALUATION_PERCENTILE_SCHEMA,
+) -> None:
+    validate_schema_matches(df, schema)
+    validate_unique_code_date(df)
+    validate_date_monotonic(df)
+    percentile_columns = [name for name in df.columns if "_percentile_" in name]
+    for column in percentile_columns:
+        values = pd.to_numeric(df[column], errors="coerce").dropna()
+        invalid = (values < 0.0) | (values > 100.0)
+        if invalid.any():
+            raise ValidationError(f"{column} percentile values must be between 0 and 100")
 
 
 def validate_akshare_cn_stock_valuation_eastmoney(df: pd.DataFrame, schema: pa.Schema = AKSHARE_VALUATION_EASTMONEY_SCHEMA) -> None:

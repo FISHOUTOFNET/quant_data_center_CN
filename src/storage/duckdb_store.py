@@ -10,6 +10,7 @@ import pyarrow as pa
 
 from src.storage.dataset_catalog import (
     BAOSTOCK_CN_STOCK_ADJUSTMENT_FACTOR_DATASET,
+    BAOSTOCK_CN_STOCK_VALUATION_PERCENTILE_DATASET,
     BAOSTOCK_CN_TRADING_CALENDAR_DATASET,
     BAOSTOCK_CN_STOCK_BASIC_DATASET,
     AKSHARE_VALUATION_EASTMONEY_DATASET,
@@ -120,6 +121,7 @@ class DuckDBStore:
                 for definition in daily_bar_definitions()
             ],
             self._baostock_cn_stock_adjustment_factor_view_sql(),
+            self._partitioned_dataset_view_sql(BAOSTOCK_CN_STOCK_VALUATION_PERCENTILE_DATASET),
             self._partitioned_dataset_view_sql(AKSHARE_VALUATION_EASTMONEY_DATASET),
             *[
                 self._partitioned_dataset_view_sql(definition)

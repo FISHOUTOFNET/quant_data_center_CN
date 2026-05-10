@@ -5,6 +5,7 @@ from datetime import datetime
 import duckdb
 import pandas as pd
 
+from src.analytics.valuation_percentile import compute_valuation_percentiles
 from src.storage.duckdb_store import DuckDBStore
 from src.storage.parquet_store import ParquetStore
 
@@ -18,6 +19,7 @@ def test_duckdb_views_can_be_created_and_queried(
     store = ParquetStore(root=tmp_path)
     store.ensure_layout()
     store.write_baostock_daily_bars("baostock_cn_stock_daily_bar_qfq", "sh.600000", daily_sample())
+    store.write_baostock_cn_stock_valuation_percentile("sh.600000", compute_valuation_percentiles(daily_sample()))
     store.write_baostock_cn_stock_adjustment_factor("sh.600000", baostock_cn_stock_adjustment_factor_sample())
     store.write_akshare_cn_stock_valuation_eastmoney("600000", akshare_cn_stock_valuation_eastmoney_sample())
     store.write_stock_spot_quote_eastmoney(
@@ -60,11 +62,13 @@ def test_duckdb_views_can_be_created_and_queried(
     sqls = duck_store.build_views()
 
     assert any("v_baostock_cn_stock_daily_bar_qfq" in sql for sql in sqls)
+    assert any("v_baostock_cn_stock_valuation_percentile" in sql for sql in sqls)
     assert any("v_baostock_cn_stock_adjustment_factor" in sql for sql in sqls)
     assert any("v_akshare_cn_stock_valuation_eastmoney" in sql for sql in sqls)
     assert any("v_akshare_cn_stock_spot_quote_eastmoney" in sql for sql in sqls)
     with duckdb.connect(str(tmp_path / "data" / "duckdb" / "quant.duckdb")) as conn:
         result = conn.execute("select count(*) from v_baostock_cn_stock_daily_bar_qfq where code='sh.600000'").fetchone()
+        percentile_result = conn.execute("select count(*) from v_baostock_cn_stock_valuation_percentile where code='sh.600000'").fetchone()
         factor_result = conn.execute("select count(*) from v_baostock_cn_stock_adjustment_factor where code='sh.600000'").fetchone()
         value_result = conn.execute("select count(*) from v_akshare_cn_stock_valuation_eastmoney where code='600000'").fetchone()
         spot_result = conn.execute("select count(*) from v_akshare_cn_stock_spot_quote_eastmoney where code='600000'").fetchone()
@@ -77,6 +81,7 @@ def test_duckdb_views_can_be_created_and_queried(
             """
         ).fetchone()
     assert result == (2,)
+    assert percentile_result == (2,)
     assert factor_result == (1,)
     assert value_result == (2,)
     assert spot_result == (1,)

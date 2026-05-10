@@ -174,6 +174,42 @@ def test_update_akshare_a_stock_cli_commands_pass_arguments(monkeypatch) -> None
     assert captured["hist"]["workers"] == 1
 
 
+def test_update_baostock_valuation_percentile_cli_passes_arguments(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_update_baostock_valuation_percentile(**kwargs):
+        captured.update(kwargs)
+        return [{"dataset": "baostock_cn_stock_valuation_percentile", "code": "sh.600000", "status": "success", "row_count": 2}]
+
+    monkeypatch.setattr(cli_module, "run_update_baostock_valuation_percentile", fake_update_baostock_valuation_percentile)
+
+    result = CliRunner().invoke(
+        cli_module.cli,
+        [
+            "update-baostock-valuation-percentile",
+            "--mode",
+            "full",
+            "--code",
+            "sh.600000",
+            "--start",
+            "2021-01-01",
+            "--no-resume",
+            "--force",
+            "--no-build-duckdb-views",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert captured == {
+        "mode": "full",
+        "code": ("sh.600000",),
+        "start": "2021-01-01",
+        "resume": False,
+        "force": True,
+        "build_views": False,
+    }
+
+
 def test_akshare_cli_rejects_non_six_digit_code_shapes() -> None:
     runner = CliRunner()
 

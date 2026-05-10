@@ -9,6 +9,7 @@ import pandas as pd
 import pyarrow as pa
 
 from src.quality.validators import (
+    validate_baostock_cn_stock_valuation_percentile,
     validate_akshare_cn_stock_daily_bar,
     validate_akshare_cn_stock_delist_sh,
     validate_akshare_cn_stock_delist_sz,
@@ -22,6 +23,7 @@ from src.quality.validators import (
     validate_daily_bar,
 )
 from src.storage.schema import (
+    BAOSTOCK_CN_STOCK_VALUATION_PERCENTILE_SCHEMA,
     AKSHARE_STOCK_INSTITUTION_HOLDING_SCHEMA,
     BAOSTOCK_CN_STOCK_ADJUSTMENT_FACTOR_SCHEMA,
     BAOSTOCK_CN_STOCK_BASIC_SCHEMA,
@@ -114,6 +116,19 @@ BAOSTOCK_CN_STOCK_ADJUSTMENT_FACTOR_DATASET = DatasetDefinition(
     schema=BAOSTOCK_CN_STOCK_ADJUSTMENT_FACTOR_SCHEMA,
     validator=validate_baostock_cn_stock_adjustment_factor,
     view_name="v_baostock_cn_stock_adjustment_factor",
+    partitioned_by_code=True,
+    partition_column="code",
+)
+
+BAOSTOCK_CN_STOCK_VALUATION_PERCENTILE_DATASET = DatasetDefinition(
+    id="baostock_cn_stock_valuation_percentile",
+    logical_name="cn_stock_valuation_percentile",
+    source="baostock",
+    endpoint=None,
+    code_format="baostock_prefixed",
+    schema=BAOSTOCK_CN_STOCK_VALUATION_PERCENTILE_SCHEMA,
+    validator=validate_baostock_cn_stock_valuation_percentile,
+    view_name="v_baostock_cn_stock_valuation_percentile",
     partitioned_by_code=True,
     partition_column="code",
 )
@@ -226,6 +241,7 @@ DATASET_CATALOG = {
         BAOSTOCK_CN_STOCK_BASIC_DATASET,
         BAOSTOCK_CN_TRADING_CALENDAR_DATASET,
         BAOSTOCK_CN_STOCK_ADJUSTMENT_FACTOR_DATASET,
+        BAOSTOCK_CN_STOCK_VALUATION_PERCENTILE_DATASET,
         AKSHARE_VALUATION_EASTMONEY_DATASET,
         AKSHARE_DELIST_SH_DATASET,
         AKSHARE_DELIST_SZ_DATASET,

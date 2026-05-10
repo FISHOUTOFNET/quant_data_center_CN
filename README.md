@@ -30,6 +30,7 @@ pytest -q
 ```powershell
 qdc update-baostock-daily
 qdc update-baostock-daily --mode full --dataset all --start 1990-01-01 --end 2024-04-26 --code sh.600000
+qdc update-baostock-valuation-percentile --mode full --code sh.600000
 qdc repair-baostock-daily --code sh.600000 --start 2024-01-01 --end 2024-04-26 --dataset baostock_cn_stock_daily_bar_hfq
 ```
 
@@ -73,6 +74,7 @@ data/
 │   ├── baostock_cn_stock_daily_bar_unadjusted/code=sh.600000/data.parquet
 │   ├── baostock_cn_stock_daily_bar_qfq/code=sh.600000/data.parquet
 │   ├── baostock_cn_stock_daily_bar_hfq/code=sh.600000/data.parquet
+│   ├── baostock_cn_stock_valuation_percentile/code=sh.600000/data.parquet
 │   ├── baostock_cn_stock_adjustment_factor/code=sh.600000/data.parquet
 │   ├── baostock_cn_stock_basic/data.parquet
 │   ├── baostock_cn_trading_calendar/data.parquet

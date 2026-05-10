@@ -17,6 +17,7 @@ import pyarrow.parquet as pq
 
 from src.storage.dataset_catalog import (
     BAOSTOCK_CN_STOCK_ADJUSTMENT_FACTOR_DATASET,
+    BAOSTOCK_CN_STOCK_VALUATION_PERCENTILE_DATASET,
     BAOSTOCK_CN_TRADING_CALENDAR_DATASET,
     BAOSTOCK_CN_STOCK_BASIC_DATASET,
     AKSHARE_DELIST_SH_DATASET,
@@ -151,6 +152,7 @@ class ParquetStore:
             *daily_bar_dirs,
             *akshare_a_stock_dirs,
             self.parquet_dir / BAOSTOCK_CN_STOCK_ADJUSTMENT_FACTOR_DATASET.name,
+            self.parquet_dir / BAOSTOCK_CN_STOCK_VALUATION_PERCENTILE_DATASET.name,
             self.parquet_dir / AKSHARE_VALUATION_EASTMONEY_DATASET.name,
             self.parquet_dir / "baostock_cn_stock_basic",
             self.parquet_dir / "baostock_cn_trading_calendar",
@@ -166,6 +168,9 @@ class ParquetStore:
 
     def baostock_cn_stock_adjustment_factor_path(self, code: str) -> Path:
         return self.parquet_dir / BAOSTOCK_CN_STOCK_ADJUSTMENT_FACTOR_DATASET.name / f"code={code}" / "data.parquet"
+
+    def baostock_cn_stock_valuation_percentile_path(self, code: str) -> Path:
+        return self.parquet_dir / BAOSTOCK_CN_STOCK_VALUATION_PERCENTILE_DATASET.name / f"code={code}" / "data.parquet"
 
     def baostock_cn_stock_basic_path(self) -> Path:
         return self.parquet_dir / "baostock_cn_stock_basic" / "data.parquet"
@@ -401,6 +406,23 @@ class ParquetStore:
         if not path.exists():
             return pd.DataFrame(columns=field_names(BAOSTOCK_CN_STOCK_ADJUSTMENT_FACTOR_DATASET.schema))
         return self.clean_dataframe_for_schema(self._safe_read_parquet(path), BAOSTOCK_CN_STOCK_ADJUSTMENT_FACTOR_DATASET.schema)
+
+    def write_baostock_cn_stock_valuation_percentile(self, code: str, df: pd.DataFrame) -> Path:
+        cleaned = self.clean_dataframe_for_schema(df, BAOSTOCK_CN_STOCK_VALUATION_PERCENTILE_DATASET.schema)
+        if not cleaned.empty:
+            self._require_partition_value(cleaned, "code", code, "Valuation percentile file code")
+            cleaned = cleaned.sort_values(["code", "date"]).reset_index(drop=True)
+        BAOSTOCK_CN_STOCK_VALUATION_PERCENTILE_DATASET.validator(cleaned)
+        destination = self.baostock_cn_stock_valuation_percentile_path(code)
+        self.atomic_write(cleaned, BAOSTOCK_CN_STOCK_VALUATION_PERCENTILE_DATASET.schema, destination)
+        self._publish_dataset_write(BAOSTOCK_CN_STOCK_VALUATION_PERCENTILE_DATASET.name, code, cleaned, destination)
+        return destination
+
+    def read_baostock_cn_stock_valuation_percentile(self, code: str) -> pd.DataFrame:
+        path = self.baostock_cn_stock_valuation_percentile_path(code)
+        if not path.exists():
+            return pd.DataFrame(columns=field_names(BAOSTOCK_CN_STOCK_VALUATION_PERCENTILE_DATASET.schema))
+        return self.clean_dataframe_for_schema(self._safe_read_parquet(path), BAOSTOCK_CN_STOCK_VALUATION_PERCENTILE_DATASET.schema)
 
     def read_baostock_cn_stock_basic(self) -> pd.DataFrame:
         path = self.baostock_cn_stock_basic_path()

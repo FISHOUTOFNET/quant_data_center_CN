@@ -6,6 +6,7 @@ from datetime import datetime
 import pandas as pd
 import pytest
 
+from src.analytics.valuation_percentile import compute_valuation_percentiles
 from src.pipeline.common import PipelineCheckpointLookup, should_skip_checkpoint
 from src.pipeline.services import PipelineMetadataBatch
 import src.storage.parquet_store as parquet_store_module
@@ -75,6 +76,19 @@ def test_baostock_cn_stock_adjustment_factor_write_and_read(tmp_path, baostock_c
     loaded = store.read_baostock_cn_stock_adjustment_factor("sh.600000")
     assert len(loaded) == 1
     assert loaded.loc[0, "forward_adjust_factor"] == 1.0
+
+
+def test_baostock_cn_stock_valuation_percentile_write_and_read(tmp_path, daily_sample) -> None:
+    store = ParquetStore(root=tmp_path)
+    store.ensure_layout()
+    frame = compute_valuation_percentiles(daily_sample())
+
+    path = store.write_baostock_cn_stock_valuation_percentile("sh.600000", frame)
+
+    assert path == tmp_path / "data" / "parquet" / "baostock_cn_stock_valuation_percentile" / "code=sh.600000" / "data.parquet"
+    loaded = store.read_baostock_cn_stock_valuation_percentile("sh.600000")
+    assert len(loaded) == 2
+    assert loaded.loc[0, "pe_ttm_percentile_all_history"] == 100.0
 
 
 def test_akshare_dataset_write_and_read(tmp_path, akshare_cn_stock_valuation_eastmoney_sample) -> None:

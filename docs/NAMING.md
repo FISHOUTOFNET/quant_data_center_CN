@@ -105,6 +105,7 @@ Baostock 字段：
 当前公开命令：
 
 - `update-baostock-daily`
+- `update-baostock-valuation-percentile`
 - `repair-baostock-daily`
 - `update-akshare-valuation`
 - `update-akshare-delist`
