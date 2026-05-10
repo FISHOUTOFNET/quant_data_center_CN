@@ -4,7 +4,6 @@ project:
 
 paths:
   data_dir: data
-  raw_dir: data/raw
   parquet_dir: data/parquet
   metadata_dir: data/metadata
   duckdb_dir: data/duckdb
@@ -71,7 +70,6 @@ datasets:
 
 pipeline:
   lookback_days: 10
-  raw_cache_days: 7
   max_retries: 3
   default_code: sh.600000
   metadata_flush_size: 200

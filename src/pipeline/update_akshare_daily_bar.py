@@ -16,14 +16,10 @@ import pandas as pd
 from src.api.akshare_client import AkShareClient, AkShareResponse
 from src.pipeline.akshare_common import (
     PIPELINE_UPDATE_AKSHARE_DAILY_BAR,
-    append_failed_manifest,
-    append_response_manifest,
     error_stack,
-    error_type,
     failed_metadata,
     persist_metadata,
     success_metadata,
-    write_raw_response,
 )
 from src.pipeline.akshare_universe import resolve_akshare_universe_codes
 from src.pipeline.common import PipelineCheckpointLookup, default_candidate_date
@@ -250,7 +246,7 @@ def update_akshare_daily_bar(
         for task in selected_tasks:
             metadata_start_count = len(metadata)
             result = _fetch_daily_bar_task(ak_client, task)
-            row = _record_daily_bar_result(store, result, mode, ak_client, metadata)
+            row = _record_daily_bar_result(store, result, mode, metadata)
             if row is not None:
                 records.append(row)
             log_daily_bar_progress(task, daily_bar_progress_row(task, row, metadata_start_count))
@@ -272,7 +268,7 @@ def update_akshare_daily_bar(
                         error=exc,
                         error_stack=traceback.format_exc(),
                     )
-                row = _record_daily_bar_result(store, result, mode, ak_client, metadata)
+                row = _record_daily_bar_result(store, result, mode, metadata)
                 if row is not None:
                     records.append(row)
                 log_daily_bar_progress(result.task, daily_bar_progress_row(result.task, row, metadata_start_count))
@@ -359,29 +355,10 @@ def _record_daily_bar_result(
     store: ParquetStore,
     result: _DailyBarFetchResult,
     mode: str,
-    client: Any,
     metadata: list[tuple[dict[str, object], dict[str, object], dict[str, object]]],
 ) -> dict[str, object] | None:
     task = result.task
     if result.error is not None:
-        append_failed_manifest(
-            store,
-            PIPELINE_UPDATE_AKSHARE_DAILY_BAR,
-            task.dataset,
-            "stock_zh_a_hist",
-            task.code,
-            {
-                "symbol": task.code,
-                "start_date": task.start_date,
-                "end_date": task.end_date,
-                "adjustment": task.adjustment,
-            },
-            client,
-            error_type(result.error),
-            str(result.error),
-            result.started_at,
-            result.ended_at,
-        )
         metadata.append(
             failed_metadata(
                 PIPELINE_UPDATE_AKSHARE_DAILY_BAR,
@@ -410,30 +387,15 @@ def _record_daily_bar_result(
                 error_stack="stock_zh_a_hist returned no response",
             ),
             mode,
-            client,
             metadata,
         )
 
     try:
-        raw_path = write_raw_response(store.root, response, result.started_at)
         if mode == "full":
             output_path = store.write_akshare_daily_bars(task.adjustment, task.code, response.data)
         else:
             output_path = store.upsert_akshare_daily_bars(task.adjustment, task.code, response.data)
         ended_at = datetime.now()
-        append_response_manifest(
-            store,
-            PIPELINE_UPDATE_AKSHARE_DAILY_BAR,
-            task.dataset,
-            task.code,
-            response,
-            raw_path,
-            "success",
-            "",
-            "",
-            result.started_at,
-            ended_at,
-        )
         row_metadata = success_metadata(
             PIPELINE_UPDATE_AKSHARE_DAILY_BAR,
             task.dataset,
@@ -450,19 +412,6 @@ def _record_daily_bar_result(
     except Exception as exc:
         ended_at = datetime.now()
         stack = error_stack(exc)
-        append_failed_manifest(
-            store,
-            PIPELINE_UPDATE_AKSHARE_DAILY_BAR,
-            task.dataset,
-            "stock_zh_a_hist",
-            task.code,
-            response.params,
-            client,
-            error_type(exc),
-            str(exc),
-            result.started_at,
-            ended_at,
-        )
         metadata.append(
             failed_metadata(
                 PIPELINE_UPDATE_AKSHARE_DAILY_BAR,

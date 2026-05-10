@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import threading
 import time
 from datetime import datetime
@@ -8,7 +7,7 @@ from datetime import datetime
 import pandas as pd
 
 import src.pipeline.update_akshare as update_akshare_module
-from src.api.akshare_client import AkShareCircuitOpen, AkShareResponse, dataframe_hash
+from src.api.akshare_client import AkShareCircuitOpen, AkShareResponse
 from src.pipeline.akshare_tasks import plan_akshare_tasks
 from src.pipeline.common import write_checkpoint
 from src.pipeline.update_akshare import _AdaptiveConcurrencyController, update_akshare
@@ -113,7 +112,7 @@ def test_update_akshare_stock_valuation_partial_active_only_resume_and_force(
     assert client.value_calls == ["600000"]
     assert [item["status"] for item in records] == ["success"]
     assert store.akshare_cn_stock_valuation_eastmoney_path("600000").exists()
-    manifest_count = len(_manifest_rows(tmp_path))
+    assert not (tmp_path / "data" / "raw").exists()
     checkpoint_count = len(store.read_pipeline_checkpoints())
 
     client.value_calls.clear()
@@ -127,8 +126,8 @@ def test_update_akshare_stock_valuation_partial_active_only_resume_and_force(
 
     assert client.value_calls == []
     assert records == []
-    assert len(_manifest_rows(tmp_path)) == manifest_count
     assert len(store.read_pipeline_checkpoints()) == checkpoint_count
+    assert not (tmp_path / "data" / "raw").exists()
 
     records = update_akshare(
         dataset="akshare_cn_stock_valuation_eastmoney",
@@ -141,15 +140,13 @@ def test_update_akshare_stock_valuation_partial_active_only_resume_and_force(
 
     assert client.value_calls == ["600000"]
     assert [item["status"] for item in records] == ["success"]
-
-    manifest_rows = _manifest_rows(tmp_path)
-    assert manifest_rows[-1]["pipeline"] == "update_akshare"
-    assert manifest_rows[-1]["dataset"] == "akshare_cn_stock_valuation_eastmoney"
-    assert manifest_rows[-1]["endpoint"] == "akshare_cn_stock_valuation_eastmoney"
-    assert manifest_rows[-1]["code"] == "600000"
-    assert manifest_rows[-1]["params"] == {"symbol": "600000"}
-    assert manifest_rows[-1]["status"] == "success"
-    assert manifest_rows[-1]["raw_path"]
+    checkpoints = store.read_pipeline_checkpoints()
+    latest = checkpoints.sort_values("updated_at").iloc[-1]
+    assert latest["pipeline"] == "update_akshare"
+    assert latest["dataset"] == "akshare_cn_stock_valuation_eastmoney"
+    assert latest["code"] == "600000"
+    assert latest["status"] == "success"
+    assert not (tmp_path / "data" / "raw").exists()
 
 
 def test_update_akshare_force_logs_stock_valuation_progress(
@@ -405,11 +402,10 @@ def test_update_akshare_stock_valuation_fetches_concurrently_but_writes_serially
         "000002": "success",
         "000003": "failed",
     }
-    manifest_rows = _manifest_rows(tmp_path)
-    assert {item["code"] for item in manifest_rows} == set(statuses)
     checkpoints = store.read_pipeline_checkpoints()
     attempted = checkpoints.loc[checkpoints["dataset"] == "akshare_cn_stock_valuation_eastmoney"]
     assert set(attempted["code"].astype(str)) == set(statuses)
+    assert not (tmp_path / "data" / "raw").exists()
 
 
 def test_adaptive_concurrency_controller_reduces_and_recovers() -> None:
@@ -472,29 +468,21 @@ def test_update_akshare_stock_valuation_stops_submitting_after_circuit_open(
     assert attempted_codes == set(client.value_calls)
     assert "000003" not in attempted_codes
     assert "000004" not in attempted_codes
-    manifest_codes = {item["code"] for item in _manifest_rows(tmp_path)}
-    assert manifest_codes == attempted_codes
     checkpoints = store.read_pipeline_checkpoints()
     checkpoint_codes = set(checkpoints["code"].astype(str))
+    assert checkpoint_codes == attempted_codes
     assert "000003" not in checkpoint_codes
     assert "000004" not in checkpoint_codes
+    assert not (tmp_path / "data" / "raw").exists()
 
 
 def _response(endpoint: str, params: dict[str, object], data: pd.DataFrame) -> AkShareResponse:
-    raw = data.copy()
     return AkShareResponse(
         endpoint=endpoint,
         params=params,
         akshare_version="fake-akshare",
-        raw_df=raw,
         data=data.copy(),
-        data_hash=dataframe_hash(raw),
     )
-
-
-def _manifest_rows(root) -> list[dict[str, object]]:
-    path = root / "data" / "raw" / "akshare" / "manifest" / "fetch_runs.jsonl"
-    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
 
 
 def _log_entries(logger: ProgressLogger, message: str) -> list[tuple[str, str, tuple[object, ...]]]:

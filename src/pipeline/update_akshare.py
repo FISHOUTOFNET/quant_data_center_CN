@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import json
-import os
 import traceback
 import uuid
 from collections import deque
@@ -20,7 +18,6 @@ from src.api.akshare_client import (
     AkShareClient,
     AkShareCircuitOpen,
     AkShareEmptyDataError,
-    AkShareError,
     AkShareNetworkError,
     AkShareResponse,
     dataframe_hash,
@@ -28,7 +25,6 @@ from src.api.akshare_client import (
 from src.pipeline.akshare_tasks import AkShareTask, plan_akshare_tasks
 from src.pipeline.common import PipelineCheckpointLookup, checkpoint_row, should_skip_checkpoint
 from src.pipeline.services import PipelineMetadataBatch
-from src.quality.validators import ValidationError
 from src.storage.dataset_catalog import AKSHARE_VALUATION_EASTMONEY_DATASET
 from src.storage.duckdb_store import DuckDBStore
 from src.storage.parquet_store import ParquetStore
@@ -436,13 +432,10 @@ def _record_fetched_task_result(
 ) -> dict[str, dict[str, object] | None]:
     task = result.task
     response = result.response
-    raw_path: Path | None = None
     if result.error is not None:
-        error_type = _error_type(result.error)
         error_message = str(result.error)
         error_stack = result.error_stack
         logger.error("AkShare task failed dataset={} key={}: {}", task.dataset, task.key, error_message)
-        _append_failed_manifest(store, client, task, error_type, error_message, result.started_at, result.ended_at)
         run_row = _run_row(
             task.dataset,
             task.key,
@@ -472,10 +465,8 @@ def _record_fetched_task_result(
     try:
         if response is None:
             raise AkShareNetworkError(f"{task.dataset} returned no response")
-        raw_path = _write_raw_response(store.root, response, result.started_at)
         output_path, row_count, last_success_date = _write_task_data(store, task, response.data)
         end_time = datetime.now()
-        _append_manifest(store, task, response, raw_path, "success", "", "", result.started_at, end_time)
         run_row = _run_row(
             task.dataset,
             task.key,
@@ -503,25 +494,7 @@ def _record_fetched_task_result(
     except Exception as exc:
         end_time = datetime.now()
         error_stack = traceback.format_exc()
-        error_type = _error_type(exc)
-        error_message = str(exc)
         logger.exception("AkShare task failed dataset={} key={}", task.dataset, task.key)
-        if response is not None:
-            if raw_path is None:
-                raw_path = _write_raw_response(store.root, response, result.started_at)
-            _append_manifest(
-                store,
-                task,
-                response,
-                raw_path,
-                "failed",
-                error_type,
-                error_message,
-                result.started_at,
-                end_time,
-            )
-        else:
-            _append_failed_manifest(store, client, task, error_type, error_message, result.started_at, end_time)
         run_row = _run_row(
             task.dataset,
             task.key,
@@ -577,9 +550,7 @@ def _ensure_response(result: object, endpoint: str, params: dict[str, object], c
         endpoint=endpoint,
         params=params,
         akshare_version=str(getattr(client, "akshare_version", "unknown")),
-        raw_df=result.copy(),
         data=result.copy(),
-        data_hash=dataframe_hash(result),
     )
 
 
@@ -615,99 +586,6 @@ def _akshare_cn_stock_valuation_eastmoney_unchanged(store: ParquetStore, code: s
     if not existing.empty:
         existing = existing.sort_values(["code", "date"]).reset_index(drop=True)
     return dataframe_hash(existing) == dataframe_hash(cleaned) and _max_date_iso(existing) == _max_date_iso(cleaned)
-
-
-def _write_raw_response(root: Path, response: AkShareResponse, started_at: datetime) -> Path:
-    directory = root / "data" / "raw" / "akshare" / response.endpoint / started_at.strftime("%Y%m%d")
-    directory.mkdir(parents=True, exist_ok=True)
-    destination = directory / f"{started_at.strftime('%H%M%S%f')}_{response.data_hash[:12]}_{uuid.uuid4().hex[:8]}.parquet"
-    tmp_path = destination.with_name(f"{destination.stem}.tmp{destination.suffix}")
-    response.raw_df.to_parquet(tmp_path, index=False)
-    os.replace(tmp_path, destination)
-    return destination
-
-
-def _append_manifest(
-    store: ParquetStore,
-    task: AkShareTask,
-    response: AkShareResponse,
-    raw_path: Path | None,
-    status: str,
-    error_type: str,
-    error_message: str,
-    started_at: datetime,
-    ended_at: datetime,
-) -> None:
-    _append_manifest_row(
-        store,
-        {
-            "pipeline": PIPELINE_UPDATE_AKSHARE,
-            "dataset": task.dataset,
-            "endpoint": response.endpoint,
-            "code": task.key,
-            "params": response.params,
-            "akshare_version": response.akshare_version,
-            "row_count": response.row_count,
-            "data_hash": response.data_hash,
-            "raw_path": str(raw_path or ""),
-            "status": status,
-            "error_type": error_type,
-            "error_message": error_message,
-            "started_at": started_at.isoformat(timespec="milliseconds"),
-            "ended_at": ended_at.isoformat(timespec="milliseconds"),
-        },
-    )
-
-
-def _append_failed_manifest(
-    store: ParquetStore,
-    client: Any,
-    task: AkShareTask,
-    error_type: str,
-    error_message: str,
-    started_at: datetime,
-    ended_at: datetime,
-) -> None:
-    _append_manifest_row(
-        store,
-        {
-            "pipeline": PIPELINE_UPDATE_AKSHARE,
-            "dataset": task.dataset,
-            "endpoint": task.dataset,
-            "code": task.key,
-            "params": _task_params(task),
-            "akshare_version": str(getattr(client, "akshare_version", "unknown")),
-            "row_count": 0,
-            "data_hash": "",
-            "raw_path": "",
-            "status": "failed",
-            "error_type": error_type,
-            "error_message": error_message,
-            "started_at": started_at.isoformat(timespec="milliseconds"),
-            "ended_at": ended_at.isoformat(timespec="milliseconds"),
-        },
-    )
-
-
-def _append_manifest_row(store: ParquetStore, row: dict[str, object]) -> None:
-    path = store.akshare_manifest_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a", encoding="utf-8") as fh:
-        fh.write(json.dumps(row, ensure_ascii=False, default=str) + "\n")
-
-
-def _task_params(task: AkShareTask) -> dict[str, object]:
-    if task.dataset == AKSHARE_VALUATION_EASTMONEY_DATASET.name and task.code is not None:
-        return {"symbol": task.code}
-    return {}
-
-
-def _error_type(exc: Exception) -> str:
-    if isinstance(exc, AkShareError):
-        return exc.error_type
-    if isinstance(exc, (ValidationError, ValueError)):
-        return "schema_drift"
-    return "unknown"
 
 
 def _max_date_iso(df: pd.DataFrame) -> str | None:

@@ -192,7 +192,6 @@ class BenchmarkEnvironment:
             "project": {"name": "quant_data_center", "timezone": "Asia/Shanghai"},
             "paths": {
                 "data_dir": "data",
-                "raw_dir": "data/raw",
                 "parquet_dir": "data/parquet",
                 "metadata_dir": "data/metadata",
                 "duckdb_dir": "data/duckdb",
@@ -220,7 +219,6 @@ class BenchmarkEnvironment:
             },
             "pipeline": {
                 "lookback_days": 30,
-                "raw_cache_days": 7,
                 "max_retries": 3,
                 "default_code": "sh.600000",
                 "metadata_flush_size": 200,

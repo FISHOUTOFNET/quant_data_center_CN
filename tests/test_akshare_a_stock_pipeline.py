@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 from datetime import datetime
 
 import pandas as pd
@@ -9,7 +8,7 @@ import pytest
 import src.pipeline.update_akshare_delist as update_akshare_delist_module
 import src.pipeline.update_akshare_daily_bar as update_akshare_daily_bar_module
 import src.pipeline.update_akshare_spot as update_akshare_spot_module
-from src.api.akshare_client import AkShareResponse, dataframe_hash
+from src.api.akshare_client import AkShareResponse
 from src.pipeline.update_akshare_daily_bar import update_akshare_daily_bar
 from src.pipeline.update_akshare_spot import update_akshare_spot
 from src.pipeline.update_akshare_delist import update_akshare_delist
@@ -165,10 +164,11 @@ def test_update_akshare_delist_writes_manual_delist_snapshot(tmp_path) -> None:
     assert [item["status"] for item in records] == ["success", "success"]
     assert loaded.loc[0, "code"] == "600001"
     assert loaded_sz.loc[0, "code"] == "000001"
-    assert {item["dataset"] for item in _manifest_rows(tmp_path)} == {
+    assert {item["dataset"] for item in records} == {
         "akshare_cn_stock_delist_sh",
         "akshare_cn_stock_delist_sz",
     }
+    assert not (tmp_path / "data" / "raw").exists()
 
 
 def test_update_akshare_spot_success_writes_snapshot_and_hist_spot_quote_close(tmp_path) -> None:
@@ -537,14 +537,11 @@ def test_update_akshare_daily_bar_incremental_overrides_spot_and_full_writes_adj
 
 
 def _response(endpoint: str, params: dict[str, object], data: pd.DataFrame) -> AkShareResponse:
-    raw = data.copy()
     return AkShareResponse(
         endpoint=endpoint,
         params=params,
         akshare_version="fake-a-stock",
-        raw_df=raw,
         data=data.copy(),
-        data_hash=dataframe_hash(raw),
     )
 
 
@@ -605,11 +602,6 @@ def _daily_bar_row(
         "quality_status": quality_status,
         "fetched_at": datetime(2024, 1, 3, 16, 0),
     }
-
-
-def _manifest_rows(root) -> list[dict[str, object]]:
-    path = root / "data" / "raw" / "akshare" / "manifest" / "fetch_runs.jsonl"
-    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
 
 
 def _log_entries(logger: FakeLogger, message: str) -> list[tuple[str, str, tuple[object, ...]]]:

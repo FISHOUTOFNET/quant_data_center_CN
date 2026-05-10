@@ -25,7 +25,7 @@ Accepted
 - DuckDB 视图使用 `v_<dataset_id>`。
 - Schema 字段统一 `snake_case`。
 - Python 和 CLI 使用业务语义：`daily_bar`、`valuation`、`spot_quote`、`adjustment`。
-- `source_endpoint` 保留外部接口原名，例如 `stock_zh_a_hist`，仅用于 raw manifest、熔断配置和追溯。
+- `source_endpoint` 保留外部接口原名，例如 `stock_zh_a_hist`，仅用于熔断配置、追溯和数据来源标记。
 - 股票代码源内自洽：Baostock 保持 `sh.600000`，AkShare 保持 `600000`。
 - `stock_institute_hold` 迁移为 `akshare_cn_stock_institution_holding`，生命周期标记为 `legacy_unmanaged`。
 - 旧 dataset id、旧 DuckDB 视图和旧 CLI 命令不保留 alias。
@@ -42,7 +42,7 @@ Accepted
 
 - 已有下游查询、定时任务和手工脚本需要改名。
 - 旧 Parquet 目录和 DuckDB 元数据必须通过 `scripts/migrate_naming_v1.py` 迁移。
-- 静态扫描需要允许 `source_endpoint`、raw manifest 和迁移映射保留源接口名。
+- 静态扫描需要允许 `source_endpoint` 和迁移映射保留源接口名。
 
 ## Follow-ups
 

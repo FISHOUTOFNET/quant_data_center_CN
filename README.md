@@ -81,9 +81,6 @@ data/
 │   ├── akshare_cn_stock_spot_quote_eastmoney/trade_date=YYYY-MM-DD/data.parquet
 │   ├── akshare_cn_stock_spot_quote_sina/trade_date=YYYY-MM-DD/data.parquet
 │   └── akshare_cn_stock_daily_bar_unadjusted/code=600000/data.parquet
-├── raw/akshare/
-│   ├── <endpoint>/YYYYMMDD/*.parquet
-│   └── manifest/fetch_runs.jsonl
 └── duckdb/quant.duckdb
 ```
 
@@ -168,12 +165,6 @@ Get-Content logs\qdc.log -Tail 50
 Select-String -Path logs\qdc.log -Pattern "ERROR|WARNING"
 ```
 
-查看 AkShare 调用记录：
-
-```powershell
-Get-Content data\raw\akshare\manifest\fetch_runs.jsonl -Tail 10
-```
-
 查询任务状态：
 
 ```python
@@ -202,4 +193,3 @@ tests/            # 单元与管道测试
 config/           # settings.yaml
 scripts/          # Windows 定时任务脚本
 ```
-

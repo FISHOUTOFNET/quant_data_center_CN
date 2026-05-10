@@ -12,14 +12,10 @@ import pandas as pd
 from src.api.akshare_client import AkShareClient
 from src.pipeline.akshare_common import (
     PIPELINE_UPDATE_AKSHARE_DELIST,
-    append_failed_manifest,
-    append_response_manifest,
     error_stack,
-    error_type,
     failed_metadata,
     persist_metadata,
     success_metadata,
-    write_raw_response,
 )
 from src.pipeline.common import should_skip_checkpoint
 from src.storage.dataset_catalog import AKSHARE_DELIST_SH_DATASET, AKSHARE_DELIST_SZ_DATASET
@@ -34,7 +30,6 @@ EXCHANGE_CONFIG = {
         "fetch_method": "fetch_akshare_cn_stock_delist_sh",
         "write_method": "write_akshare_cn_stock_delist_sh",
         "path_method": "akshare_cn_stock_delist_sh_path",
-        "endpoint": "akshare_cn_stock_delist_sh",
         "default_symbol": "全部",
     },
     "sz": {
@@ -42,7 +37,6 @@ EXCHANGE_CONFIG = {
         "fetch_method": "fetch_akshare_cn_stock_delist_sz",
         "write_method": "write_akshare_cn_stock_delist_sz",
         "path_method": "akshare_cn_stock_delist_sz_path",
-        "endpoint": "akshare_cn_stock_delist_sz",
         "default_symbol": "终止上市公司",
     },
 }
@@ -178,23 +172,9 @@ def _fetch_exchange_delist(
     try:
         fetch_method = getattr(ak_client, config["fetch_method"])
         response = fetch_method(symbol=resolved_symbol, snapshot_date=snapshot_date)
-        raw_path = write_raw_response(store.root, response, started_at)
         write_method = getattr(store, config["write_method"])
         output_path = write_method(snapshot_date, response.data)
         ended_at = datetime.now()
-        append_response_manifest(
-            store,
-            PIPELINE_UPDATE_AKSHARE_DELIST,
-            dataset,
-            resolved_symbol,
-            response,
-            raw_path,
-            "success",
-            "",
-            "",
-            started_at,
-            ended_at,
-        )
         metadata.append(
             success_metadata(
                 PIPELINE_UPDATE_AKSHARE_DELIST,
@@ -211,19 +191,6 @@ def _fetch_exchange_delist(
     except Exception as exc:
         ended_at = datetime.now()
         stack = error_stack(exc)
-        append_failed_manifest(
-            store,
-            PIPELINE_UPDATE_AKSHARE_DELIST,
-            dataset,
-            config["endpoint"],
-            resolved_symbol,
-            {"symbol": resolved_symbol, "snapshot_date": snapshot_date},
-            ak_client,
-            error_type(exc),
-            str(exc),
-            started_at,
-            ended_at,
-        )
         metadata.append(
             failed_metadata(
                 PIPELINE_UPDATE_AKSHARE_DELIST,

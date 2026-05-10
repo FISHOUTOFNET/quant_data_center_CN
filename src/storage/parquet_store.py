@@ -156,9 +156,6 @@ class ParquetStore:
             self.parquet_dir / "baostock_cn_trading_calendar",
             self.metadata_dir,
             self.root / "data" / "duckdb",
-            self.root / "data" / "raw",
-            self.root / "data" / "raw" / "akshare",
-            self.root / "data" / "raw" / "akshare" / "manifest",
             self.root / "logs",
         ]:
             directory.mkdir(parents=True, exist_ok=True)
@@ -196,9 +193,6 @@ class ParquetStore:
         dataset = akshare_daily_bar_dataset_id(adjustment)
         stock_code = _akshare_partition_code(code)
         return self.parquet_dir / dataset / f"code={stock_code}" / "data.parquet"
-
-    def akshare_manifest_path(self) -> Path:
-        return self.root / "data" / "raw" / "akshare" / "manifest" / "fetch_runs.jsonl"
 
     def metadata_path(self, name: str) -> Path:
         return self.metadata_dir / f"{name}.parquet"

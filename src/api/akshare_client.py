@@ -58,9 +58,7 @@ class AkShareResponse:
     endpoint: str
     params: dict[str, object]
     akshare_version: str
-    raw_df: pd.DataFrame
     data: pd.DataFrame
-    data_hash: str
 
     @property
     def row_count(self) -> int:
@@ -368,32 +366,28 @@ class AkShareClient:
         for attempt in range(1, attempts + 1):
             self._sleep_jitter(runtime)
             try:
-                raw_df = _as_dataframe(caller())
-                normalized = normalizer(raw_df)
+                source_df = _as_dataframe(caller())
+                normalized = normalizer(source_df)
                 self._record_success(endpoint)
                 return AkShareResponse(
                     endpoint=endpoint,
                     params=params,
                     akshare_version=self._akshare_version(),
-                    raw_df=raw_df,
                     data=normalized,
-                    data_hash=dataframe_hash(raw_df),
                 )
             except (AkShareSchemaDriftError, AkShareEmptyDataError):
                 self._record_failure(endpoint, runtime)
                 raise
             except TypeError as exc:
                 if "'NoneType' object is not subscriptable" in str(exc):
-                    raw_df = pd.DataFrame()
-                    normalized = normalizer(raw_df)
+                    source_df = pd.DataFrame()
+                    normalized = normalizer(source_df)
                     self._record_success(endpoint)
                     return AkShareResponse(
                         endpoint=endpoint,
                         params=params,
                         akshare_version=self._akshare_version(),
-                        raw_df=raw_df,
                         data=normalized,
-                        data_hash=dataframe_hash(raw_df),
                     )
                 last_error = AkShareNetworkError(f"{endpoint} failed on attempt {attempt}/{attempts}: {exc}")
                 if attempt < attempts:
@@ -423,26 +417,26 @@ class AkShareClient:
             raise last_error
         raise AkShareNetworkError(f"{endpoint} failed without a captured error")
 
-    def _normalize_akshare_cn_stock_valuation_eastmoney(self, raw_df: pd.DataFrame, source_code: str) -> pd.DataFrame:
-        raw_df = _standardize_columns(raw_df)
-        if raw_df.empty:
+    def _normalize_akshare_cn_stock_valuation_eastmoney(self, source_df: pd.DataFrame, source_code: str) -> pd.DataFrame:
+        source_df = _standardize_columns(source_df)
+        if source_df.empty:
             return pd.DataFrame(columns=field_names(AKSHARE_VALUATION_EASTMONEY_SCHEMA))
-        selected = _select_required_columns(raw_df, STOCK_VALUATION_FIELD_ALIASES, "akshare_cn_stock_valuation_eastmoney")
+        selected = _select_required_columns(source_df, STOCK_VALUATION_FIELD_ALIASES, "akshare_cn_stock_valuation_eastmoney")
         selected.insert(1, "code", source_code)
         return selected[field_names(AKSHARE_VALUATION_EASTMONEY_SCHEMA)].reset_index(drop=True)
 
     def _normalize_akshare_cn_stock_delist_sh(
         self,
-        raw_df: pd.DataFrame,
+        source_df: pd.DataFrame,
         market: str,
         snapshot_date: str,
         fetched_at: datetime,
     ) -> pd.DataFrame:
-        raw_df = _standardize_columns(raw_df)
+        source_df = _standardize_columns(source_df)
         columns = field_names(AKSHARE_DELIST_SH_SCHEMA)
-        if raw_df.empty:
+        if source_df.empty:
             return pd.DataFrame(columns=columns)
-        selected = _select_required_columns(raw_df, AKSHARE_DELIST_SH_FIELD_ALIASES, "akshare_cn_stock_delist_sh")
+        selected = _select_required_columns(source_df, AKSHARE_DELIST_SH_FIELD_ALIASES, "akshare_cn_stock_delist_sh")
         selected["snapshot_date"] = snapshot_date
         selected["exchange"] = "sh"
         selected["market"] = market
@@ -456,16 +450,16 @@ class AkShareClient:
 
     def _normalize_akshare_cn_stock_delist_sz(
         self,
-        raw_df: pd.DataFrame,
+        source_df: pd.DataFrame,
         market: str,
         snapshot_date: str,
         fetched_at: datetime,
     ) -> pd.DataFrame:
-        raw_df = _standardize_columns(raw_df)
+        source_df = _standardize_columns(source_df)
         columns = field_names(AKSHARE_DELIST_SZ_SCHEMA)
-        if raw_df.empty:
+        if source_df.empty:
             return pd.DataFrame(columns=columns)
-        selected = _select_required_columns(raw_df, AKSHARE_DELIST_SZ_FIELD_ALIASES, "akshare_cn_stock_delist_sz")
+        selected = _select_required_columns(source_df, AKSHARE_DELIST_SZ_FIELD_ALIASES, "akshare_cn_stock_delist_sz")
         selected["snapshot_date"] = snapshot_date
         selected["exchange"] = "sz"
         selected["market"] = market
@@ -479,14 +473,14 @@ class AkShareClient:
 
     def _normalize_spot_quote_eastmoney(
         self,
-        raw_df: pd.DataFrame,
+        source_df: pd.DataFrame,
         trade_date: str,
         fetched_at: datetime,
     ) -> pd.DataFrame:
-        raw_df = _standardize_columns(raw_df)
-        if raw_df.empty:
+        source_df = _standardize_columns(source_df)
+        if source_df.empty:
             raise AkShareEmptyDataError("akshare_cn_stock_spot_quote_eastmoney returned empty data")
-        selected = _select_required_columns(raw_df, AKSHARE_SPOT_QUOTE_EASTMONEY_FIELD_ALIASES, "akshare_cn_stock_spot_quote_eastmoney")
+        selected = _select_required_columns(source_df, AKSHARE_SPOT_QUOTE_EASTMONEY_FIELD_ALIASES, "akshare_cn_stock_spot_quote_eastmoney")
         selected["trade_date"] = trade_date
         selected["source_symbol"] = selected["source_symbol"].map(_clean_source_symbol)
         selected["code"] = selected["source_symbol"].map(
@@ -517,15 +511,15 @@ class AkShareClient:
 
     def _normalize_spot_quote_sina(
         self,
-        raw_df: pd.DataFrame,
+        source_df: pd.DataFrame,
         trade_date: str,
         fallback_reason: str,
         fetched_at: datetime,
     ) -> pd.DataFrame:
-        raw_df = _standardize_columns(raw_df)
-        if raw_df.empty:
+        source_df = _standardize_columns(source_df)
+        if source_df.empty:
             raise AkShareEmptyDataError("stock_zh_a_spot returned empty data")
-        selected = _select_required_columns(raw_df, AKSHARE_SPOT_QUOTE_SINA_FIELD_ALIASES, "stock_zh_a_spot")
+        selected = _select_required_columns(source_df, AKSHARE_SPOT_QUOTE_SINA_FIELD_ALIASES, "stock_zh_a_spot")
         selected["trade_date"] = trade_date
         selected["source_symbol"] = selected["source_symbol"].map(_clean_source_symbol)
         selected["code"] = selected["source_symbol"].map(
@@ -554,17 +548,17 @@ class AkShareClient:
 
     def _normalize_daily_bars(
         self,
-        raw_df: pd.DataFrame,
+        source_df: pd.DataFrame,
         stock_code: str,
         source_symbol: str,
         adjustment: str,
         fetched_at: datetime,
     ) -> pd.DataFrame:
-        raw_df = _standardize_columns(raw_df)
+        source_df = _standardize_columns(source_df)
         columns = field_names(AKSHARE_DAILY_BAR_SCHEMA)
-        if raw_df.empty:
+        if source_df.empty:
             return pd.DataFrame(columns=columns)
-        selected = _select_required_columns(raw_df, AKSHARE_DAILY_BAR_FIELD_ALIASES, "stock_zh_a_hist")
+        selected = _select_required_columns(source_df, AKSHARE_DAILY_BAR_FIELD_ALIASES, "stock_zh_a_hist")
         selected["source_symbol"] = selected["source_symbol"].map(_clean_source_symbol)
         selected.loc[selected["source_symbol"].astype("string").str.strip() == "", "source_symbol"] = source_symbol
         selected["code"] = selected["source_symbol"].map(

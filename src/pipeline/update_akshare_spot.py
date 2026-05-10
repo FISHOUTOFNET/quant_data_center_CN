@@ -14,14 +14,10 @@ from src.api.akshare_client import AkShareClient
 from src.pipeline.akshare_universe import normalize_akshare_code_list
 from src.pipeline.akshare_common import (
     PIPELINE_UPDATE_AKSHARE_SPOT,
-    append_failed_manifest,
-    append_response_manifest,
     error_stack,
-    error_type,
     failed_metadata,
     persist_metadata,
     success_metadata,
-    write_raw_response,
 )
 from src.pipeline.common import (
     default_candidate_date,
@@ -130,19 +126,6 @@ def update_akshare_spot(
     except Exception as exc:
         ended_at = datetime.now()
         stack = error_stack(exc)
-        append_failed_manifest(
-            store,
-            PIPELINE_UPDATE_AKSHARE_SPOT,
-            dataset,
-            "stock_zh_a_spot_em",
-            "*",
-            {"trade_date": trade_date},
-            ak_client,
-            error_type(exc),
-            str(exc),
-            started_at,
-            ended_at,
-        )
         metadata.append(
             failed_metadata(
                 PIPELINE_UPDATE_AKSHARE_SPOT,
@@ -164,9 +147,7 @@ def update_akshare_spot(
         if len(metadata) > fallback_metadata_start:
             log_spot_progress(2, 2, metadata[fallback_metadata_start][0])
     else:
-        raw_path: Path | None = None
         try:
-            raw_path = write_raw_response(store.root, response, started_at)
             output_path = store.write_stock_spot_quote_eastmoney(trade_date, response.data)
             daily_bar_rows = _drop_delisted_daily_bar_rows(store, spot_em_to_daily_bar_unadjusted(response.data))
             update_daily_bar_from_spot = bool(config.get("datasets.akshare_cn_stock_spot_quote.update_daily_bar_from_spot", True))
@@ -176,19 +157,6 @@ def update_akshare_spot(
                 else store.parquet_dir / akshare_daily_bar_dataset_id("unadjusted")
             )
             ended_at = datetime.now()
-            append_response_manifest(
-                store,
-                PIPELINE_UPDATE_AKSHARE_SPOT,
-                dataset,
-                "*",
-                response,
-                raw_path,
-                "success",
-                "",
-                "",
-                started_at,
-                ended_at,
-            )
             metadata.append(
                 success_metadata(
                     PIPELINE_UPDATE_AKSHARE_SPOT,
@@ -221,19 +189,6 @@ def update_akshare_spot(
         except Exception as exc:
             ended_at = datetime.now()
             stack = error_stack(exc)
-            append_response_manifest(
-                store,
-                PIPELINE_UPDATE_AKSHARE_SPOT,
-                dataset,
-                "*",
-                response,
-                raw_path,
-                "failed",
-                error_type(exc),
-                str(exc),
-                started_at,
-                ended_at,
-            )
             metadata.append(
                 failed_metadata(
                     PIPELINE_UPDATE_AKSHARE_SPOT,
@@ -354,7 +309,6 @@ def _run_sina_fallback(
             trade_date=trade_date,
             fallback_reason=fallback_reason,
         )
-        raw_path = write_raw_response(store.root, response, started_at)
         output_path = store.write_stock_spot_quote_sina(trade_date, response.data)
         daily_bar_rows = spot_sina_to_daily_bar_unadjusted(response.data)
         daily_bar_output_path = (
@@ -363,19 +317,6 @@ def _run_sina_fallback(
             else store.parquet_dir / akshare_daily_bar_dataset_id("unadjusted")
         )
         ended_at = datetime.now()
-        append_response_manifest(
-            store,
-            PIPELINE_UPDATE_AKSHARE_SPOT,
-            dataset,
-            "*",
-            response,
-            raw_path,
-            "success",
-            "",
-            "",
-            started_at,
-            ended_at,
-        )
         metadata.append(
             success_metadata(
                 PIPELINE_UPDATE_AKSHARE_SPOT,
@@ -407,19 +348,6 @@ def _run_sina_fallback(
     except Exception as exc:
         ended_at = datetime.now()
         stack = error_stack(exc)
-        append_failed_manifest(
-            store,
-            PIPELINE_UPDATE_AKSHARE_SPOT,
-            dataset,
-            "stock_zh_a_spot",
-            "*",
-            {"trade_date": trade_date, "fallback_reason": fallback_reason},
-            client,
-            error_type(exc),
-            str(exc),
-            started_at,
-            ended_at,
-        )
         metadata.append(
             failed_metadata(
                 PIPELINE_UPDATE_AKSHARE_SPOT,

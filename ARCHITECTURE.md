@@ -117,14 +117,7 @@ data/parquet/
 
 `--resume` 默认开启，只有 checkpoint 成功且目标文件仍存在时才跳过。`--force` 会忽略 checkpoint 重新执行。
 
-AkShare 原始响应归档到：
-
-```text
-data/raw/akshare/<endpoint>/YYYYMMDD/*.parquet
-data/raw/akshare/manifest/fetch_runs.jsonl
-```
-
-Manifest 记录 endpoint、参数、版本、行数、数据哈希、原始文件路径、状态和错误信息。
+AkShare pipeline 只保存规范化后的 Parquet 数据和统一运行元数据，不再归档原始响应文件。
 
 ## DuckDB 视图
 

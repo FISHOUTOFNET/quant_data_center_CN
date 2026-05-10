@@ -22,7 +22,6 @@ def project_root() -> Path:
 ROOT = project_root()
 CONFIG_DIR = ROOT / "config"
 DATA_DIR = ROOT / "data"
-RAW_DIR = DATA_DIR / "raw"
 PARQUET_DIR = DATA_DIR / "parquet"
 METADATA_DIR = DATA_DIR / "metadata"
 DUCKDB_DIR = DATA_DIR / "duckdb"

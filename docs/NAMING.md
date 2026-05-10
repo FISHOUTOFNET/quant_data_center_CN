@@ -26,7 +26,7 @@
 
 ## Source Endpoint
 
-`source_endpoint` 保留外部接口原名，用于追溯、熔断和 raw manifest：
+`source_endpoint` 保留外部接口原名，用于追溯、熔断和数据来源标记：
 
 - AkShare 估值：`stock_value_em`
 - AkShare spot：`stock_zh_a_spot_em`、`stock_zh_a_spot`
@@ -124,7 +124,7 @@ Baostock 字段：
 - `spot` 在业务对象中写作 `spot_quote`
 - `adjust` 参数写作 `adjustment`
 
-保留源接口原名只允许出现在 adapter 调用、`source_endpoint`、raw manifest 和命名迁移映射中。
+保留源接口原名只允许出现在 adapter 调用、`source_endpoint` 和命名迁移映射中。
 
 ## Migration
 

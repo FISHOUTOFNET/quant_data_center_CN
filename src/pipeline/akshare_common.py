@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import json
-import os
 import traceback
 import uuid
 from datetime import datetime
@@ -12,100 +10,14 @@ from typing import Any
 
 import pandas as pd
 
-from src.api.akshare_client import AkShareError, AkShareResponse, dataframe_hash
+from src.api.akshare_client import AkShareResponse
 from src.pipeline.common import checkpoint_row
-from src.quality.validators import ValidationError
 from src.storage.parquet_store import ParquetStore
 
 
 PIPELINE_UPDATE_AKSHARE_DELIST = "update_akshare_delist"
 PIPELINE_UPDATE_AKSHARE_SPOT = "update_akshare_spot"
 PIPELINE_UPDATE_AKSHARE_DAILY_BAR = "update_akshare_daily_bar"
-
-
-def write_raw_response(root: Path, response: AkShareResponse, started_at: datetime) -> Path:
-    directory = root / "data" / "raw" / "akshare" / response.endpoint / started_at.strftime("%Y%m%d")
-    directory.mkdir(parents=True, exist_ok=True)
-    destination = directory / f"{started_at.strftime('%H%M%S%f')}_{response.data_hash[:12]}_{uuid.uuid4().hex[:8]}.parquet"
-    tmp_path = destination.with_name(f"{destination.stem}.tmp{destination.suffix}")
-    response.raw_df.to_parquet(tmp_path, index=False)
-    os.replace(tmp_path, destination)
-    return destination
-
-
-def append_response_manifest(
-    store: ParquetStore,
-    pipeline: str,
-    dataset: str,
-    code: str,
-    response: AkShareResponse,
-    raw_path: Path | None,
-    status: str,
-    error_type: str,
-    error_message: str,
-    started_at: datetime,
-    ended_at: datetime,
-) -> None:
-    append_manifest_row(
-        store,
-        {
-            "pipeline": pipeline,
-            "dataset": dataset,
-            "endpoint": response.endpoint,
-            "code": code,
-            "params": response.params,
-            "akshare_version": response.akshare_version,
-            "row_count": response.row_count,
-            "data_hash": response.data_hash,
-            "raw_path": str(raw_path or ""),
-            "status": status,
-            "error_type": error_type,
-            "error_message": error_message,
-            "started_at": started_at.isoformat(timespec="milliseconds"),
-            "ended_at": ended_at.isoformat(timespec="milliseconds"),
-        },
-    )
-
-
-def append_failed_manifest(
-    store: ParquetStore,
-    pipeline: str,
-    dataset: str,
-    endpoint: str,
-    code: str,
-    params: dict[str, object],
-    client: Any,
-    error_type: str,
-    error_message: str,
-    started_at: datetime,
-    ended_at: datetime,
-) -> None:
-    append_manifest_row(
-        store,
-        {
-            "pipeline": pipeline,
-            "dataset": dataset,
-            "endpoint": endpoint,
-            "code": code,
-            "params": params,
-            "akshare_version": client_akshare_version(client),
-            "row_count": 0,
-            "data_hash": "",
-            "raw_path": "",
-            "status": "failed",
-            "error_type": error_type,
-            "error_message": error_message,
-            "started_at": started_at.isoformat(timespec="milliseconds"),
-            "ended_at": ended_at.isoformat(timespec="milliseconds"),
-        },
-    )
-
-
-def append_manifest_row(store: ParquetStore, row: dict[str, object]) -> None:
-    path = store.akshare_manifest_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a", encoding="utf-8") as fh:
-        fh.write(json.dumps(row, ensure_ascii=False, default=str) + "\n")
 
 
 def client_akshare_version(client: Any) -> str:
@@ -127,9 +39,7 @@ def ensure_response(result: object, endpoint: str, params: dict[str, object], cl
         endpoint=endpoint,
         params=params,
         akshare_version=client_akshare_version(client),
-        raw_df=result.copy(),
         data=result.copy(),
-        data_hash=dataframe_hash(result),
     )
 
 
@@ -224,14 +134,6 @@ def persist_metadata(
     checkpoint_rows = [item[2] for item in metadata]
     store.persist_update_metadata(run_rows, status_rows, checkpoint_rows)
     return run_rows
-
-
-def error_type(exc: Exception) -> str:
-    if isinstance(exc, AkShareError):
-        return exc.error_type
-    if isinstance(exc, (ValidationError, ValueError)):
-        return "schema_drift"
-    return "unknown"
 
 
 def error_stack(exc: Exception) -> str:
