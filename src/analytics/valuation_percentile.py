@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-from bisect import bisect_left, bisect_right, insort
+from bisect import bisect_left, bisect_right
 from collections import deque
 from collections.abc import Iterable
-from dataclasses import dataclass
 from math import isfinite
 
+import numpy as np
 import pandas as pd
 
 
@@ -16,22 +16,27 @@ ROLLING_WINDOWS = (("1y", 1), ("3y", 3), ("5y", 5), ("10y", 10))
 ALL_HISTORY_WINDOW = "all_history"
 
 
-@dataclass
-class _WindowState:
-    years: int
-    values: list[float]
-    rows: deque[tuple[pd.Timestamp, float]]
+class _FenwickTree:
+    """Count values by compressed rank with O(log n) updates and prefix sums."""
 
-    def add(self, row_date: pd.Timestamp, value: float) -> None:
-        self.rows.append((row_date, value))
-        insort(self.values, value)
+    def __init__(self, size: int) -> None:
+        self._tree = [0] * (size + 1)
+        self.total = 0
 
-    def expire_before(self, cutoff: pd.Timestamp) -> None:
-        while self.rows and self.rows[0][0] < cutoff:
-            _, value = self.rows.popleft()
-            index = bisect_left(self.values, value)
-            if index < len(self.values):
-                self.values.pop(index)
+    def add(self, rank: int, delta: int) -> None:
+        self.total += delta
+        index = rank + 1
+        while index < len(self._tree):
+            self._tree[index] += delta
+            index += index & -index
+
+    def prefix_count(self, rank_count: int) -> int:
+        total = 0
+        index = rank_count
+        while index > 0:
+            total += self._tree[index]
+            index -= index & -index
+        return total
 
 
 def valuation_percentile(current_value: object, history_values: Iterable[object]) -> float | None:
@@ -103,41 +108,106 @@ def _compute_field_percentiles(
     result: pd.DataFrame,
     field: str,
 ) -> None:
-    valid_dates = dates.loc[values.notna()]
-    first_valid_date = valid_dates.min() if not valid_dates.empty else None
-    all_history_values: list[float] = []
-    rolling_states = {
-        window: _WindowState(years=years, values=[], rows=deque())
+    row_count = len(values)
+    outputs = {window: np.full(row_count, np.nan, dtype="float64") for window, _ in ROLLING_WINDOWS}
+    outputs[ALL_HISTORY_WINDOW] = np.full(row_count, np.nan, dtype="float64")
+
+    date_values = dates.to_numpy(dtype="datetime64[ns]")
+    numeric_values = values.to_numpy(dtype="float64", na_value=np.nan)
+    valid_mask = ~pd.isna(date_values) & ~np.isnan(numeric_values)
+    if not bool(valid_mask.any()):
+        _assign_field_outputs(result, field, outputs)
+        return
+
+    unique_values = np.array(sorted(set(float(value) for value in numeric_values[valid_mask])), dtype="float64")
+    value_ranks = {float(value): rank for rank, value in enumerate(unique_values)}
+    zero_left_rank = int(np.searchsorted(unique_values, 0.0, side="left"))
+    zero_right_rank = int(np.searchsorted(unique_values, 0.0, side="right"))
+    compressed_size = len(unique_values)
+
+    date_ordinals = date_values.astype("int64")
+    date_series = pd.Series(dates, copy=False)
+    cutoff_ordinals = {
+        window: (date_series - pd.DateOffset(years=years)).to_numpy(dtype="datetime64[ns]").astype("int64")
         for window, years in ROLLING_WINDOWS
     }
+    first_valid_ordinal = np.datetime64(dates.loc[valid_mask].min()).astype("datetime64[ns]").astype("int64")
 
-    for index, row_date in dates.items():
-        current = values.loc[index]
-        current_value = None if pd.isna(current) else float(current)
-        if pd.isna(row_date) or current_value is None:
-            _assign_empty_percentiles(result, index, field)
+    all_history = _FenwickTree(compressed_size)
+    rolling_states = {
+        window: (_FenwickTree(compressed_size), deque())
+        for window, _ in ROLLING_WINDOWS
+    }
+
+    for index in range(row_count):
+        if not valid_mask[index]:
             continue
 
-        insort(all_history_values, current_value)
-        for window, state in rolling_states.items():
-            state.add(row_date, current_value)
-            cutoff = row_date - pd.DateOffset(years=state.years)
-            state.expire_before(cutoff)
-            if first_valid_date is not None and first_valid_date <= cutoff:
-                result.loc[index, percentile_column(field, window)] = _percentile_from_sorted(current_value, state.values)
-            else:
-                result.loc[index, percentile_column(field, window)] = pd.NA
+        current_value = float(numeric_values[index])
+        current_rank = value_ranks[current_value]
+        all_history.add(current_rank, 1)
+        for window, _ in ROLLING_WINDOWS:
+            state, rows = rolling_states[window]
+            state.add(current_rank, 1)
+            rows.append((index, current_rank))
+            cutoff_ordinal = cutoff_ordinals[window][index]
+            while rows and date_ordinals[rows[0][0]] < cutoff_ordinal:
+                _, expired_rank = rows.popleft()
+                state.add(expired_rank, -1)
+            if first_valid_ordinal <= cutoff_ordinal:
+                outputs[window][index] = _percentile_from_counts(
+                    current_value,
+                    current_rank,
+                    state,
+                    zero_left_rank,
+                    zero_right_rank,
+                )
 
-        result.loc[index, percentile_column(field, ALL_HISTORY_WINDOW)] = _percentile_from_sorted(
+        outputs[ALL_HISTORY_WINDOW][index] = _percentile_from_counts(
             current_value,
-            all_history_values,
+            current_rank,
+            all_history,
+            zero_left_rank,
+            zero_right_rank,
         )
+
+    _assign_field_outputs(result, field, outputs)
 
 
 def _assign_empty_percentiles(result: pd.DataFrame, index: int, field: str) -> None:
     for window, _ in ROLLING_WINDOWS:
         result.loc[index, percentile_column(field, window)] = pd.NA
     result.loc[index, percentile_column(field, ALL_HISTORY_WINDOW)] = pd.NA
+
+
+def _assign_field_outputs(result: pd.DataFrame, field: str, outputs: dict[str, np.ndarray]) -> None:
+    for window, _ in ROLLING_WINDOWS:
+        result[percentile_column(field, window)] = outputs[window]
+    result[percentile_column(field, ALL_HISTORY_WINDOW)] = outputs[ALL_HISTORY_WINDOW]
+
+
+def _percentile_from_counts(
+    current_value: float,
+    current_rank: int,
+    counts: _FenwickTree,
+    zero_left_rank: int,
+    zero_right_rank: int,
+) -> float:
+    total = counts.total
+    if total <= 0:
+        return float("nan")
+    negative_count = counts.prefix_count(zero_left_rank)
+    if negative_count and current_value > 0:
+        positive_count = total - counts.prefix_count(zero_right_rank)
+        if positive_count == 0:
+            return float("nan")
+        less_equal_positive = counts.prefix_count(current_rank + 1) - counts.prefix_count(zero_right_rank)
+        return less_equal_positive / positive_count * 100.0
+    if current_value < 0:
+        positive_count = total - counts.prefix_count(zero_right_rank)
+        negative_greater_equal = negative_count - counts.prefix_count(current_rank)
+        return (positive_count + negative_greater_equal) / total * 100.0
+    return counts.prefix_count(current_rank + 1) / total * 100.0
 
 
 def _percentile_from_sorted(current_value: float, sorted_values: list[float]) -> float | None:

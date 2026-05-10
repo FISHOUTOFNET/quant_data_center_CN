@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
+
 import pandas as pd
 import pytest
 
+import src.pipeline.update_baostock_valuation_percentile as valuation_update_module
 from src.pipeline.update_baostock_valuation_percentile import update_baostock_valuation_percentile
 from src.storage.parquet_store import ParquetStore
 from update_daily_fakes import _write_settings
@@ -121,6 +124,88 @@ def test_update_baostock_valuation_percentile_explicit_code_limits_outputs(tmp_p
 
     assert store.baostock_cn_stock_valuation_percentile_path("sh.600000").exists()
     assert not store.baostock_cn_stock_valuation_percentile_path("sz.000001").exists()
+
+
+def test_update_baostock_valuation_percentile_workers_compute_in_parallel_and_write_serially(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    _write_settings(tmp_path)
+    store = ParquetStore(root=tmp_path)
+    store.ensure_layout()
+    store.write_baostock_daily_bars("baostock_cn_stock_daily_bar_unadjusted", "sh.600000", _source_daily([("2024-01-02", 5.0)], code="sh.600000"))
+    store.write_baostock_daily_bars("baostock_cn_stock_daily_bar_unadjusted", "sz.000001", _source_daily([("2024-01-02", 6.0)], code="sz.000001"))
+    max_workers_seen: list[int | None] = []
+    submitted_codes: list[str] = []
+    write_codes: list[str] = []
+    original_write = ParquetStore.write_baostock_cn_stock_valuation_percentile
+
+    class ObservingExecutor:
+        def __init__(self, max_workers: int | None = None, **kwargs) -> None:
+            del kwargs
+            max_workers_seen.append(max_workers)
+            self._executor = ThreadPoolExecutor(max_workers=max_workers)
+
+        def __enter__(self):
+            self._executor.__enter__()
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return self._executor.__exit__(exc_type, exc, tb)
+
+        def submit(self, fn, task):
+            submitted_codes.append(task.code)
+            return self._executor.submit(fn, task)
+
+    def observing_write(self, code: str, df: pd.DataFrame):
+        write_codes.append(code)
+        return original_write(self, code, df)
+
+    monkeypatch.setattr(valuation_update_module, "ProcessPoolExecutor", ObservingExecutor, raising=False)
+    monkeypatch.setattr(ParquetStore, "write_baostock_cn_stock_valuation_percentile", observing_write)
+
+    records = update_baostock_valuation_percentile(
+        mode="full",
+        root=tmp_path,
+        build_views=False,
+        workers=2,
+    )
+
+    assert max_workers_seen == [2]
+    assert sorted(submitted_codes) == ["sh.600000", "sz.000001"]
+    assert sorted(write_codes) == ["sh.600000", "sz.000001"]
+    assert sorted((item["code"], item["status"]) for item in records) == [
+        ("sh.600000", "success"),
+        ("sz.000001", "success"),
+    ]
+    assert store.baostock_cn_stock_valuation_percentile_path("sh.600000").exists()
+    assert store.baostock_cn_stock_valuation_percentile_path("sz.000001").exists()
+
+
+def test_update_baostock_valuation_percentile_records_write_failure_and_continues(tmp_path, monkeypatch) -> None:
+    _write_settings(tmp_path)
+    store = ParquetStore(root=tmp_path)
+    store.ensure_layout()
+    store.write_baostock_daily_bars("baostock_cn_stock_daily_bar_unadjusted", "sh.600000", _source_daily([("2024-01-02", 5.0)]))
+
+    def failing_write(self, code: str, df: pd.DataFrame):
+        raise PermissionError(f"locked {code}")
+
+    monkeypatch.setattr(ParquetStore, "write_baostock_cn_stock_valuation_percentile", failing_write)
+
+    records = update_baostock_valuation_percentile(
+        mode="full",
+        code=("sh.600000",),
+        root=tmp_path,
+        build_views=False,
+    )
+
+    assert [(item["code"], item["status"], item["row_count"]) for item in records] == [("sh.600000", "failed", 0)]
+    assert "PermissionError" in str(records[0]["error_stack"])
+    checkpoints = store.read_pipeline_checkpoints()
+    latest = checkpoints.sort_values("updated_at").iloc[-1]
+    assert latest["status"] == "failed"
+    assert "PermissionError" in str(latest["error_stack"])
 
 
 def _source_daily(rows: list[tuple[str, float]], code: str = "sh.600000") -> pd.DataFrame:

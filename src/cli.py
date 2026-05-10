@@ -222,6 +222,7 @@ def update_akshare_daily_bar(
 @click.option("--mode", type=click.Choice(["partial", "full"]), default="partial", show_default=True, help="Update mode.")
 @click.option("--code", multiple=True, help="Baostock stock code, e.g. sh.600000. Can be repeated.")
 @click.option("--start", default=None, help="Partial recompute start date, YYYY-MM-DD.")
+@click.option("--workers", type=int, default=None, help="Concurrent compute workers. Defaults to pipeline.baostock_valuation_percentile_workers.")
 @click.option("--resume/--no-resume", default=True, show_default=True, help="Resume from successful checkpoints.")
 @click.option("--force", is_flag=True, help="Ignore checkpoints and recompute selected tasks.")
 @click.option("--build-duckdb-views/--no-build-duckdb-views", "build_views", default=True, show_default=True)
@@ -229,6 +230,7 @@ def update_baostock_valuation_percentile(
     mode: str,
     code: tuple[str, ...],
     start: str | None,
+    workers: int | None,
     resume: bool,
     force: bool,
     build_views: bool,
@@ -239,6 +241,7 @@ def update_baostock_valuation_percentile(
         mode=mode,
         code=code,
         start=start,
+        workers=workers,
         resume=resume,
         force=force,
         build_views=build_views,

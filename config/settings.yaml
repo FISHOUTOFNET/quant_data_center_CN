@@ -74,6 +74,7 @@ pipeline:
   default_code: sh.600000
   metadata_flush_size: 200
   background_workers: 4
+  baostock_valuation_percentile_workers: 4
 
 storage:
   duckdb_file: data/duckdb/quant.duckdb

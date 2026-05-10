@@ -8,6 +8,7 @@ version = "0.1.0"
 description = "Windows local low-frequency quant data center built on Baostock, Parquet, and DuckDB."
 requires-python = ">=3.10"
 dependencies = [
+    "numpy",
     "pandas",
     "pyarrow",
     "duckdb",

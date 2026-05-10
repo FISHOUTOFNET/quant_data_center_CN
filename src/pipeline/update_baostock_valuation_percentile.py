@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import traceback
+from concurrent.futures import ProcessPoolExecutor, as_completed
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -22,6 +24,26 @@ from src.utils.logging import logger
 PIPELINE_UPDATE_BAOSTOCK_VALUATION_PERCENTILE = "update_baostock_valuation_percentile"
 
 
+@dataclass(frozen=True)
+class _ValuationPercentileTask:
+    root: Path
+    code: str
+    mode: str
+    replace_start: str | None
+    checkpoint_start: str
+    source_end: str
+    output_path: Path
+
+
+@dataclass(frozen=True)
+class _ValuationPercentileResult:
+    task: _ValuationPercentileTask
+    started_at: datetime
+    ended_at: datetime
+    computed: pd.DataFrame | None = None
+    error_stack: str = ""
+
+
 def update_baostock_valuation_percentile(
     mode: str = "partial",
     code: tuple[str, ...] | list[str] | str | None = None,
@@ -30,6 +52,7 @@ def update_baostock_valuation_percentile(
     build_views: bool = True,
     resume: bool = True,
     force: bool = False,
+    workers: int | None = None,
 ) -> list[dict[str, object]]:
     """Compute local Baostock valuation percentiles from unadjusted daily bars."""
 
@@ -46,91 +69,80 @@ def update_baostock_valuation_percentile(
     success_count = 0
 
     codes = _resolve_source_codes(store, code)
+    resolved_workers = _resolve_workers(config, workers)
     logger.info(
-        "Baostock valuation percentile update started mode={} force={} resume={} codes={}",
+        "Baostock valuation percentile update started mode={} force={} resume={} workers={} codes={}",
         mode,
         force,
         resume,
+        resolved_workers,
         len(codes),
     )
 
+    tasks: list[_ValuationPercentileTask] = []
     for stock_code in codes:
-        start_time = datetime.now()
         output_path = store.baostock_cn_stock_valuation_percentile_path(stock_code)
-        try:
-            source = store.read_baostock_daily_bars(UNADJUSTED_DAILY_DATASET, stock_code)
-            if source.empty:
-                logger.warning("Skip valuation percentile for {} because source daily bars are missing", stock_code)
-                continue
+        source_bounds = _source_date_bounds(store, stock_code)
+        if source_bounds is None:
+            continue
+        source_start, source_end = source_bounds
+        replace_start = _replace_start(store, stock_code, mode, start)
+        checkpoint_start = replace_start or source_start
 
-            source_dates = pd.to_datetime(source["date"], errors="coerce").dropna()
-            if source_dates.empty:
-                logger.warning("Skip valuation percentile for {} because source daily bar dates are invalid", stock_code)
-                continue
-            source_start = source_dates.min().date().isoformat()
-            source_end = source_dates.max().date().isoformat()
-            replace_start = _replace_start(store, stock_code, mode, start)
-            checkpoint_start = replace_start or source_start
+        if _should_skip(
+            store,
+            dataset,
+            stock_code,
+            checkpoint_start,
+            source_end,
+            output_path,
+            resume,
+            force,
+        ):
+            continue
 
-            if _should_skip(
-                store,
-                dataset,
-                stock_code,
-                checkpoint_start,
-                source_end,
-                output_path,
-                resume,
-                force,
-            ):
-                continue
-
-            computed = compute_valuation_percentiles(source, start=replace_start)
-            if mode == "partial" and replace_start is not None:
-                existing = store.read_baostock_cn_stock_valuation_percentile(stock_code)
-                final = _replace_from_start(existing, computed, replace_start)
-            else:
-                final = computed
-
-            if final.empty:
-                continue
-
-            path = store.write_baostock_cn_stock_valuation_percentile(stock_code, final)
-            row_count = len(final)
-            run_row = _run_row(dataset, stock_code, "success", checkpoint_start, source_end, start_time, datetime.now(), row_count, "")
-            status_row = _status_row(dataset, stock_code, source_end, row_count, "success", "")
-            checkpoint = checkpoint_row(
-                PIPELINE_UPDATE_BAOSTOCK_VALUATION_PERCENTILE,
-                dataset,
-                stock_code,
-                checkpoint_start,
-                source_end,
-                "success",
-                row_count,
-                path,
+        tasks.append(
+            _ValuationPercentileTask(
+                root=config.root,
+                code=stock_code,
+                mode=mode,
+                replace_start=replace_start,
+                checkpoint_start=checkpoint_start,
+                source_end=source_end,
+                output_path=output_path,
             )
-            run_records.append(run_row)
-            status_rows.append(status_row)
-            checkpoint_rows.append(checkpoint)
+        )
+
+    def record_result(result: _ValuationPercentileResult) -> None:
+        nonlocal success_count
+        if _record_valuation_result(
+            store,
+            result,
+            dataset,
+            run_records,
+            status_rows,
+            checkpoint_rows,
+        ):
             success_count += 1
-        except Exception:
-            error_stack = traceback.format_exc()
-            logger.exception("Baostock valuation percentile failed for {}", stock_code)
-            run_row = _run_row(dataset, stock_code, "failed", start or "", "", start_time, datetime.now(), 0, error_stack)
-            status_row = _status_row(dataset, stock_code, None, 0, "failed", error_stack)
-            checkpoint = checkpoint_row(
-                PIPELINE_UPDATE_BAOSTOCK_VALUATION_PERCENTILE,
-                dataset,
-                stock_code,
-                start or "",
-                "",
-                "failed",
-                0,
-                output_path,
-                error_stack,
-            )
-            run_records.append(run_row)
-            status_rows.append(status_row)
-            checkpoint_rows.append(checkpoint)
+
+    if resolved_workers == 1 or len(tasks) <= 1:
+        for task in tasks:
+            record_result(_compute_valuation_percentile_task(task))
+    else:
+        with ProcessPoolExecutor(max_workers=resolved_workers) as executor:
+            futures = {executor.submit(_compute_valuation_percentile_task, task): task for task in tasks}
+            for future in as_completed(futures):
+                task = futures[future]
+                try:
+                    result = future.result()
+                except Exception:
+                    result = _ValuationPercentileResult(
+                        task=task,
+                        started_at=datetime.now(),
+                        ended_at=datetime.now(),
+                        error_stack=traceback.format_exc(),
+                    )
+                record_result(result)
 
     if run_records or status_rows or checkpoint_rows:
         store.persist_update_metadata(run_records, status_rows, checkpoint_rows)
@@ -144,6 +156,144 @@ def update_baostock_valuation_percentile(
         success_count,
     )
     return run_records
+
+
+def _compute_valuation_percentile_task(task: _ValuationPercentileTask) -> _ValuationPercentileResult:
+    started_at = datetime.now()
+    store = ParquetStore(root=task.root)
+    try:
+        source = store.read_baostock_daily_bars(UNADJUSTED_DAILY_DATASET, task.code)
+        if source.empty:
+            raise ValueError(f"Source daily bars are missing for {task.code}")
+        computed = compute_valuation_percentiles(source, start=task.replace_start)
+        return _ValuationPercentileResult(
+            task=task,
+            started_at=started_at,
+            ended_at=datetime.now(),
+            computed=computed,
+        )
+    except Exception:
+        return _ValuationPercentileResult(
+            task=task,
+            started_at=started_at,
+            ended_at=datetime.now(),
+            error_stack=traceback.format_exc(),
+        )
+    finally:
+        store.close()
+
+
+def _record_valuation_result(
+    store: ParquetStore,
+    result: _ValuationPercentileResult,
+    dataset: str,
+    run_records: list[dict[str, object]],
+    status_rows: list[dict[str, object]],
+    checkpoint_rows: list[dict[str, object]],
+) -> bool:
+    task = result.task
+    if result.error_stack or result.computed is None:
+        _append_failed_metadata(
+            dataset,
+            task,
+            result.started_at,
+            result.ended_at,
+            result.error_stack,
+            run_records,
+            status_rows,
+            checkpoint_rows,
+        )
+        return False
+
+    try:
+        if task.mode == "partial" and task.replace_start is not None:
+            existing = store.read_baostock_cn_stock_valuation_percentile(task.code)
+            final = _replace_from_start(existing, result.computed, task.replace_start)
+        else:
+            final = result.computed
+
+        if final.empty:
+            return False
+
+        path = store.write_baostock_cn_stock_valuation_percentile(task.code, final)
+        row_count = len(final)
+        run_row = _run_row(
+            dataset,
+            task.code,
+            "success",
+            task.checkpoint_start,
+            task.source_end,
+            result.started_at,
+            datetime.now(),
+            row_count,
+            "",
+        )
+        status_row = _status_row(dataset, task.code, task.source_end, row_count, "success", "")
+        checkpoint = checkpoint_row(
+            PIPELINE_UPDATE_BAOSTOCK_VALUATION_PERCENTILE,
+            dataset,
+            task.code,
+            task.checkpoint_start,
+            task.source_end,
+            "success",
+            row_count,
+            path,
+        )
+        run_records.append(run_row)
+        status_rows.append(status_row)
+        checkpoint_rows.append(checkpoint)
+        return True
+    except Exception:
+        _append_failed_metadata(
+            dataset,
+            task,
+            result.started_at,
+            datetime.now(),
+            traceback.format_exc(),
+            run_records,
+            status_rows,
+            checkpoint_rows,
+        )
+        return False
+
+
+def _append_failed_metadata(
+    dataset: str,
+    task: _ValuationPercentileTask,
+    started_at: datetime,
+    ended_at: datetime,
+    error_stack: str,
+    run_records: list[dict[str, object]],
+    status_rows: list[dict[str, object]],
+    checkpoint_rows: list[dict[str, object]],
+) -> None:
+    logger.error("Baostock valuation percentile failed for {}", task.code)
+    run_row = _run_row(
+        dataset,
+        task.code,
+        "failed",
+        task.checkpoint_start,
+        task.source_end,
+        started_at,
+        ended_at,
+        0,
+        error_stack,
+    )
+    status_row = _status_row(dataset, task.code, None, 0, "failed", error_stack)
+    checkpoint = checkpoint_row(
+        PIPELINE_UPDATE_BAOSTOCK_VALUATION_PERCENTILE,
+        dataset,
+        task.code,
+        task.checkpoint_start,
+        task.source_end,
+        "failed",
+        0,
+        task.output_path,
+        error_stack,
+    )
+    run_records.append(run_row)
+    status_rows.append(status_row)
+    checkpoint_rows.append(checkpoint)
 
 
 def _resolve_source_codes(store: ParquetStore, code: tuple[str, ...] | list[str] | str | None) -> list[str]:
@@ -160,6 +310,26 @@ def _resolve_source_codes(store: ParquetStore, code: tuple[str, ...] | list[str]
         for item in dataset_dir.iterdir()
         if item.is_dir() and item.name.startswith(prefix) and (item / "data.parquet").exists()
     )
+
+
+def _source_date_bounds(store: ParquetStore, code: str) -> tuple[str, str] | None:
+    path = store.baostock_daily_bar_path(UNADJUSTED_DAILY_DATASET, code)
+    if not path.exists():
+        logger.warning("Skip valuation percentile for {} because source daily bars are missing", code)
+        return None
+    source_dates = pd.to_datetime(pd.read_parquet(path, columns=["date"])["date"], errors="coerce").dropna()
+    if source_dates.empty:
+        logger.warning("Skip valuation percentile for {} because source daily bar dates are invalid", code)
+        return None
+    return source_dates.min().date().isoformat(), source_dates.max().date().isoformat()
+
+
+def _resolve_workers(config: ConfigManager, workers: int | None) -> int:
+    raw_workers = workers if workers is not None else config.get("pipeline.baostock_valuation_percentile_workers", 1)
+    try:
+        return max(int(raw_workers), 1)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"Invalid Baostock valuation percentile workers value: {raw_workers!r}") from exc
 
 
 def _replace_start(store: ParquetStore, code: str, mode: str, start: str | None) -> str | None:
