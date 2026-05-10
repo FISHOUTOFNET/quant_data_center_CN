@@ -33,6 +33,7 @@ from src.storage.dataset_catalog import (
 )
 from src.storage.schema import field_names
 from src.storage.metadata_store import DuckDBMetadataStore
+from src.storage.data_registry import DataRegistry
 from src.utils import paths
 from src.utils.logging import logger
 
@@ -161,6 +162,7 @@ class ParquetStore:
             self.root / "logs",
         ]:
             directory.mkdir(parents=True, exist_ok=True)
+        (self.root / "data" / "registry").mkdir(parents=True, exist_ok=True)
 
     def baostock_daily_bar_path(self, dataset: str, code: str) -> Path:
         return self.parquet_dir / dataset / f"code={code}" / "data.parquet"
@@ -368,6 +370,7 @@ class ParquetStore:
         definition.validator(cleaned)
         destination = self.baostock_daily_bar_path(dataset, code)
         self.atomic_write(cleaned, definition.schema, destination)
+        self._publish_dataset_write(dataset, code, cleaned, destination)
         logger.info(
             "Daily Parquet stored dataset={} code={} rows={} path={}",
             dataset,
@@ -388,6 +391,7 @@ class ParquetStore:
         cleaned = self.clean_baostock_cn_stock_adjustment_factor_frame(code, df)
         destination = self.baostock_cn_stock_adjustment_factor_path(code)
         self.atomic_write(cleaned, BAOSTOCK_CN_STOCK_ADJUSTMENT_FACTOR_DATASET.schema, destination)
+        self._publish_dataset_write(BAOSTOCK_CN_STOCK_ADJUSTMENT_FACTOR_DATASET.name, code, cleaned, destination)
         return destination
 
     def clean_baostock_cn_stock_adjustment_factor_frame(self, code: str, df: pd.DataFrame) -> pd.DataFrame:
@@ -439,6 +443,7 @@ class ParquetStore:
                 shutil.rmtree(old_partition, ignore_errors=True)
                 logger.info("Removed old baostock_cn_stock_basic partition: {}", old_partition)
         self.atomic_write(cleaned, BAOSTOCK_CN_STOCK_BASIC_DATASET.schema, destination)
+        self._publish_dataset_write(BAOSTOCK_CN_STOCK_BASIC_DATASET.name, "*", cleaned, destination)
         return destination
 
     def write_baostock_cn_trading_calendar(self, df: pd.DataFrame) -> Path:
@@ -452,6 +457,7 @@ class ParquetStore:
         cleaned = cleaned.sort_values(["calendar_date"]).reset_index(drop=True) if not cleaned.empty else cleaned
         BAOSTOCK_CN_TRADING_CALENDAR_DATASET.validator(cleaned)
         self.atomic_write(cleaned, BAOSTOCK_CN_TRADING_CALENDAR_DATASET.schema, destination)
+        self._publish_dataset_write(BAOSTOCK_CN_TRADING_CALENDAR_DATASET.name, "*", cleaned, destination)
         return destination
 
     def read_baostock_cn_trading_calendar(self) -> pd.DataFrame:
@@ -469,6 +475,7 @@ class ParquetStore:
         AKSHARE_VALUATION_EASTMONEY_DATASET.validator(cleaned)
         destination = self.akshare_cn_stock_valuation_eastmoney_path(code)
         self.atomic_write(cleaned, AKSHARE_VALUATION_EASTMONEY_DATASET.schema, destination)
+        self._publish_dataset_write(AKSHARE_VALUATION_EASTMONEY_DATASET.name, code, cleaned, destination)
         logger.info(
             "AkShare Parquet stored dataset={} code={} rows={} path={}",
             AKSHARE_VALUATION_EASTMONEY_DATASET.name,
@@ -493,6 +500,7 @@ class ParquetStore:
         AKSHARE_DELIST_SH_DATASET.validator(cleaned)
         destination = self.akshare_cn_stock_delist_sh_path(snapshot_date)
         self.atomic_write(cleaned, AKSHARE_DELIST_SH_DATASET.schema, destination)
+        self._publish_dataset_write(AKSHARE_DELIST_SH_DATASET.name, "*", cleaned, destination)
         return destination
 
     def read_akshare_cn_stock_delist_sh(self, snapshot_date: str) -> pd.DataFrame:
@@ -515,6 +523,7 @@ class ParquetStore:
         AKSHARE_DELIST_SZ_DATASET.validator(cleaned)
         destination = self.akshare_cn_stock_delist_sz_path(snapshot_date)
         self.atomic_write(cleaned, AKSHARE_DELIST_SZ_DATASET.schema, destination)
+        self._publish_dataset_write(AKSHARE_DELIST_SZ_DATASET.name, "*", cleaned, destination)
         return destination
 
     def read_akshare_cn_stock_delist_sz(self, snapshot_date: str) -> pd.DataFrame:
@@ -537,6 +546,7 @@ class ParquetStore:
         AKSHARE_SPOT_QUOTE_EASTMONEY_DATASET.validator(cleaned)
         destination = self.akshare_cn_stock_spot_quote_eastmoney_path(trade_date)
         self.atomic_write(cleaned, AKSHARE_SPOT_QUOTE_EASTMONEY_DATASET.schema, destination)
+        self._publish_dataset_write(AKSHARE_SPOT_QUOTE_EASTMONEY_DATASET.name, "*", cleaned, destination)
         return destination
 
     def read_stock_spot_quote_eastmoney(self, trade_date: str) -> pd.DataFrame:
@@ -559,6 +569,7 @@ class ParquetStore:
         AKSHARE_SPOT_QUOTE_SINA_DATASET.validator(cleaned)
         destination = self.akshare_cn_stock_spot_quote_sina_path(trade_date)
         self.atomic_write(cleaned, AKSHARE_SPOT_QUOTE_SINA_DATASET.schema, destination)
+        self._publish_dataset_write(AKSHARE_SPOT_QUOTE_SINA_DATASET.name, "*", cleaned, destination)
         return destination
 
     def read_stock_spot_quote_sina(self, trade_date: str) -> pd.DataFrame:
@@ -585,6 +596,7 @@ class ParquetStore:
         definition.validator(cleaned)
         destination = self.akshare_daily_bar_path(adjustment, code)
         self.atomic_write(cleaned, definition.schema, destination)
+        self._publish_dataset_write(dataset, code, cleaned, destination)
         return destination
 
     def upsert_akshare_daily_bars(self, adjustment: str, code: str, df: pd.DataFrame) -> Path:
@@ -694,6 +706,7 @@ class ParquetStore:
     def upsert_dataset_update_status(self, df: pd.DataFrame) -> Path:
         path = self.metadata_path("dataset_update_status")
         self._metadata_store.upsert_dataset_update_status(df)
+        self._refresh_registry_inventory_from_status(df.to_dict("records"))
         return path
 
     def read_pipeline_runs(self) -> pd.DataFrame:
@@ -719,6 +732,7 @@ class ParquetStore:
         """Persist update metadata with one write per metadata table."""
 
         self._metadata_store.persist_update_metadata(run_rows, status_rows, checkpoint_rows)
+        self._refresh_registry_inventory_from_status(status_rows)
 
     def pipeline_checkpoint_succeeded(
         self,
@@ -779,3 +793,32 @@ class ParquetStore:
 
     def initialize_empty_metadata(self) -> None:
         self._metadata_store.initialize()
+
+    def _publish_dataset_write(
+        self,
+        dataset: str,
+        code: str,
+        df: pd.DataFrame,
+        destination: Path,
+    ) -> None:
+        try:
+            DataRegistry(root=self.root).publish_dataframe_write(
+                dataset,
+                code,
+                df,
+                destination,
+                refresh_inventory=len(df) <= 1000,
+            )
+        except Exception as exc:
+            logger.warning("Failed to publish registry event dataset={} path={}: {}", dataset, destination, exc)
+
+    def _refresh_registry_inventory_from_status(self, status_rows: list[dict[str, object]]) -> None:
+        if not status_rows:
+            return
+        dataset_ids = sorted({str(row.get("dataset")) for row in status_rows if row.get("dataset")})
+        if not dataset_ids:
+            return
+        try:
+            DataRegistry(root=self.root).refresh_inventory(dataset_ids, status_rows=status_rows)
+        except Exception as exc:
+            logger.warning("Failed to refresh registry inventory for datasets={}: {}", dataset_ids, exc)

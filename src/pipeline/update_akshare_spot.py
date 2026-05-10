@@ -447,6 +447,12 @@ def _resolve_trade_date(config: ConfigManager, end: str | date | None) -> str:
         )
     if is_trading_day(baostock_cn_trading_calendar_df, candidate):
         return candidate
+    if end is not None and baostock_cn_trading_calendar_df.empty:
+        logger.warning(
+            "Spot trade_date uses explicit end={} because baostock_cn_trading_calendar is empty",
+            candidate,
+        )
+        return candidate
     try:
         resolved = latest_trading_day_on_or_before(baostock_cn_trading_calendar_df, candidate)
         logger.info(

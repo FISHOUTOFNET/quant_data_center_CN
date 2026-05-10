@@ -14,6 +14,7 @@ from src.pipeline.update_akshare_daily_bar import update_akshare_daily_bar as ru
 from src.pipeline.update_akshare_spot import update_akshare_spot as run_update_akshare_spot
 from src.pipeline.update_akshare_delist import update_akshare_delist as run_update_akshare_delist
 from src.pipeline.update_daily import update_daily as run_update_daily
+from src.registry_server import serve_registry
 from src.storage.duckdb_store import DuckDBStore
 from src.utils import paths
 from src.utils.logging import logger
@@ -240,6 +241,16 @@ def build_views() -> None:
 
     sqls = DuckDBStore().build_views()
     click.echo(f"Built {len(sqls)} views at {paths.DUCKDB_FILE}")
+
+
+@cli.command("serve-registry")
+@click.option("--host", default="127.0.0.1", show_default=True, help="Bind host. Defaults to localhost-only access.")
+@click.option("--port", default=8765, show_default=True, type=int, help="Bind port.")
+def registry_server(host: str, port: int) -> None:
+    """Serve read-only dataset registry and Parquet query endpoints."""
+
+    click.echo(f"Serving QDC registry at http://{host}:{port}")
+    serve_registry(host=host, port=port)
 
 
 if __name__ == "__main__":

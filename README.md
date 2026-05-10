@@ -117,6 +117,23 @@ value = con.execute("""
 qdc build-duckdb-views
 ```
 
+## 应用层接入
+
+其他项目应优先通过只读 Registry 网关发现和查询数据，而不是直接打开 `data/duckdb/quant.duckdb`：
+
+```powershell
+qdc serve-registry --host 127.0.0.1 --port 8765
+```
+
+常用入口：
+
+- `GET /v1/datasets`：查看当前有哪些 Dataset、schema、视图名和最新状态。
+- `GET /v1/events?since_event_id=0`：轮询最新写入事件。
+- `GET /v1/events/stream`：用 SSE 秒级订阅写入事件。
+- `POST /v1/query`：用结构化 JSON 查询 Parquet 数据。
+
+详细协议见 `docs/DATA_REGISTRY.md`。
+
 ## 配置
 
 主要配置在 `config/settings.yaml`。
@@ -185,6 +202,4 @@ tests/            # 单元与管道测试
 config/           # settings.yaml
 scripts/          # Windows 定时任务脚本
 ```
-
-
 
