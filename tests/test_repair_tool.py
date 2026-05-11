@@ -3,6 +3,7 @@ from __future__ import annotations
 import pandas as pd
 
 import src.pipeline.repair_tool as repair_module
+import src.storage.parquet_store as parquet_store_module
 
 
 def test_repair_normalizes_non_trading_range_to_trading_bounds(
@@ -89,7 +90,27 @@ def test_repair_normalizes_non_trading_range_to_trading_bounds(
     def create_provider(config, provider: str | None = None):
         return FakeProvider(config)
 
+    publish_refresh_flags = []
+    refresh_calls = []
+
+    class FakeRegistry:
+        def __init__(self, root=None) -> None:
+            self.root = root
+
+        def publish_dataframe_write(self, dataset_id, code, df, output_path, refresh_inventory=True):
+            publish_refresh_flags.append(refresh_inventory)
+
+        def refresh_inventory(self, dataset_ids=None, status_rows=None):
+            refresh_calls.append(
+                {
+                    "dataset_ids": list(dataset_ids or []),
+                    "status_rows": len(pd.DataFrame(status_rows)),
+                }
+            )
+            return pd.DataFrame()
+
     monkeypatch.setattr(repair_module, "create_provider", create_provider)
+    monkeypatch.setattr(parquet_store_module, "DataRegistry", FakeRegistry)
 
     repair_module.repair(
         code="sh.600000",
@@ -113,6 +134,18 @@ def test_repair_normalizes_non_trading_range_to_trading_bounds(
             "code": "sh.600000",
             "start_date": "1990-01-01",
             "end_date": "2024-01-12",
+        }
+    ]
+    assert publish_refresh_flags
+    assert set(publish_refresh_flags) == {False}
+    assert refresh_calls == [
+        {
+            "dataset_ids": [
+                "baostock_cn_stock_adjustment_factor",
+                "baostock_cn_stock_daily_bar_qfq",
+                "baostock_cn_trading_calendar",
+            ],
+            "status_rows": 0,
         }
     ]
 

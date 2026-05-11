@@ -129,6 +129,7 @@ def repair(
                     }
                 )
 
+    store.close()
     if build_views:
         DuckDBStore(root=config.root).build_views(cleanup_tmp_files=len(results) > 0)
     return results

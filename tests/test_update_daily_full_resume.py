@@ -6,6 +6,7 @@ import pandas as pd
 
 import src.pipeline.update_daily as update_daily_module
 import src.pipeline.update_daily_worker as update_daily_worker_module
+import src.storage.parquet_store as parquet_store_module
 from src.pipeline.adjustments import BAOSTOCK_CN_STOCK_ADJUSTMENT_FACTOR_DATASET
 from src.storage.parquet_store import ParquetStore
 from update_daily_fakes import _fake_provider_factory, _provider_factory_for, _write_settings
@@ -296,6 +297,67 @@ def test_update_daily_parallel_metadata_writes_do_not_drop_rows(
     assert len(pipeline_runs.loc[pipeline_runs["dataset"].isin({BAOSTOCK_CN_STOCK_ADJUSTMENT_FACTOR_DATASET, "baostock_cn_stock_daily_bar_qfq"})]) == 16
     assert set(zip(dataset_update_status["dataset"].astype(str), dataset_update_status["code"].astype(str))) >= expected_pairs
     assert set(zip(checkpoints["dataset"].astype(str), checkpoints["code"].astype(str))) >= expected_pairs
+
+
+def test_update_daily_defers_registry_inventory_until_run_end(
+    tmp_path,
+    monkeypatch,
+    daily_sample,
+    baostock_cn_stock_basic_sample,
+) -> None:
+    _write_settings(tmp_path, metadata_flush_size=1)
+    provider_factory, _state = _fake_provider_factory(baostock_cn_stock_basic_sample(), daily_sample())
+    monkeypatch.setattr(update_daily_module, "create_provider", provider_factory)
+
+    publish_refresh_flags = []
+    refresh_calls = []
+
+    class FakeRegistry:
+        def __init__(self, root=None) -> None:
+            self.root = root
+
+        def publish_dataframe_write(self, dataset_id, code, df, output_path, refresh_inventory=True):
+            publish_refresh_flags.append(refresh_inventory)
+
+        def refresh_inventory(self, dataset_ids=None, status_rows=None):
+            refresh_calls.append(
+                {
+                    "dataset_ids": list(dataset_ids or []),
+                    "status_rows": len(pd.DataFrame(status_rows)),
+                }
+            )
+            return pd.DataFrame()
+
+    monkeypatch.setattr(parquet_store_module, "DataRegistry", FakeRegistry)
+
+    records = update_daily_module.update_daily(
+        dataset="baostock_cn_stock_daily_bar_qfq",
+        mode="full",
+        start="2024-01-01",
+        end="2024-01-31",
+        code=("sh.600000", "sz.000001"),
+        root=tmp_path,
+        build_views=False,
+    )
+
+    assert sorted((item["dataset"], item["code"]) for item in records) == [
+        (BAOSTOCK_CN_STOCK_ADJUSTMENT_FACTOR_DATASET, "sh.600000"),
+        (BAOSTOCK_CN_STOCK_ADJUSTMENT_FACTOR_DATASET, "sz.000001"),
+        ("baostock_cn_stock_daily_bar_qfq", "sh.600000"),
+        ("baostock_cn_stock_daily_bar_qfq", "sz.000001"),
+    ]
+    assert publish_refresh_flags
+    assert set(publish_refresh_flags) == {False}
+    assert refresh_calls == [
+        {
+            "dataset_ids": [
+                BAOSTOCK_CN_STOCK_ADJUSTMENT_FACTOR_DATASET,
+                "baostock_cn_stock_daily_bar_qfq",
+                "baostock_cn_trading_calendar",
+            ],
+            "status_rows": 4,
+        }
+    ]
 
 
 def test_update_daily_full_resolves_non_trading_end_to_trading_bound(

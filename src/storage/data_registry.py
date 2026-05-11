@@ -191,7 +191,7 @@ class DataRegistry:
         output_path: str | Path,
         min_date: str = "",
         max_date: str = "",
-        refresh_inventory: bool = True,
+        refresh_inventory: bool = False,
     ) -> DatasetEvent:
         if dataset_id not in DATASET_CATALOG:
             raise ValueError(f"Unknown dataset: {dataset_id}")
@@ -259,7 +259,7 @@ class DataRegistry:
         code: str,
         df: pd.DataFrame,
         output_path: str | Path,
-        refresh_inventory: bool = True,
+        refresh_inventory: bool = False,
     ) -> DatasetEvent:
         min_date, max_date = _frame_date_bounds(df, DATASET_CATALOG[dataset_id].schema)
         return self.append_event(

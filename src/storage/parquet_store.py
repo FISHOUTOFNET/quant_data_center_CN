@@ -61,6 +61,15 @@ _SOURCE_FORWARD_ADJUST_FACTOR = "fore" + "Adjust" + "Factor"
 _SOURCE_BACKWARD_ADJUST_FACTOR = "back" + "Adjust" + "Factor"
 _SOURCE_ADJUSTMENT_FACTOR = "adjust" + "Factor"
 
+def _is_missing_projected_column_error(exc: Exception) -> bool:
+    message = str(exc).lower()
+    return (
+        "no match for fieldref.name" in message
+        or "not in index" in message
+        or ("field named" in message and "not found" in message)
+    )
+
+
 COLUMN_ALIASES = {
     _SOURCE_PREV_CLOSE: "prev_close",
     _SOURCE_ADJUST_FLAG: "adjust_flag",
@@ -116,21 +125,32 @@ class ParquetStore:
         self.parquet_dir = (parquet_dir or self.root / "data" / "parquet").resolve()
         self.metadata_dir = (metadata_dir or self.root / "data" / "metadata").resolve()
         self._parquet_write_lock = RLock()
+        self._registry_inventory_lock = RLock()
+        self._pending_registry_dataset_ids: set[str] = set()
+        self._pending_registry_status_rows: list[dict[str, object]] = []
         self._metadata_store = DuckDBMetadataStore(
             root=self.root,
         )
 
-    def _safe_read_parquet(self, path: Path) -> pd.DataFrame:
+    def _safe_read_parquet(self, path: Path, columns: list[str] | tuple[str, ...] | None = None) -> pd.DataFrame:
         """Read parquet file with retry logic for transient permission errors.
         
         On Windows, files can be temporarily locked by other processes (antivirus,
         backup software, concurrent writes). This method retries reads with
         exponential backoff to handle transient PermissionError.
         """
+        projected_columns = list(columns) if columns is not None else None
         last_error: Exception | None = None
         for attempt in range(PARQUET_READ_MAX_RETRIES):
             try:
-                return pd.read_parquet(path)
+                if projected_columns is None:
+                    return pd.read_parquet(path)
+                try:
+                    return pd.read_parquet(path, columns=projected_columns)
+                except (KeyError, ValueError, pa.ArrowInvalid) as exc:
+                    if _is_missing_projected_column_error(exc):
+                        return pd.read_parquet(path)
+                    raise
             except PermissionError as e:
                 last_error = e
                 if attempt < PARQUET_READ_MAX_RETRIES - 1:
@@ -203,7 +223,14 @@ class ParquetStore:
         return self.metadata_dir / f"{name}.parquet"
 
     def close(self) -> None:
-        self._metadata_store.close()
+        try:
+            self.refresh_pending_registry_inventory()
+        finally:
+            self._metadata_store.close()
+
+    def __del__(self) -> None:
+        with suppress(Exception):
+            self.close()
 
     def clean_dataframe_for_schema(self, df: pd.DataFrame, schema: pa.Schema) -> pd.DataFrame:
         """Return a dataframe with exactly schema columns and schema-ready values.
@@ -379,12 +406,17 @@ class ParquetStore:
         )
         return destination
 
-    def read_baostock_daily_bars(self, dataset: str, code: str) -> pd.DataFrame:
+    def read_baostock_daily_bars(
+        self,
+        dataset: str,
+        code: str,
+        columns: list[str] | tuple[str, ...] | None = None,
+    ) -> pd.DataFrame:
         definition = daily_bar_definition(dataset)
         path = self.baostock_daily_bar_path(dataset, code)
         if not path.exists():
             return pd.DataFrame(columns=field_names(definition.schema))
-        return self._safe_read_parquet(path)
+        return self._safe_read_parquet(path, columns=columns)
 
     def write_baostock_cn_stock_adjustment_factor(self, code: str, df: pd.DataFrame) -> Path:
         cleaned = self.clean_baostock_cn_stock_adjustment_factor_frame(code, df)
@@ -407,15 +439,34 @@ class ParquetStore:
             return pd.DataFrame(columns=field_names(BAOSTOCK_CN_STOCK_ADJUSTMENT_FACTOR_DATASET.schema))
         return self.clean_dataframe_for_schema(self._safe_read_parquet(path), BAOSTOCK_CN_STOCK_ADJUSTMENT_FACTOR_DATASET.schema)
 
-    def write_baostock_cn_stock_valuation_percentile(self, code: str, df: pd.DataFrame) -> Path:
+    def write_baostock_cn_stock_valuation_percentile(
+        self,
+        code: str,
+        df: pd.DataFrame,
+        *,
+        refresh_registry_inventory: bool | None = None,
+        timing: dict[str, float] | None = None,
+    ) -> Path:
         cleaned = self.clean_dataframe_for_schema(df, BAOSTOCK_CN_STOCK_VALUATION_PERCENTILE_DATASET.schema)
         if not cleaned.empty:
             self._require_partition_value(cleaned, "code", code, "Valuation percentile file code")
             cleaned = cleaned.sort_values(["code", "date"]).reset_index(drop=True)
         BAOSTOCK_CN_STOCK_VALUATION_PERCENTILE_DATASET.validator(cleaned)
         destination = self.baostock_cn_stock_valuation_percentile_path(code)
+        write_started = time.perf_counter()
         self.atomic_write(cleaned, BAOSTOCK_CN_STOCK_VALUATION_PERCENTILE_DATASET.schema, destination)
-        self._publish_dataset_write(BAOSTOCK_CN_STOCK_VALUATION_PERCENTILE_DATASET.name, code, cleaned, destination)
+        if timing is not None:
+            timing["parquet_write_seconds"] = time.perf_counter() - write_started
+        publish_started = time.perf_counter()
+        self._publish_dataset_write(
+            BAOSTOCK_CN_STOCK_VALUATION_PERCENTILE_DATASET.name,
+            code,
+            cleaned,
+            destination,
+            refresh_inventory=refresh_registry_inventory,
+        )
+        if timing is not None:
+            timing["registry_publish_seconds"] = time.perf_counter() - publish_started
         return destination
 
     def read_baostock_cn_stock_valuation_percentile(self, code: str) -> pd.DataFrame:
@@ -714,6 +765,27 @@ class ParquetStore:
         )
         return values[-1] if values else None
 
+    def refresh_pending_registry_inventory(self) -> None:
+        """Refresh registry inventory once for datasets touched by this store."""
+
+        with self._registry_inventory_lock:
+            status_rows = list(self._pending_registry_status_rows)
+            dataset_ids = sorted(
+                self._pending_registry_dataset_ids
+                | {str(row.get("dataset")) for row in status_rows if row.get("dataset")}
+            )
+            self._pending_registry_dataset_ids = set()
+            self._pending_registry_status_rows = []
+        if not dataset_ids:
+            return
+        try:
+            DataRegistry(root=self.root).refresh_inventory(dataset_ids, status_rows=status_rows)
+        except Exception as exc:
+            with self._registry_inventory_lock:
+                self._pending_registry_dataset_ids.update(dataset_ids)
+                self._pending_registry_status_rows = status_rows + self._pending_registry_status_rows
+            logger.warning("Failed to refresh registry inventory for datasets={}: {}", dataset_ids, exc)
+
     def append_pipeline_runs(self, df: pd.DataFrame) -> Path:
         path = self.metadata_path("pipeline_runs")
         self._metadata_store.append_pipeline_runs(df)
@@ -722,7 +794,7 @@ class ParquetStore:
     def upsert_dataset_update_status(self, df: pd.DataFrame) -> Path:
         path = self.metadata_path("dataset_update_status")
         self._metadata_store.upsert_dataset_update_status(df)
-        self._refresh_registry_inventory_from_status(df.to_dict("records"))
+        self._mark_registry_status_rows(df)
         return path
 
     def read_pipeline_runs(self) -> pd.DataFrame:
@@ -748,7 +820,7 @@ class ParquetStore:
         """Persist update metadata with one write per metadata table."""
 
         self._metadata_store.persist_update_metadata(run_rows, status_rows, checkpoint_rows)
-        self._refresh_registry_inventory_from_status(status_rows)
+        self._mark_registry_status_rows(status_rows)
 
     def pipeline_checkpoint_succeeded(
         self,
@@ -810,31 +882,44 @@ class ParquetStore:
     def initialize_empty_metadata(self) -> None:
         self._metadata_store.initialize()
 
+    def _mark_registry_dataset_write(self, dataset: str) -> None:
+        with self._registry_inventory_lock:
+            self._pending_registry_dataset_ids.add(str(dataset))
+
+    def _mark_registry_status_rows(self, status_rows) -> None:
+        if status_rows is None:
+            return
+        if isinstance(status_rows, pd.DataFrame):
+            rows = status_rows.to_dict("records")
+        else:
+            rows = list(status_rows)
+        valid_rows = [dict(row) for row in rows if row.get("dataset")]
+        if not valid_rows:
+            return
+        with self._registry_inventory_lock:
+            self._pending_registry_status_rows.extend(valid_rows)
+            self._pending_registry_dataset_ids.update(str(row["dataset"]) for row in valid_rows)
+
     def _publish_dataset_write(
         self,
         dataset: str,
         code: str,
         df: pd.DataFrame,
         destination: Path,
+        refresh_inventory: bool | None = None,
     ) -> None:
+        should_refresh_inventory = bool(refresh_inventory) if refresh_inventory is not None else False
+        if not should_refresh_inventory:
+            self._mark_registry_dataset_write(dataset)
         try:
             DataRegistry(root=self.root).publish_dataframe_write(
                 dataset,
                 code,
                 df,
                 destination,
-                refresh_inventory=len(df) <= 1000,
+                refresh_inventory=should_refresh_inventory,
             )
         except Exception as exc:
+            if should_refresh_inventory:
+                self._mark_registry_dataset_write(dataset)
             logger.warning("Failed to publish registry event dataset={} path={}: {}", dataset, destination, exc)
-
-    def _refresh_registry_inventory_from_status(self, status_rows: list[dict[str, object]]) -> None:
-        if not status_rows:
-            return
-        dataset_ids = sorted({str(row.get("dataset")) for row in status_rows if row.get("dataset")})
-        if not dataset_ids:
-            return
-        try:
-            DataRegistry(root=self.root).refresh_inventory(dataset_ids, status_rows=status_rows)
-        except Exception as exc:
-            logger.warning("Failed to refresh registry inventory for datasets={}: {}", dataset_ids, exc)

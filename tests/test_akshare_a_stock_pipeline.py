@@ -8,6 +8,7 @@ import pytest
 import src.pipeline.update_akshare_delist as update_akshare_delist_module
 import src.pipeline.update_akshare_daily_bar as update_akshare_daily_bar_module
 import src.pipeline.update_akshare_spot as update_akshare_spot_module
+import src.storage.parquet_store as parquet_store_module
 from src.api.akshare_client import AkShareResponse
 from src.pipeline.update_akshare_daily_bar import update_akshare_daily_bar
 from src.pipeline.update_akshare_spot import update_akshare_spot
@@ -347,6 +348,140 @@ def test_update_akshare_delist_and_spot_force_log_progress(tmp_path, monkeypatch
         fake_logger,
         "AkShare spot update completed processed={} success={} failed={} skipped={}",
     )
+
+
+def test_update_akshare_daily_bar_defers_registry_inventory_until_run_end(tmp_path, monkeypatch) -> None:
+    _write_settings(tmp_path)
+    publish_refresh_flags = []
+    refresh_calls = []
+
+    class FakeRegistry:
+        def __init__(self, root=None) -> None:
+            self.root = root
+
+        def publish_dataframe_write(self, dataset_id, code, df, output_path, refresh_inventory=True):
+            publish_refresh_flags.append(refresh_inventory)
+
+        def refresh_inventory(self, dataset_ids=None, status_rows=None):
+            refresh_calls.append(
+                {
+                    "dataset_ids": list(dataset_ids or []),
+                    "status_rows": len(pd.DataFrame(status_rows)),
+                }
+            )
+            return pd.DataFrame()
+
+    monkeypatch.setattr(parquet_store_module, "DataRegistry", FakeRegistry)
+
+    records = update_akshare_daily_bar(
+        mode="full",
+        adjustment="unadjusted",
+        code=("600000", "000001"),
+        start="2024-01-01",
+        end="2024-01-03",
+        root=tmp_path,
+        build_views=False,
+        workers=1,
+        force=True,
+        client=FakeAStockClient(),
+    )
+
+    assert [item["status"] for item in records] == ["success", "success"]
+    assert publish_refresh_flags
+    assert set(publish_refresh_flags) == {False}
+    assert refresh_calls == [
+        {
+            "dataset_ids": ["akshare_cn_stock_daily_bar_unadjusted"],
+            "status_rows": 2,
+        }
+    ]
+
+
+def test_update_akshare_spot_defers_registry_inventory_until_run_end(tmp_path, monkeypatch) -> None:
+    _write_settings(tmp_path)
+    publish_refresh_flags = []
+    refresh_calls = []
+
+    class FakeRegistry:
+        def __init__(self, root=None) -> None:
+            self.root = root
+
+        def publish_dataframe_write(self, dataset_id, code, df, output_path, refresh_inventory=True):
+            publish_refresh_flags.append(refresh_inventory)
+
+        def refresh_inventory(self, dataset_ids=None, status_rows=None):
+            refresh_calls.append(
+                {
+                    "dataset_ids": list(dataset_ids or []),
+                    "status_rows": len(pd.DataFrame(status_rows)),
+                }
+            )
+            return pd.DataFrame()
+
+    monkeypatch.setattr(parquet_store_module, "DataRegistry", FakeRegistry)
+
+    records = update_akshare_spot(
+        end="2024-01-03",
+        root=tmp_path,
+        build_views=False,
+        force=True,
+        client=FakeAStockClient(),
+        now=lambda: datetime(2024, 1, 3, 18, 0),
+    )
+
+    assert [item["status"] for item in records] == ["success", "success"]
+    assert publish_refresh_flags
+    assert set(publish_refresh_flags) == {False}
+    assert refresh_calls == [
+        {
+            "dataset_ids": ["akshare_cn_stock_daily_bar_unadjusted", "akshare_cn_stock_spot_quote_eastmoney"],
+            "status_rows": 2,
+        }
+    ]
+
+
+def test_update_akshare_delist_defers_registry_inventory_until_run_end(tmp_path, monkeypatch) -> None:
+    _write_settings(tmp_path)
+    publish_refresh_flags = []
+    refresh_calls = []
+
+    class FakeRegistry:
+        def __init__(self, root=None) -> None:
+            self.root = root
+
+        def publish_dataframe_write(self, dataset_id, code, df, output_path, refresh_inventory=True):
+            publish_refresh_flags.append(refresh_inventory)
+
+        def refresh_inventory(self, dataset_ids=None, status_rows=None):
+            refresh_calls.append(
+                {
+                    "dataset_ids": list(dataset_ids or []),
+                    "status_rows": len(pd.DataFrame(status_rows)),
+                }
+            )
+            return pd.DataFrame()
+
+    monkeypatch.setattr(parquet_store_module, "DataRegistry", FakeRegistry)
+
+    records = update_akshare_delist(
+        market="全部",
+        snapshot_date="2024-01-03",
+        root=tmp_path,
+        build_views=False,
+        force=True,
+        exchanges=["sh", "sz"],
+        client=FakeAStockClient(),
+    )
+
+    assert [item["status"] for item in records] == ["success", "success"]
+    assert publish_refresh_flags
+    assert set(publish_refresh_flags) == {False}
+    assert refresh_calls == [
+        {
+            "dataset_ids": ["akshare_cn_stock_delist_sh", "akshare_cn_stock_delist_sz"],
+            "status_rows": 2,
+        }
+    ]
 
 
 def test_update_akshare_daily_bar_full_ignores_spot_quote_close_in_prefilter(tmp_path) -> None:

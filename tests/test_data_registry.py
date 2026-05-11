@@ -26,6 +26,7 @@ def test_data_registry_generates_catalog_inventory_and_write_events(tmp_path, da
     assert events[-1]["row_count"] == 2
     assert events[-1]["output_path"] == str(path.relative_to(tmp_path))
 
+    store.refresh_pending_registry_inventory()
     inventory = registry.read_inventory()
     row = inventory.loc[inventory["dataset_id"] == "baostock_cn_stock_daily_bar_qfq"].iloc[0]
     assert row["parquet_file_count"] == 1
@@ -61,6 +62,7 @@ def test_data_registry_refreshes_status_from_metadata_rows(tmp_path, daily_sampl
             ]
         )
     )
+    store.refresh_pending_registry_inventory()
 
     detail = DataRegistry(root=tmp_path).dataset_detail("baostock_cn_stock_daily_bar_qfq")
     assert detail["latest_success_date"] == "2024-01-03"
@@ -82,3 +84,60 @@ def test_data_registry_lists_partitions(tmp_path, daily_sample) -> None:
             "mtime": partitions[0]["mtime"],
         }
     ]
+
+
+def test_data_registry_write_events_do_not_refresh_inventory_by_default(tmp_path, daily_sample) -> None:
+    store = ParquetStore(root=tmp_path)
+    store.ensure_layout()
+    path = store.write_baostock_daily_bars("baostock_cn_stock_daily_bar_qfq", "sh.600000", daily_sample())
+    registry = DataRegistry(root=tmp_path)
+
+    assert registry.read_events()[-1]["output_path"] == str(path.relative_to(tmp_path))
+    assert not registry.inventory_path.exists()
+
+
+def test_data_registry_append_event_defaults_to_event_only(tmp_path) -> None:
+    registry = DataRegistry(root=tmp_path)
+
+    registry.append_event(
+        "baostock_cn_stock_daily_bar_qfq",
+        "sh.600000",
+        2,
+        tmp_path / "data" / "parquet" / "baostock_cn_stock_daily_bar_qfq" / "code=sh.600000" / "data.parquet",
+    )
+
+    assert registry.read_events()[-1]["dataset_id"] == "baostock_cn_stock_daily_bar_qfq"
+    assert not registry.inventory_path.exists()
+
+
+def test_data_registry_publish_dataframe_write_defaults_to_event_only(tmp_path, daily_sample) -> None:
+    registry = DataRegistry(root=tmp_path)
+
+    registry.publish_dataframe_write(
+        "baostock_cn_stock_daily_bar_qfq",
+        "sh.600000",
+        daily_sample(),
+        tmp_path / "data" / "parquet" / "baostock_cn_stock_daily_bar_qfq" / "code=sh.600000" / "data.parquet",
+    )
+
+    assert registry.read_events()[-1]["dataset_id"] == "baostock_cn_stock_daily_bar_qfq"
+    assert not registry.inventory_path.exists()
+
+
+def test_data_registry_explicit_refresh_inventory_remains_available(tmp_path, daily_sample) -> None:
+    store = ParquetStore(root=tmp_path)
+    store.ensure_layout()
+    path = store.write_baostock_daily_bars("baostock_cn_stock_daily_bar_qfq", "sh.600000", daily_sample())
+    registry = DataRegistry(root=tmp_path)
+
+    registry.publish_dataframe_write(
+        "baostock_cn_stock_daily_bar_qfq",
+        "sh.600000",
+        daily_sample(),
+        path,
+        refresh_inventory=True,
+    )
+
+    inventory = registry.read_inventory()
+    row = inventory.loc[inventory["dataset_id"] == "baostock_cn_stock_daily_bar_qfq"].iloc[0]
+    assert row["parquet_file_count"] == 1

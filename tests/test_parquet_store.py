@@ -29,6 +29,40 @@ def test_daily_bar_atomic_write(tmp_path, daily_sample) -> None:
     assert pd.isna(loaded.loc[0, "pe_ttm"])
 
 
+def test_read_baostock_daily_bars_supports_column_projection(tmp_path, daily_sample) -> None:
+    store = ParquetStore(root=tmp_path)
+    store.ensure_layout()
+    store.write_baostock_daily_bars("baostock_cn_stock_daily_bar_unadjusted", "sh.600000", daily_sample())
+
+    loaded = store.read_baostock_daily_bars(
+        "baostock_cn_stock_daily_bar_unadjusted",
+        "sh.600000",
+        columns=["date", "code", "pe_ttm"],
+    )
+
+    assert loaded.columns.tolist() == ["date", "code", "pe_ttm"]
+    assert len(loaded) == 2
+
+
+def test_read_baostock_daily_bars_falls_back_to_full_file_when_projected_column_is_missing(
+    tmp_path,
+    daily_sample,
+) -> None:
+    store = ParquetStore(root=tmp_path)
+    store.ensure_layout()
+    store.write_baostock_daily_bars("baostock_cn_stock_daily_bar_unadjusted", "sh.600000", daily_sample())
+
+    loaded = store.read_baostock_daily_bars(
+        "baostock_cn_stock_daily_bar_unadjusted",
+        "sh.600000",
+        columns=["date", "code", "pe_ttm", "legacy_missing_column"],
+    )
+
+    assert "open" in loaded.columns
+    assert "legacy_missing_column" not in loaded.columns
+    assert len(loaded) == 2
+
+
 def test_baostock_cn_stock_basic_codes_from_latest_snapshot(tmp_path, baostock_cn_stock_basic_sample) -> None:
     store = ParquetStore(root=tmp_path)
     store.ensure_layout()
@@ -89,6 +123,225 @@ def test_baostock_cn_stock_valuation_percentile_write_and_read(tmp_path, daily_s
     loaded = store.read_baostock_cn_stock_valuation_percentile("sh.600000")
     assert len(loaded) == 2
     assert loaded.loc[0, "pe_ttm_percentile_all_history"] == 100.0
+
+
+def test_valuation_percentile_direct_write_defers_registry_inventory_by_default(
+    tmp_path,
+    daily_sample,
+    monkeypatch,
+) -> None:
+    publish_calls: list[dict[str, object]] = []
+    refresh_calls: list[list[str]] = []
+
+    class FakeRegistry:
+        def __init__(self, root=None) -> None:
+            self.root = root
+
+        def publish_dataframe_write(
+            self,
+            dataset: str,
+            code: str,
+            df: pd.DataFrame,
+            destination,
+            refresh_inventory: bool = True,
+        ) -> None:
+            publish_calls.append(
+                {
+                    "dataset": dataset,
+                    "code": code,
+                    "rows": len(df),
+                    "destination": destination,
+                    "refresh_inventory": refresh_inventory,
+                }
+            )
+
+        def refresh_inventory(self, dataset_ids=None, status_rows=None):
+            del status_rows
+            refresh_calls.append(list(dataset_ids or []))
+            return pd.DataFrame()
+
+    monkeypatch.setattr(parquet_store_module, "DataRegistry", FakeRegistry)
+    store = ParquetStore(root=tmp_path)
+    store.ensure_layout()
+    frame = compute_valuation_percentiles(daily_sample())
+
+    store.write_baostock_cn_stock_valuation_percentile("sh.600000", frame)
+
+    assert len(publish_calls) == 1
+    assert publish_calls[0]["dataset"] == "baostock_cn_stock_valuation_percentile"
+    assert publish_calls[0]["refresh_inventory"] is False
+    assert refresh_calls == []
+
+
+def test_valuation_percentile_write_can_defer_registry_inventory_refresh(
+    tmp_path,
+    daily_sample,
+    monkeypatch,
+) -> None:
+    publish_calls: list[dict[str, object]] = []
+
+    class FakeRegistry:
+        def __init__(self, root=None) -> None:
+            self.root = root
+
+        def publish_dataframe_write(
+            self,
+            dataset: str,
+            code: str,
+            df: pd.DataFrame,
+            destination,
+            refresh_inventory: bool = True,
+        ) -> None:
+            publish_calls.append(
+                {
+                    "dataset": dataset,
+                    "code": code,
+                    "rows": len(df),
+                    "destination": destination,
+                    "refresh_inventory": refresh_inventory,
+                }
+            )
+
+    monkeypatch.setattr(parquet_store_module, "DataRegistry", FakeRegistry)
+    store = ParquetStore(root=tmp_path)
+    store.ensure_layout()
+    frame = compute_valuation_percentiles(daily_sample())
+
+    store.write_baostock_cn_stock_valuation_percentile(
+        "sh.600000",
+        frame,
+        refresh_registry_inventory=False,
+    )
+
+    assert len(publish_calls) == 1
+    assert publish_calls[0]["refresh_inventory"] is False
+
+
+def test_parquet_store_refreshes_pending_registry_inventory_once_after_writes(
+    tmp_path,
+    daily_sample,
+    monkeypatch,
+) -> None:
+    refresh_calls: list[dict[str, object]] = []
+
+    class FakeRegistry:
+        def __init__(self, root=None) -> None:
+            self.root = root
+
+        def publish_dataframe_write(
+            self,
+            dataset: str,
+            code: str,
+            df: pd.DataFrame,
+            destination,
+            refresh_inventory: bool = True,
+        ) -> None:
+            assert refresh_inventory is False
+
+        def refresh_inventory(self, dataset_ids=None, status_rows=None):
+            refresh_calls.append(
+                {
+                    "dataset_ids": list(dataset_ids or []),
+                    "status_rows": len(pd.DataFrame(status_rows)),
+                }
+            )
+            return pd.DataFrame()
+
+    monkeypatch.setattr(parquet_store_module, "DataRegistry", FakeRegistry)
+    store = ParquetStore(root=tmp_path)
+    store.ensure_layout()
+    frame = compute_valuation_percentiles(daily_sample())
+
+    store.write_baostock_daily_bars("baostock_cn_stock_daily_bar_qfq", "sh.600000", daily_sample())
+    store.write_baostock_cn_stock_valuation_percentile("sh.600000", frame)
+    store.refresh_pending_registry_inventory()
+    store.refresh_pending_registry_inventory()
+
+    assert refresh_calls == [
+        {
+            "dataset_ids": [
+                "baostock_cn_stock_daily_bar_qfq",
+                "baostock_cn_stock_valuation_percentile",
+            ],
+            "status_rows": 0,
+        }
+    ]
+
+
+def test_parquet_store_metadata_status_marks_pending_inventory_without_immediate_refresh(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    refresh_calls: list[dict[str, object]] = []
+
+    class FakeRegistry:
+        def __init__(self, root=None) -> None:
+            self.root = root
+
+        def publish_dataframe_write(self, *args, **kwargs) -> None:
+            return None
+
+        def refresh_inventory(self, dataset_ids=None, status_rows=None):
+            refresh_calls.append(
+                {
+                    "dataset_ids": list(dataset_ids or []),
+                    "status_rows": len(pd.DataFrame(status_rows)),
+                }
+            )
+            return pd.DataFrame()
+
+    monkeypatch.setattr(parquet_store_module, "DataRegistry", FakeRegistry)
+    store = ParquetStore(root=tmp_path)
+    store.ensure_layout()
+    status = pd.DataFrame(
+        [
+            {
+                "dataset": "baostock_cn_stock_daily_bar_qfq",
+                "code": "sh.600000",
+                "last_success_date": "2024-01-03",
+                "row_count": 2,
+                "status": "success",
+                "updated_at": datetime(2024, 1, 3, 18, 0),
+                "error_stack": "",
+            }
+        ]
+    )
+
+    store.upsert_dataset_update_status(status)
+
+    assert refresh_calls == []
+    store.refresh_pending_registry_inventory()
+    assert refresh_calls == [
+        {
+            "dataset_ids": ["baostock_cn_stock_daily_bar_qfq"],
+            "status_rows": 1,
+        }
+    ]
+
+
+def test_parquet_store_pending_registry_inventory_noops_without_changes(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    refresh_calls: list[list[str]] = []
+
+    class FakeRegistry:
+        def __init__(self, root=None) -> None:
+            self.root = root
+
+        def refresh_inventory(self, dataset_ids=None, status_rows=None):
+            del status_rows
+            refresh_calls.append(list(dataset_ids or []))
+            return pd.DataFrame()
+
+    monkeypatch.setattr(parquet_store_module, "DataRegistry", FakeRegistry)
+    store = ParquetStore(root=tmp_path)
+    store.ensure_layout()
+
+    store.refresh_pending_registry_inventory()
+    store.close()
+
+    assert refresh_calls == []
 
 
 def test_akshare_dataset_write_and_read(tmp_path, akshare_cn_stock_valuation_eastmoney_sample) -> None:

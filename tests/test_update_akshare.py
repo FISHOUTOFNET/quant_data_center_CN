@@ -7,6 +7,7 @@ from datetime import datetime
 import pandas as pd
 
 import src.pipeline.update_akshare as update_akshare_module
+import src.storage.parquet_store as parquet_store_module
 from src.api.akshare_client import AkShareCircuitOpen, AkShareResponse
 from src.pipeline.akshare_tasks import plan_akshare_tasks
 from src.pipeline.common import write_checkpoint
@@ -188,6 +189,64 @@ def test_update_akshare_force_logs_stock_valuation_progress(
         logger,
         "AkShare update completed processed={} success={} failed={} skipped={}",
     )
+
+
+def test_update_akshare_defers_registry_inventory_until_run_end(
+    tmp_path,
+    monkeypatch,
+    baostock_cn_stock_basic_sample,
+    akshare_cn_stock_valuation_eastmoney_sample,
+) -> None:
+    _write_settings(tmp_path)
+    store = ParquetStore(root=tmp_path)
+    store.ensure_layout()
+    store.write_baostock_cn_stock_basic(baostock_cn_stock_basic_sample())
+    _write_akshare_universe(store, spot_codes=("600000", "000001"), delisted_codes=())
+    _write_baostock_cn_trading_calendar(store, "2024-01-03")
+    store.close()
+
+    publish_refresh_flags = []
+    refresh_calls = []
+
+    class FakeRegistry:
+        def __init__(self, root=None) -> None:
+            self.root = root
+
+        def publish_dataframe_write(self, dataset_id, code, df, output_path, refresh_inventory=True):
+            publish_refresh_flags.append(refresh_inventory)
+
+        def refresh_inventory(self, dataset_ids=None, status_rows=None):
+            refresh_calls.append(
+                {
+                    "dataset_ids": list(dataset_ids or []),
+                    "status_rows": len(pd.DataFrame(status_rows)),
+                }
+            )
+            return pd.DataFrame()
+
+    monkeypatch.setattr(parquet_store_module, "DataRegistry", FakeRegistry)
+    client = FakeAkShareClient(akshare_cn_stock_valuation_eastmoney_sample)
+
+    records = update_akshare(
+        dataset="akshare_cn_stock_valuation_eastmoney",
+        mode="partial",
+        code=("600000", "000001"),
+        root=tmp_path,
+        build_views=False,
+        workers=1,
+        force=True,
+        client=client,
+    )
+
+    assert [item["status"] for item in records] == ["success", "success"]
+    assert publish_refresh_flags
+    assert set(publish_refresh_flags) == {False}
+    assert refresh_calls == [
+        {
+            "dataset_ids": ["akshare_cn_stock_valuation_eastmoney"],
+            "status_rows": 2,
+        }
+    ]
 
 
 def test_stock_valuation_prefilter_kept_task_ignores_checkpoint_and_logs_unchanged(

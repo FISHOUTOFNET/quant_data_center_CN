@@ -31,3 +31,7 @@ include = ["src*"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
+markers = [
+    "performance: Performance benchmark tests",
+    "slow: Slow running tests",
+]
