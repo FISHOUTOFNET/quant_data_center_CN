@@ -23,6 +23,7 @@ from src.pipeline.akshare_common import (
 )
 from src.pipeline.akshare_universe import resolve_akshare_universe_codes
 from src.pipeline.common import PipelineCheckpointLookup, default_candidate_date
+from src.pipeline.dry_run import apply_limit, dry_run_record
 from src.storage.dataset_catalog import (
     akshare_daily_bar_adjustments,
     akshare_daily_bar_dataset_id,
@@ -157,6 +158,7 @@ def update_akshare_daily_bar(
     code: tuple[str, ...] | list[str] | str | None = None,
     start: str | date | None = None,
     end: str | date | None = None,
+    max_codes: int | None = None,
     max_tasks: int | None = None,
     workers: int | None = None,
     root: Path | None = None,
@@ -165,13 +167,13 @@ def update_akshare_daily_bar(
     build_views: bool = True,
     client: Any | None = None,
     client_factory: Callable[[ConfigManager], Any] | None = None,
+    dry_run: bool = False,
 ) -> list[dict[str, object]]:
     """Run full initialization or manual incremental repair for AkShare daily bars."""
 
     mode = str(mode).strip().lower()
     config = ConfigManager(root)
     store = ParquetStore(root=config.root)
-    store.ensure_layout()
     tasks = plan_akshare_daily_bar_tasks(
         config=config,
         store=store,
@@ -180,8 +182,26 @@ def update_akshare_daily_bar(
         code=code,
         start=start,
         end=end,
+        max_codes=max_codes,
         max_tasks=max_tasks,
     )
+    if not tasks and not dry_run:
+        return []
+    if dry_run:
+        return [
+            dry_run_record(
+                task.dataset,
+                task.code,
+                task.start_date,
+                task.end_date,
+                task.output_path,
+                operation="write_akshare_daily_bar",
+                adjustment=task.adjustment,
+            )
+            for task in tasks
+        ]
+
+    store.ensure_layout()
     checkpoint_lookup = PipelineCheckpointLookup.from_store(store) if resume and not force else None
     ak_client = client or (
         client_factory(config)
@@ -294,6 +314,7 @@ def plan_akshare_daily_bar_tasks(
     code: tuple[str, ...] | list[str] | str | None = None,
     start: str | date | None = None,
     end: str | date | None = None,
+    max_codes: int | None = None,
     max_tasks: int | None = None,
 ) -> list[AkShareDailyBarTask]:
     normalized_mode = str(mode).strip().lower()
@@ -309,7 +330,11 @@ def plan_akshare_daily_bar_tasks(
     if api_start_date > api_end_date:
         raise ValueError(f"AkShare daily bar start date {api_start_date} is after end date {api_end_date}")
 
-    codes = _resolve_daily_bar_codes(store, code, include_delisted=normalized_mode == "full")
+    codes = apply_limit(
+        _resolve_daily_bar_codes(store, code, include_delisted=normalized_mode == "full"),
+        max_codes,
+        "max_codes",
+    )
     adjustments = _resolve_adjustments(adjustment)
     tasks = []
     for daily_bar_adjustment in adjustments:

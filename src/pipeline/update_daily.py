@@ -14,12 +14,14 @@ from src.pipeline.adjustments import BAOSTOCK_CN_STOCK_ADJUSTMENT_FACTOR_DATASET
 from src.pipeline.common import (
     FULL_HISTORY_START_DATE,
     PipelineCheckpointLookup,
+    baostock_cn_trading_calendar_covers_range,
     baostock_cn_trading_calendar_fetch_start,
     checkpoint_output_path,
     date_iso,
     default_candidate_date,
     resolve_codes,
 )
+from src.pipeline.dry_run import apply_limit, blocked_record, dry_run_record
 from src.pipeline.services import PipelineMetadataBatch, fetch_baostock_cn_stock_adjustment_factor, fetch_daily_bars, log_api_fetch
 from src.pipeline.update_daily_calendar import (
     _prepare_full_baostock_cn_trading_calendar,
@@ -60,6 +62,9 @@ def update_daily(
     force: bool = False,
     mode: str = "partial",  # partial or full
     provider: str | None = None,
+    dry_run: bool = False,
+    max_codes: int | None = None,
+    max_tasks: int | None = None,
 ) -> list[dict[str, object]]:
     """Update selected datasets for the resolved trading window.
 
@@ -72,13 +77,116 @@ def update_daily(
         raise ValueError(f"Unsupported update mode: {mode}")
     include_baostock_cn_trading_calendar, include_baostock_cn_stock_basic, include_baostock_cn_stock_adjustment_factor, daily_targets = _dataset_targets(dataset)
 
+    start_candidate_date = date_iso(start)
     config = ConfigManager(root)
     store = ParquetStore(root=config.root)
-    store.ensure_layout()
-
-    start_candidate_date = date_iso(start)
     candidate_end_date = date_iso(end) if end is not None else default_candidate_date(config)
     lookback = int(lookback_days if lookback_days is not None else config.get("pipeline.lookback_days", 30))
+    if not dry_run and max_tasks is not None and int(max_tasks) == 0:
+        return []
+    if not dry_run and max_tasks is not None and dataset != "baostock_cn_trading_calendar":
+        required_calendar_start = (
+            start_candidate_date
+            if mode == "full"
+            else baostock_cn_trading_calendar_fetch_start(candidate_end_date, lookback)
+        )
+        local_calendar = store.read_baostock_cn_trading_calendar()
+        if not baostock_cn_trading_calendar_covers_range(
+            local_calendar,
+            required_calendar_start,
+            candidate_end_date,
+        ):
+            raise RuntimeError(
+                "update-baostock-daily --max-tasks requires local baostock_cn_trading_calendar "
+                "to cover the requested planning window; run a calendar update first or use --dry-run."
+            )
+    if dry_run:
+        dry_start_date = (
+            start_candidate_date
+            if mode == "full"
+            else baostock_cn_trading_calendar_fetch_start(candidate_end_date, lookback)
+        )
+        records: list[dict[str, object]] = []
+        if include_baostock_cn_trading_calendar:
+            records.append(
+                dry_run_record(
+                    "baostock_cn_trading_calendar",
+                    "*",
+                    dry_start_date,
+                    candidate_end_date,
+                    store.baostock_cn_trading_calendar_path(),
+                    operation="write_baostock_cn_trading_calendar",
+                )
+            )
+        if include_baostock_cn_stock_basic:
+            records.append(
+                dry_run_record(
+                    "baostock_cn_stock_basic",
+                    "*",
+                    dry_start_date,
+                    candidate_end_date,
+                    store.baostock_cn_stock_basic_path(),
+                    operation="write_baostock_cn_stock_basic",
+                )
+            )
+
+        needs_code_pool = bool(daily_targets or include_baostock_cn_stock_adjustment_factor)
+        codes: list[str] = []
+        if needs_code_pool:
+            try:
+                baostock_cn_stock_basic_mode = "all" if mode == "full" else "active"
+                codes = resolve_codes(
+                    config,
+                    store,
+                    code,
+                    baostock_cn_stock_basic_mode=baostock_cn_stock_basic_mode,
+                )
+                codes = apply_limit(codes, max_codes, "max_codes")
+            except Exception as exc:
+                records.append(
+                    blocked_record(
+                        dataset,
+                        "*",
+                        dry_start_date,
+                        candidate_end_date,
+                        operation="resolve_codes",
+                        message=str(exc),
+                    )
+                )
+                return apply_limit(records, max_tasks, "max_tasks")
+
+        checkpoint_start = FULL_HISTORY_START_DATE if mode == "full" else dry_start_date
+        for stock_code in codes:
+            if include_baostock_cn_stock_adjustment_factor:
+                records.append(
+                    dry_run_record(
+                        BAOSTOCK_CN_STOCK_ADJUSTMENT_FACTOR_DATASET,
+                        stock_code,
+                        FULL_HISTORY_START_DATE,
+                        candidate_end_date,
+                        checkpoint_output_path(
+                            store,
+                            BAOSTOCK_CN_STOCK_ADJUSTMENT_FACTOR_DATASET,
+                            stock_code,
+                            candidate_end_date,
+                        ),
+                        operation="write_baostock_cn_stock_adjustment_factor",
+                    )
+                )
+            for target_dataset in daily_targets:
+                records.append(
+                    dry_run_record(
+                        target_dataset,
+                        stock_code,
+                        checkpoint_start,
+                        candidate_end_date,
+                        checkpoint_output_path(store, target_dataset, stock_code, candidate_end_date),
+                        operation="write_baostock_daily_bars",
+                    )
+                )
+        return apply_limit(records, max_tasks, "max_tasks")
+
+    store.ensure_layout()
     run_records: list[dict[str, object]] = []
     logger.info(
         "Daily update started dataset={} mode={} force={} resume={} candidate_start={} candidate_end={}",
@@ -172,6 +280,7 @@ def update_daily(
             if needs_code_pool
             else []
         )
+        codes = apply_limit(codes, max_codes, "max_codes")
 
         needs_baostock_cn_stock_adjustment_factor_api = include_baostock_cn_stock_adjustment_factor or _needs_baostock_cn_stock_adjustment_factors(daily_targets)
         codes = _prefilter_checkpointed_codes(
@@ -184,6 +293,11 @@ def update_daily(
             end_date,
             checkpoint_lookup,
         )
+        if max_tasks is not None and codes:
+            tasks_per_code = len(daily_targets) + (1 if needs_baostock_cn_stock_adjustment_factor_api else 0)
+            if tasks_per_code > 0:
+                max_code_tasks = int(max_tasks) // tasks_per_code
+                codes = codes[:max(max_code_tasks, 0)]
         metadata_batch = PipelineMetadataBatch(
             store,
             int(config.get("pipeline.metadata_flush_size", 200)),

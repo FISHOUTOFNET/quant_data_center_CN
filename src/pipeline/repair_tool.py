@@ -20,6 +20,7 @@ from src.pipeline.common import (
     replace_daily_range,
     trading_range_bounds,
 )
+from src.pipeline.dry_run import blocked_record, dry_run_record
 from src.pipeline.services import ensure_baostock_cn_trading_calendar_range, fetch_baostock_cn_stock_adjustment_factor, fetch_daily_bars, log_api_fetch
 from src.storage.duckdb_store import DuckDBStore
 from src.storage.parquet_store import ParquetStore
@@ -35,15 +36,74 @@ def repair(
     root: Path | None = None,
     build_views: bool = True,
     provider: str | None = None,
+    dry_run: bool = False,
 ) -> list[dict[str, str | int]]:
     """Re-fetch and replace a date range for one code and one daily_bar dataset."""
 
     config = ConfigManager(root)
     store = ParquetStore(root=config.root)
-    store.ensure_layout()
     start_candidate_date = date_iso(start)
     end_candidate_date = date_iso(end)
     results: list[dict[str, str | int]] = []
+
+    if dry_run:
+        try:
+            baostock_cn_trading_calendar_df = store.read_baostock_cn_trading_calendar()
+            start_date, end_date = trading_range_bounds(
+                baostock_cn_trading_calendar_df,
+                start_candidate_date,
+                end_candidate_date,
+            )
+        except Exception as exc:
+            return [
+                blocked_record(
+                    dataset,
+                    code,
+                    start_candidate_date,
+                    end_candidate_date,
+                    operation="resolve_trading_range",
+                    message=str(exc),
+                    replacement_rows=0,
+                    total_rows=0,
+                    path="",
+                )
+            ]
+
+        if dataset == BAOSTOCK_CN_STOCK_ADJUSTMENT_FACTOR_DATASET:
+            path = store.baostock_cn_stock_adjustment_factor_path(code)
+            return [
+                dry_run_record(
+                    BAOSTOCK_CN_STOCK_ADJUSTMENT_FACTOR_DATASET,
+                    code,
+                    FULL_HISTORY_START_DATE,
+                    end_date,
+                    path,
+                    operation="write_baostock_cn_stock_adjustment_factor",
+                    replacement_rows=0,
+                    total_rows=0,
+                    path=str(path),
+                )
+            ]
+
+        records: list[dict[str, object]] = []
+        for target_dataset in expand_daily_datasets(dataset):
+            path = store.baostock_daily_bar_path(target_dataset, code)
+            records.append(
+                dry_run_record(
+                    target_dataset,
+                    code,
+                    start_date,
+                    end_date,
+                    path,
+                    operation="write_baostock_daily_bars",
+                    replacement_rows=0,
+                    total_rows=0,
+                    path=str(path),
+                )
+            )
+        return records
+
+    store.ensure_layout()
 
     with create_provider(config, provider) as data_provider:
         baostock_cn_trading_calendar_df, _ = ensure_baostock_cn_trading_calendar_range(

@@ -40,6 +40,37 @@ def test_update_daily_uses_active_baostock_cn_stock_basic_codes_and_resumes(
     assert state["baostock_cn_stock_basic_calls"] == 1
 
 
+def test_update_daily_dry_run_plans_limited_tasks_without_provider_or_writes(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    _write_settings(tmp_path)
+
+    def fail_provider(*args, **kwargs):
+        raise AssertionError("dry-run must not create provider")
+
+    monkeypatch.setattr(update_daily_module, "create_provider", fail_provider)
+
+    records = update_daily_module.update_daily(
+        dataset="baostock_cn_stock_daily_bar_unadjusted",
+        code=("sh.600000", "sz.000001"),
+        end="2024-01-03",
+        lookback_days=1,
+        root=tmp_path,
+        build_views=False,
+        dry_run=True,
+        max_codes=1,
+        max_tasks=1,
+    )
+
+    assert [(item["status"], item["dataset"], item["code"]) for item in records] == [
+        ("dry_run", "baostock_cn_stock_daily_bar_unadjusted", "sh.600000")
+    ]
+    assert records[0]["row_count"] == 0
+    assert "code=sh.600000" in str(records[0]["output_path"])
+    assert not (tmp_path / "data").exists()
+
+
 def test_update_daily_checkpoint_lookup_reads_checkpoints_once_per_run(
     tmp_path,
     monkeypatch,

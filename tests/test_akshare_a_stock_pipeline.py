@@ -147,6 +147,79 @@ class FakeAStockClient:
         )
 
 
+def test_update_akshare_daily_bar_dry_run_plans_limited_tasks_without_client_or_writes(tmp_path) -> None:
+    _write_settings(tmp_path)
+
+    def fail_client_factory(config):
+        raise AssertionError("dry-run must not create AkShare client")
+
+    records = update_akshare_daily_bar(
+        mode="incremental",
+        adjustment="all",
+        code=("600000", "000001"),
+        start="2024-01-03",
+        end="2024-01-03",
+        max_codes=1,
+        max_tasks=1,
+        root=tmp_path,
+        build_views=False,
+        dry_run=True,
+        client_factory=fail_client_factory,
+    )
+
+    assert [(item["status"], item["dataset"], item["code"]) for item in records] == [
+        ("dry_run", "akshare_cn_stock_daily_bar_unadjusted", "600000")
+    ]
+    assert "code=600000" in str(records[0]["output_path"])
+    assert not (tmp_path / "data").exists()
+
+
+def test_update_akshare_delist_dry_run_limits_exchange_tasks_without_client_or_writes(tmp_path) -> None:
+    _write_settings(tmp_path)
+
+    def fail_client_factory(config):
+        raise AssertionError("dry-run must not create AkShare client")
+
+    records = update_akshare_delist(
+        snapshot_date="2024-01-03",
+        root=tmp_path,
+        build_views=False,
+        dry_run=True,
+        max_tasks=1,
+        client_factory=fail_client_factory,
+    )
+
+    assert [(item["status"], item["dataset"], item["code"]) for item in records] == [
+        ("dry_run", "akshare_cn_stock_delist_sh", "全部")
+    ]
+    assert "snapshot_date=2024-01-03" in str(records[0]["output_path"])
+    assert not (tmp_path / "data").exists()
+
+
+def test_update_akshare_spot_dry_run_plans_snapshot_without_client_or_writes(tmp_path) -> None:
+    _write_settings(tmp_path)
+
+    def fail_client_factory(config):
+        raise AssertionError("dry-run must not create AkShare client")
+
+    records = update_akshare_spot(
+        end="2024-01-03",
+        root=tmp_path,
+        build_views=False,
+        dry_run=True,
+        client_factory=fail_client_factory,
+        now=lambda: datetime(2024, 1, 3, 20, 0),
+    )
+
+    assert [item["status"] for item in records] == ["dry_run", "dry_run", "dry_run"]
+    assert {item["dataset"] for item in records} == {
+        "akshare_cn_stock_spot_quote_eastmoney",
+        "akshare_cn_stock_spot_quote_sina",
+        "akshare_cn_stock_daily_bar_unadjusted",
+    }
+    assert not (tmp_path / "data").exists()
+
+
 def test_update_akshare_delist_writes_manual_delist_snapshot(tmp_path) -> None:
     _write_settings(tmp_path)
     client = FakeAStockClient()

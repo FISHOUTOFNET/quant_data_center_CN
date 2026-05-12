@@ -57,6 +57,34 @@ def test_update_baostock_valuation_percentile_full_generates_all_source_dates_an
     assert latest["code"] == "sh.600000"
 
 
+def test_update_baostock_valuation_percentile_dry_run_plans_without_lock_or_write(tmp_path) -> None:
+    _write_settings(tmp_path)
+    store = ParquetStore(root=tmp_path)
+    store.ensure_layout()
+    store.write_baostock_daily_bars(
+        "baostock_cn_stock_daily_bar_unadjusted",
+        "sh.600000",
+        _source_daily([("2024-01-02", 0.0), ("2024-01-03", 5.0)]),
+    )
+
+    records = update_baostock_valuation_percentile(
+        mode="full",
+        code=("sh.600000", "sz.000001"),
+        root=tmp_path,
+        build_views=False,
+        dry_run=True,
+        max_codes=1,
+        max_tasks=1,
+    )
+
+    assert [(item["status"], item["dataset"], item["code"]) for item in records] == [
+        ("dry_run", "baostock_cn_stock_valuation_percentile", "sh.600000")
+    ]
+    assert "code=sh.600000" in str(records[0]["output_path"])
+    assert not (tmp_path / "data" / "locks" / "update_baostock_valuation_percentile.lock").exists()
+    assert not store.baostock_cn_stock_valuation_percentile_path("sh.600000").exists()
+
+
 def test_update_baostock_valuation_percentile_partial_appends_new_source_dates(tmp_path) -> None:
     _write_settings(tmp_path)
     store = ParquetStore(root=tmp_path)

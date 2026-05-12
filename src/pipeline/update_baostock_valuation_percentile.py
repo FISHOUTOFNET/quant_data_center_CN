@@ -17,6 +17,7 @@ import pyarrow.parquet as pq
 from src.analytics.valuation_percentile import compute_valuation_percentiles
 from src.pipeline.adjustments import UNADJUSTED_DAILY_DATASET
 from src.pipeline.common import PipelineCheckpointLookup, checkpoint_row, date_iso, should_skip_checkpoint
+from src.pipeline.dry_run import apply_limit, dry_run_record
 from src.pipeline.update_daily_metadata import _run_row, _status_row
 from src.storage.dataset_catalog import BAOSTOCK_CN_STOCK_VALUATION_PERCENTILE_DATASET
 from src.storage.duckdb_store import DuckDBStore
@@ -125,10 +126,29 @@ def update_baostock_valuation_percentile(
     resume: bool = True,
     force: bool = False,
     workers: int | None = None,
+    dry_run: bool = False,
+    max_codes: int | None = None,
+    max_tasks: int | None = None,
 ) -> list[dict[str, object]]:
     """Compute local Baostock valuation percentiles from unadjusted daily bars."""
 
     config = ConfigManager(root)
+    if not dry_run and max_tasks is not None and int(max_tasks) == 0:
+        return []
+    if dry_run:
+        return _update_baostock_valuation_percentile_unlocked(
+            mode=mode,
+            code=code,
+            start=start,
+            root=config.root,
+            build_views=build_views,
+            resume=resume,
+            force=force,
+            workers=workers,
+            dry_run=True,
+            max_codes=max_codes,
+            max_tasks=max_tasks,
+        )
     with _valuation_update_lock(config.root):
         return _update_baostock_valuation_percentile_unlocked(
             mode=mode,
@@ -139,6 +159,9 @@ def update_baostock_valuation_percentile(
             resume=resume,
             force=force,
             workers=workers,
+            dry_run=False,
+            max_codes=max_codes,
+            max_tasks=max_tasks,
         )
 
 
@@ -151,13 +174,17 @@ def _update_baostock_valuation_percentile_unlocked(
     resume: bool = True,
     force: bool = False,
     workers: int | None = None,
+    dry_run: bool = False,
+    max_codes: int | None = None,
+    max_tasks: int | None = None,
 ) -> list[dict[str, object]]:
     if mode not in {"partial", "full"}:
         raise ValueError(f"Unsupported valuation percentile mode: {mode}")
 
     config = ConfigManager(root)
     store = ParquetStore(root=config.root)
-    store.ensure_layout()
+    if not dry_run:
+        store.ensure_layout()
     dataset = BAOSTOCK_CN_STOCK_VALUATION_PERCENTILE_DATASET.name
     run_records: list[dict[str, object]] = []
     status_rows: list[dict[str, object]] = []
@@ -170,7 +197,7 @@ def _update_baostock_valuation_percentile_unlocked(
         "metadata_persist_seconds": 0.0,
     }
 
-    codes = _resolve_source_codes(store, code)
+    codes = apply_limit(_resolve_source_codes(store, code), max_codes, "max_codes")
     resolved_workers = _resolve_workers(config, workers)
     logger.info(
         "Baostock valuation percentile update started mode={} force={} resume={} workers={} codes={}",
@@ -210,7 +237,7 @@ def _update_baostock_valuation_percentile_unlocked(
         replace_start = _replace_start(store, stock_code, mode, start)
         checkpoint_start = replace_start or source_start
 
-        if _should_skip(
+        if not dry_run and _should_skip(
             store,
             dataset,
             stock_code,
@@ -234,6 +261,22 @@ def _update_baostock_valuation_percentile_unlocked(
                 output_path=output_path,
             )
         )
+
+    tasks = apply_limit(tasks, max_tasks, "max_tasks")
+
+    if dry_run:
+        return [
+            dry_run_record(
+                dataset,
+                task.code,
+                task.checkpoint_start,
+                task.source_end,
+                task.output_path,
+                operation="write_baostock_cn_stock_valuation_percentile",
+                mode=task.mode,
+            )
+            for task in tasks
+        ]
 
     if latest_prefilter_skipped:
         skipped_ratio = latest_prefilter_skipped / latest_prefilter_total * 100 if latest_prefilter_total else 0.0

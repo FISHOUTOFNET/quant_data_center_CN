@@ -8,6 +8,7 @@ from pathlib import Path
 from src.api.akshare_client import (
     normalize_akshare_code,
 )
+from src.pipeline.dry_run import apply_limit
 from src.pipeline.akshare_universe import latest_active_akshare_codes, resolve_akshare_universe_codes
 from src.storage.dataset_catalog import (
     AKSHARE_VALUATION_EASTMONEY_DATASET,
@@ -35,6 +36,7 @@ def plan_akshare_tasks(
     mode: str = "partial",
     code: tuple[str, ...] | list[str] | str | None = None,
     include_inactive: bool = False,
+    max_codes: int | None = None,
     max_tasks: int | None = None,
 ) -> list[AkShareTask]:
     if mode not in {"partial", "full"}:
@@ -51,11 +53,12 @@ def plan_akshare_tasks(
                     config,
                     store,
                     mode,
-                    code,
-                    include_inactive,
-                    active_codes,
-                )
+                code,
+                include_inactive,
+                active_codes,
+                max_codes,
             )
+        )
         else:
             raise ValueError(f"Unsupported AkShare dataset: {selected_dataset}")
 
@@ -71,6 +74,7 @@ def _akshare_cn_stock_valuation_eastmoney_tasks(
     code: tuple[str, ...] | list[str] | str | None,
     include_inactive: bool,
     active_codes: set[str],
+    max_codes: int | None,
 ) -> list[AkShareTask]:
     if isinstance(code, str):
         codes = [normalize_akshare_code(code)]
@@ -84,7 +88,7 @@ def _akshare_cn_stock_valuation_eastmoney_tasks(
             context="akshare_cn_stock_valuation_eastmoney",
         )
 
-    codes = list(dict.fromkeys(item for item in codes if item))
+    codes = apply_limit(dict.fromkeys(item for item in codes if item), max_codes, "max_codes")
     if not codes:
         raise ValueError("No AkShare stock codes found for akshare_cn_stock_valuation_eastmoney")
     tasks: list[AkShareTask] = []

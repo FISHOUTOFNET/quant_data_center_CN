@@ -18,6 +18,7 @@ from src.pipeline.akshare_common import (
     success_metadata,
 )
 from src.pipeline.common import should_skip_checkpoint
+from src.pipeline.dry_run import apply_limit, dry_run_record
 from src.storage.dataset_catalog import AKSHARE_DELIST_SH_DATASET, AKSHARE_DELIST_SZ_DATASET
 from src.storage.duckdb_store import DuckDBStore
 from src.storage.parquet_store import ParquetStore
@@ -50,18 +51,46 @@ def update_akshare_delist(
     force: bool = False,
     build_views: bool = True,
     exchanges: list[str] | None = None,
+    max_tasks: int | None = None,
     client: Any | None = None,
     client_factory: Callable[[ConfigManager], Any] | None = None,
+    dry_run: bool = False,
 ) -> list[dict[str, object]]:
     """Fetch delist snapshots for both SH and SZ exchanges."""
 
     config = ConfigManager(root)
     store = ParquetStore(root=config.root)
-    store.ensure_layout()
     resolved_snapshot_date = _date_iso(snapshot_date, datetime.now().date().isoformat())
 
     resolved_exchanges = exchanges if exchanges is not None else list(EXCHANGE_CONFIG.keys())
-    valid_exchanges = [exchange for exchange in resolved_exchanges if exchange in EXCHANGE_CONFIG]
+    valid_exchanges = apply_limit(
+        [exchange for exchange in resolved_exchanges if exchange in EXCHANGE_CONFIG],
+        max_tasks,
+        "max_tasks",
+    )
+    if not valid_exchanges and not dry_run:
+        return []
+
+    if dry_run:
+        records = []
+        for exchange in valid_exchanges:
+            exchange_config = EXCHANGE_CONFIG[exchange]
+            resolved_symbol = market if market else exchange_config.get("default_symbol", "全部")
+            output_path = getattr(store, exchange_config["path_method"])(resolved_snapshot_date)
+            records.append(
+                dry_run_record(
+                    exchange_config["dataset"].name,
+                    resolved_symbol,
+                    resolved_snapshot_date,
+                    resolved_snapshot_date,
+                    output_path,
+                    operation=str(exchange_config["write_method"]),
+                    exchange=exchange,
+                )
+            )
+        return records
+
+    store.ensure_layout()
 
     ak_client = client or (
         client_factory(config)

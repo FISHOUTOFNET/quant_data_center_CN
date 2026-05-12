@@ -150,6 +150,32 @@ def test_update_akshare_stock_valuation_partial_active_only_resume_and_force(
     assert not (tmp_path / "data" / "raw").exists()
 
 
+def test_update_akshare_dry_run_plans_tasks_without_client_or_writes(tmp_path) -> None:
+    _write_settings(tmp_path)
+
+    def fail_client_factory(config):
+        raise AssertionError("dry-run must not create AkShare client")
+
+    records = update_akshare(
+        dataset="akshare_cn_stock_valuation_eastmoney",
+        mode="full",
+        code=("600000", "000001"),
+        max_codes=1,
+        max_tasks=1,
+        root=tmp_path,
+        build_views=False,
+        dry_run=True,
+        client_factory=fail_client_factory,
+    )
+
+    assert [(item["status"], item["dataset"], item["code"]) for item in records] == [
+        ("dry_run", "akshare_cn_stock_valuation_eastmoney", "600000")
+    ]
+    assert records[0]["row_count"] == 0
+    assert "code=600000" in str(records[0]["output_path"])
+    assert not (tmp_path / "data").exists()
+
+
 def test_update_akshare_force_logs_stock_valuation_progress(
     tmp_path,
     monkeypatch,

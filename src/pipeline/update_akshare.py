@@ -24,6 +24,7 @@ from src.api.akshare_client import (
 )
 from src.pipeline.akshare_tasks import AkShareTask, plan_akshare_tasks
 from src.pipeline.common import PipelineCheckpointLookup, checkpoint_row, should_skip_checkpoint
+from src.pipeline.dry_run import dry_run_record
 from src.pipeline.services import PipelineMetadataBatch
 from src.storage.dataset_catalog import AKSHARE_VALUATION_EASTMONEY_DATASET
 from src.storage.duckdb_store import DuckDBStore
@@ -101,6 +102,7 @@ def update_akshare(
     mode: str = "partial",
     code: tuple[str, ...] | list[str] | str | None = None,
     include_inactive: bool = False,
+    max_codes: int | None = None,
     max_tasks: int | None = None,
     root: Path | None = None,
     resume: bool = True,
@@ -109,12 +111,12 @@ def update_akshare(
     workers: int | None = None,
     client: Any | None = None,
     client_factory: Callable[[ConfigManager], Any] | None = None,
+    dry_run: bool = False,
 ) -> list[dict[str, object]]:
     """Update AkShare crawler datasets without going through MarketDataProvider."""
 
     config = ConfigManager(root)
     store = ParquetStore(root=config.root)
-    store.ensure_layout()
     tasks = plan_akshare_tasks(
         config=config,
         store=store,
@@ -122,8 +124,25 @@ def update_akshare(
         mode=mode,
         code=code,
         include_inactive=include_inactive,
+        max_codes=max_codes,
         max_tasks=max_tasks,
     )
+    if not tasks and not dry_run:
+        return []
+    if dry_run:
+        return [
+            dry_run_record(
+                task.dataset,
+                task.key,
+                task.start_date,
+                task.end_date,
+                task.output_path,
+                operation="write_akshare_task",
+            )
+            for task in tasks
+        ]
+
+    store.ensure_layout()
     checkpoint_lookup = PipelineCheckpointLookup.from_store(store) if resume and not force else None
     ak_client = client or (
         client_factory(config)

@@ -21,6 +21,17 @@ from src.utils import paths
 from src.utils.logging import logger
 
 
+ROOT_OPTION = click.option(
+    "--root",
+    type=click.Path(file_okay=False, dir_okay=True, path_type=Path),
+    default=None,
+    help="Project root containing config/settings.yaml. Defaults to repository root.",
+)
+DRY_RUN_OPTION = click.option("--dry-run", is_flag=True, help="Plan selected writes without fetching or writing data.")
+MAX_CODES_OPTION = click.option("--max-codes", type=click.IntRange(min=0), default=None, help="Maximum stock codes to plan or execute.")
+MAX_TASKS_OPTION = click.option("--max-tasks", type=click.IntRange(min=0), default=None, help="Maximum write tasks to plan or execute.")
+
+
 def _validate_akshare_codes(ctx: click.Context, param: click.Parameter, value: tuple[str, ...]) -> tuple[str, ...]:
     del ctx, param
     try:
@@ -29,20 +40,23 @@ def _validate_akshare_codes(ctx: click.Context, param: click.Parameter, value: t
         raise click.BadParameter(str(exc)) from exc
 
 
-def configure_logging(root: Path | None = None) -> None:
+def configure_logging(root: Path | None = None, file_logging: bool = True) -> None:
     base = (root or paths.ROOT).resolve()
-    log_dir = base / "logs"
-    log_dir.mkdir(parents=True, exist_ok=True)
     logger.remove()
     logger.add(sys.stderr, level="INFO")
-    logger.add(log_dir / "qdc.log", level="INFO", rotation="10 MB", retention="30 days", encoding="utf-8")
+    if file_logging:
+        log_dir = base / "logs"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        logger.add(log_dir / "qdc.log", level="INFO", rotation="10 MB", retention="30 days", encoding="utf-8")
+
+
+def _configure_command_logging(root: Path | None, dry_run: bool = False) -> None:
+    configure_logging(root, file_logging=not dry_run)
 
 
 @click.group()
 def cli() -> None:
     """Quant data center CLI."""
-
-    configure_logging()
 
 
 @cli.command("update-baostock-daily")
@@ -56,6 +70,10 @@ def cli() -> None:
 @click.option("--resume/--no-resume", default=True, show_default=True, help="Resume from successful checkpoints.")
 @click.option("--force", is_flag=True, help="Ignore checkpoints and re-fetch all selected tasks.")
 @click.option("--build-duckdb-views/--no-build-duckdb-views", "build_views", default=True, show_default=True)
+@MAX_TASKS_OPTION
+@MAX_CODES_OPTION
+@DRY_RUN_OPTION
+@ROOT_OPTION
 def update_daily(
     dataset: str,
     start: str,
@@ -67,9 +85,14 @@ def update_daily(
     resume: bool,
     force: bool,
     build_views: bool,
+    max_tasks: int | None,
+    max_codes: int | None,
+    dry_run: bool,
+    root: Path | None,
 ) -> None:
     """Run daily lookback update or full historical initialization."""
 
+    _configure_command_logging(root, dry_run)
     records = run_update_daily(
         dataset=dataset,
         start=start,
@@ -81,6 +104,10 @@ def update_daily(
         build_views=build_views,
         resume=resume,
         force=force,
+        root=root,
+        dry_run=dry_run,
+        max_codes=max_codes,
+        max_tasks=max_tasks,
     )
     for item in records:
         click.echo(f"{item['dataset']} {item['code']} status={item['status']} rows={item['row_count']}")
@@ -96,6 +123,9 @@ def update_daily(
 @click.option("--resume/--no-resume", default=True, show_default=True, help="Resume from successful checkpoints.")
 @click.option("--force", is_flag=True, help="Ignore checkpoints and re-fetch all selected tasks.")
 @click.option("--build-duckdb-views/--no-build-duckdb-views", "build_views", default=True, show_default=True)
+@MAX_CODES_OPTION
+@DRY_RUN_OPTION
+@ROOT_OPTION
 def update_akshare(
     dataset: str,
     mode: str,
@@ -106,19 +136,26 @@ def update_akshare(
     resume: bool,
     force: bool,
     build_views: bool,
+    max_codes: int | None,
+    dry_run: bool,
+    root: Path | None,
 ) -> None:
     """Run AkShare crawler dataset updates."""
 
+    _configure_command_logging(root, dry_run)
     records = run_update_akshare(
         dataset=dataset,
         mode=mode,
         code=code,
         include_inactive=include_inactive,
+        max_codes=max_codes,
         max_tasks=max_tasks,
         workers=workers,
         resume=resume,
         force=force,
         build_views=build_views,
+        root=root,
+        dry_run=dry_run,
     )
     for item in records:
         click.echo(f"{item['dataset']} {item['code']} status={item['status']} rows={item['row_count']}")
@@ -131,6 +168,9 @@ def update_akshare(
 @click.option("--resume/--no-resume", default=True, show_default=True, help="Resume from successful checkpoints.")
 @click.option("--force", is_flag=True, help="Ignore checkpoints and re-fetch the snapshot.")
 @click.option("--build-duckdb-views/--no-build-duckdb-views", "build_views", default=True, show_default=True)
+@MAX_TASKS_OPTION
+@DRY_RUN_OPTION
+@ROOT_OPTION
 def update_akshare_delist(
     market: str | None,
     snapshot_date: str | None,
@@ -138,9 +178,13 @@ def update_akshare_delist(
     resume: bool,
     force: bool,
     build_views: bool,
+    max_tasks: int | None,
+    dry_run: bool,
+    root: Path | None,
 ) -> None:
     """Manually update AkShare SH and SZ delisted stock data."""
 
+    _configure_command_logging(root, dry_run)
     exchanges = list(exchange) if exchange else None
     records = run_update_akshare_delist(
         market=market,
@@ -149,6 +193,9 @@ def update_akshare_delist(
         resume=resume,
         force=force,
         build_views=build_views,
+        root=root,
+        dry_run=dry_run,
+        max_tasks=max_tasks,
     )
     for item in records:
         click.echo(f"{item['dataset']} {item['code']} status={item['status']} rows={item['row_count']}")
@@ -159,19 +206,26 @@ def update_akshare_delist(
 @click.option("--resume/--no-resume", default=True, show_default=True, help="Resume from successful checkpoints.")
 @click.option("--force", is_flag=True, help="Ignore checkpoints and re-fetch the spot snapshot.")
 @click.option("--build-duckdb-views/--no-build-duckdb-views", "build_views", default=True, show_default=True)
+@DRY_RUN_OPTION
+@ROOT_OPTION
 def update_akshare_spot(
     end: str | None,
     resume: bool,
     force: bool,
     build_views: bool,
+    dry_run: bool,
+    root: Path | None,
 ) -> None:
     """Run AkShare A-share daily spot snapshot with fallback."""
 
+    _configure_command_logging(root, dry_run)
     records = run_update_akshare_spot(
         end=end,
         resume=resume,
         force=force,
         build_views=build_views,
+        root=root,
+        dry_run=dry_run,
     )
     for item in records:
         click.echo(f"{item['dataset']} {item['code']} status={item['status']} rows={item['row_count']}")
@@ -188,6 +242,9 @@ def update_akshare_spot(
 @click.option("--resume/--no-resume", default=True, show_default=True, help="Resume from successful checkpoints.")
 @click.option("--force", is_flag=True, help="Ignore checkpoints and re-fetch all selected tasks.")
 @click.option("--build-duckdb-views/--no-build-duckdb-views", "build_views", default=True, show_default=True)
+@MAX_CODES_OPTION
+@DRY_RUN_OPTION
+@ROOT_OPTION
 def update_akshare_daily_bar(
     mode: str,
     adjustment: str,
@@ -199,20 +256,27 @@ def update_akshare_daily_bar(
     resume: bool,
     force: bool,
     build_views: bool,
+    max_codes: int | None,
+    dry_run: bool,
+    root: Path | None,
 ) -> None:
     """Run AkShare daily-bar full or manual incremental update."""
 
+    _configure_command_logging(root, dry_run)
     records = run_update_akshare_daily_bar(
         mode=mode,
         adjustment=adjustment,
         code=code,
         start=start,
         end=end,
+        max_codes=max_codes,
         max_tasks=max_tasks,
         workers=workers,
         resume=resume,
         force=force,
         build_views=build_views,
+        root=root,
+        dry_run=dry_run,
     )
     for item in records:
         click.echo(f"{item['dataset']} {item['code']} status={item['status']} rows={item['row_count']}")
@@ -226,6 +290,10 @@ def update_akshare_daily_bar(
 @click.option("--resume/--no-resume", default=True, show_default=True, help="Resume from successful checkpoints.")
 @click.option("--force", is_flag=True, help="Ignore checkpoints and recompute selected tasks.")
 @click.option("--build-duckdb-views/--no-build-duckdb-views", "build_views", default=True, show_default=True)
+@MAX_TASKS_OPTION
+@MAX_CODES_OPTION
+@DRY_RUN_OPTION
+@ROOT_OPTION
 def update_baostock_valuation_percentile(
     mode: str,
     code: tuple[str, ...],
@@ -234,9 +302,14 @@ def update_baostock_valuation_percentile(
     resume: bool,
     force: bool,
     build_views: bool,
+    max_tasks: int | None,
+    max_codes: int | None,
+    dry_run: bool,
+    root: Path | None,
 ) -> None:
     """Compute Baostock valuation percentile derived dataset."""
 
+    _configure_command_logging(root, dry_run)
     records = run_update_baostock_valuation_percentile(
         mode=mode,
         code=code,
@@ -245,6 +318,10 @@ def update_baostock_valuation_percentile(
         resume=resume,
         force=force,
         build_views=build_views,
+        root=root,
+        dry_run=dry_run,
+        max_codes=max_codes,
+        max_tasks=max_tasks,
     )
     for item in records:
         click.echo(f"{item['dataset']} {item['code']} status={item['status']} rows={item['row_count']}")
@@ -257,10 +334,31 @@ def update_baostock_valuation_percentile(
 @click.option("--dataset", required=True, help="Baostock daily-bar or adjustment-factor dataset id.")
 @click.option("--provider", default=None, help="Data provider name. Defaults to api.provider.")
 @click.option("--build-duckdb-views/--no-build-duckdb-views", "build_views", default=True, show_default=True)
-def repair(code: str, start: str, end: str, dataset: str, provider: str | None, build_views: bool) -> None:
+@DRY_RUN_OPTION
+@ROOT_OPTION
+def repair(
+    code: str,
+    start: str,
+    end: str,
+    dataset: str,
+    provider: str | None,
+    build_views: bool,
+    dry_run: bool,
+    root: Path | None,
+) -> None:
     """Repair a stock/date range."""
 
-    results = run_repair(code=code, start=start, end=end, dataset=dataset, provider=provider, build_views=build_views)
+    _configure_command_logging(root, dry_run)
+    results = run_repair(
+        code=code,
+        start=start,
+        end=end,
+        dataset=dataset,
+        provider=provider,
+        build_views=build_views,
+        root=root,
+        dry_run=dry_run,
+    )
     for item in results:
         click.echo(
             f"{item['dataset']} {item['code']} replacement_rows={item['replacement_rows']} "
@@ -269,11 +367,19 @@ def repair(code: str, start: str, end: str, dataset: str, provider: str | None, 
 
 
 @cli.command("build-duckdb-views")
-def build_views() -> None:
+@DRY_RUN_OPTION
+@ROOT_OPTION
+def build_views(dry_run: bool, root: Path | None) -> None:
     """Build DuckDB views over current Parquet files."""
 
-    sqls = DuckDBStore().build_views()
-    click.echo(f"Built {len(sqls)} views at {paths.DUCKDB_FILE}")
+    _configure_command_logging(root, dry_run)
+    store = DuckDBStore(root=root)
+    if dry_run:
+        sqls = store.view_sqls()
+        click.echo(f"duckdb_views * status=dry_run rows=0 views={len(sqls)} path={store.duckdb_file}")
+        return
+    sqls = store.build_views()
+    click.echo(f"Built {len(sqls)} views at {store.duckdb_file}")
 
 
 @cli.command("serve-registry")
@@ -282,6 +388,7 @@ def build_views() -> None:
 def registry_server(host: str, port: int) -> None:
     """Serve read-only dataset registry and Parquet query endpoints."""
 
+    configure_logging()
     click.echo(f"Serving QDC registry at http://{host}:{port}")
     serve_registry(host=host, port=port)
 

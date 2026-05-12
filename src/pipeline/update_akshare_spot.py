@@ -25,6 +25,7 @@ from src.pipeline.common import (
     latest_trading_day_on_or_before,
     should_skip_checkpoint,
 )
+from src.pipeline.dry_run import dry_run_record
 from src.storage.dataset_catalog import (
     AKSHARE_SPOT_QUOTE_EASTMONEY_DATASET,
     AKSHARE_SPOT_QUOTE_SINA_DATASET,
@@ -46,16 +47,48 @@ def update_akshare_spot(
     client: Any | None = None,
     client_factory: Callable[[ConfigManager], Any] | None = None,
     now: Callable[[], datetime] | None = None,
+    dry_run: bool = False,
 ) -> list[dict[str, object]]:
     """Fetch akshare_cn_stock_spot_quote_eastmoney and map successful close snapshots into daily_bar_unadjusted."""
 
     config = ConfigManager(root)
     store = ParquetStore(root=config.root)
     _ensure_spot_quote_close_window(config, now, store)
-    store.ensure_layout()
-    trade_date = _resolve_trade_date(config, end)
+    trade_date = _resolve_trade_date(config, end) if not dry_run else _resolve_trade_date_for_dry_run(config, end)
     dataset = AKSHARE_SPOT_QUOTE_EASTMONEY_DATASET.name
     output_path = store.akshare_cn_stock_spot_quote_eastmoney_path(trade_date)
+    if dry_run:
+        daily_bar_dataset = akshare_daily_bar_dataset_id("unadjusted")
+        return [
+            dry_run_record(
+                dataset,
+                "*",
+                trade_date,
+                trade_date,
+                output_path,
+                operation="write_stock_spot_quote_eastmoney",
+            ),
+            dry_run_record(
+                AKSHARE_SPOT_QUOTE_SINA_DATASET.name,
+                "*",
+                trade_date,
+                trade_date,
+                store.akshare_cn_stock_spot_quote_sina_path(trade_date),
+                operation="write_stock_spot_quote_sina",
+                message="fallback path if EastMoney fetch fails",
+            ),
+            dry_run_record(
+                daily_bar_dataset,
+                "*",
+                trade_date,
+                trade_date,
+                store.parquet_dir / daily_bar_dataset,
+                operation="append_akshare_daily_bar_batch",
+                message="spot-derived close snapshot daily bar path",
+            ),
+        ]
+
+    store.ensure_layout()
     progress_processed = 0
     progress_success = 0
     progress_failed = 0
@@ -394,6 +427,23 @@ def _resolve_trade_date(config: ConfigManager, end: str | date | None) -> str:
             f"No trading day found on or before {candidate}. "
             "Please check baostock_cn_trading_calendar data."
         )
+
+
+def _resolve_trade_date_for_dry_run(config: ConfigManager, end: str | date | None) -> str:
+    candidate = _date_iso(end, default_candidate_date(config)) if end is not None else default_candidate_date(config)
+    store = ParquetStore(root=config.root)
+    try:
+        baostock_cn_trading_calendar_df = store.read_baostock_cn_trading_calendar()
+    except Exception:
+        return candidate
+    if baostock_cn_trading_calendar_df.empty:
+        return candidate
+    if is_trading_day(baostock_cn_trading_calendar_df, candidate):
+        return candidate
+    try:
+        return latest_trading_day_on_or_before(baostock_cn_trading_calendar_df, candidate)
+    except ValueError:
+        return candidate
 
 
 def _ensure_spot_quote_close_window(

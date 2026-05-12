@@ -4,6 +4,7 @@ import pandas as pd
 
 import src.pipeline.repair_tool as repair_module
 import src.storage.parquet_store as parquet_store_module
+from src.storage.parquet_store import ParquetStore
 
 
 def test_repair_normalizes_non_trading_range_to_trading_bounds(
@@ -148,6 +149,44 @@ def test_repair_normalizes_non_trading_range_to_trading_bounds(
             "status_rows": 0,
         }
     ]
+
+
+def test_repair_dry_run_plans_range_without_provider_or_writes(tmp_path, monkeypatch) -> None:
+    _write_settings(tmp_path)
+    store = ParquetStore(root=tmp_path)
+    store.ensure_layout()
+    store.write_baostock_cn_trading_calendar(
+        pd.DataFrame(
+            [
+                {"calendar_date": "2024-01-06", "is_trading_day": "0"},
+                {"calendar_date": "2024-01-08", "is_trading_day": "1"},
+                {"calendar_date": "2024-01-12", "is_trading_day": "1"},
+                {"calendar_date": "2024-01-14", "is_trading_day": "0"},
+            ]
+        )
+    )
+
+    def fail_provider(*args, **kwargs):
+        raise AssertionError("dry-run must not create provider")
+
+    monkeypatch.setattr(repair_module, "create_provider", fail_provider)
+
+    records = repair_module.repair(
+        code="sh.600000",
+        start="2024-01-06",
+        end="2024-01-14",
+        dataset="baostock_cn_stock_daily_bar_qfq",
+        root=tmp_path,
+        build_views=False,
+        dry_run=True,
+    )
+
+    assert [(item["status"], item["dataset"], item["code"]) for item in records] == [
+        ("dry_run", "baostock_cn_stock_daily_bar_qfq", "sh.600000")
+    ]
+    assert records[0]["start_date"] == "2024-01-08"
+    assert records[0]["end_date"] == "2024-01-12"
+    assert not store.baostock_daily_bar_path("baostock_cn_stock_daily_bar_qfq", "sh.600000").exists()
 
 
 def _write_settings(root) -> None:
