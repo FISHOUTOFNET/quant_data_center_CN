@@ -2,15 +2,18 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, TypeVar
 
 import baostock as bs
 import pandas as pd
-from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
+from tenacity import Retrying, retry_if_exception_type, stop_after_attempt, wait_exponential
 
 from src.pipeline.common import FULL_HISTORY_START_DATE
 from src.utils.logging import logger
+
+T = TypeVar("T")
 
 
 class BaostockError(RuntimeError):
@@ -67,12 +70,19 @@ class BaostockClient:
         if not self.logged_in:
             self.login()
 
-    @retry(
-        retry=retry_if_exception_type(BaostockError),
-        stop=stop_after_attempt(3),
-        wait=wait_exponential(multiplier=1, min=1, max=8),
-        reraise=True,
-    )
+    def _run_query_with_retry(self, query: Callable[[], T]) -> T:
+        self._ensure_logged_in()
+        max_attempts = max(1, int(self.max_attempts))
+        for attempt in Retrying(
+            retry=retry_if_exception_type(BaostockError),
+            stop=stop_after_attempt(max_attempts),
+            wait=wait_exponential(multiplier=1, min=1, max=8),
+            reraise=True,
+        ):
+            with attempt:
+                return query()
+        raise RuntimeError("unreachable")
+
     def query_history_k_data_plus(
         self,
         code: str,
@@ -82,67 +92,57 @@ class BaostockClient:
         frequency: str = "d",
         adjust_flag: str = "3",
     ) -> pd.DataFrame:
-        self._ensure_logged_in()
-        result = bs.query_history_k_data_plus(
-            code=code,
-            fields=fields,
-            start_date=start_date,
-            end_date=end_date,
-            frequency=frequency,
-            adjustflag=adjust_flag,
-        )
-        return _result_to_dataframe(result, "query_history_k_data_plus")
+        def query() -> pd.DataFrame:
+            result = bs.query_history_k_data_plus(
+                code=code,
+                fields=fields,
+                start_date=start_date,
+                end_date=end_date,
+                frequency=frequency,
+                adjustflag=adjust_flag,
+            )
+            return _result_to_dataframe(result, "query_history_k_data_plus")
 
-    @retry(
-        retry=retry_if_exception_type(BaostockError),
-        stop=stop_after_attempt(3),
-        wait=wait_exponential(multiplier=1, min=1, max=8),
-        reraise=True,
-    )
+        return self._run_query_with_retry(query)
+
     def query_baostock_cn_stock_adjustment_factor(
         self,
         code: str,
         start_date: str,
         end_date: str,
     ) -> pd.DataFrame:
-        self._ensure_logged_in()
-        result = bs.query_adjust_factor(
-            code=code,
-            start_date=start_date,
-            end_date=end_date,
-        )
-        return _result_to_dataframe(result, "query_adjust_factor")
+        def query() -> pd.DataFrame:
+            result = bs.query_adjust_factor(
+                code=code,
+                start_date=start_date,
+                end_date=end_date,
+            )
+            return _result_to_dataframe(result, "query_adjust_factor")
 
-    @retry(
-        retry=retry_if_exception_type(BaostockError),
-        stop=stop_after_attempt(3),
-        wait=wait_exponential(multiplier=1, min=1, max=8),
-        reraise=True,
-    )
+        return self._run_query_with_retry(query)
+
     def query_baostock_cn_stock_basic(self, code: str | None = None, code_name: str | None = None) -> pd.DataFrame:
-        self._ensure_logged_in()
-        kwargs: dict[str, str] = {}
-        if code:
-            kwargs["code"] = code
-        if code_name:
-            kwargs["code_name"] = code_name
-        result = bs.query_stock_basic(**kwargs)
-        return _result_to_dataframe(result, "query_stock_basic")
+        def query() -> pd.DataFrame:
+            kwargs: dict[str, str] = {}
+            if code:
+                kwargs["code"] = code
+            if code_name:
+                kwargs["code_name"] = code_name
+            result = bs.query_stock_basic(**kwargs)
+            return _result_to_dataframe(result, "query_stock_basic")
 
-    @retry(
-        retry=retry_if_exception_type(BaostockError),
-        stop=stop_after_attempt(3),
-        wait=wait_exponential(multiplier=1, min=1, max=8),
-        reraise=True,
-    )
+        return self._run_query_with_retry(query)
+
     def query_trade_dates(
         self,
         start_date: str | None = None,
         end_date: str | None = None,
     ) -> pd.DataFrame:
-        self._ensure_logged_in()
-        kwargs: dict[str, str] = {"start_date": start_date or FULL_HISTORY_START_DATE}
-        if end_date is not None:
-            kwargs["end_date"] = end_date
-        result = bs.query_trade_dates(**kwargs)
-        return _result_to_dataframe(result, "query_trade_dates")
+        def query() -> pd.DataFrame:
+            kwargs: dict[str, str] = {"start_date": start_date or FULL_HISTORY_START_DATE}
+            if end_date is not None:
+                kwargs["end_date"] = end_date
+            result = bs.query_trade_dates(**kwargs)
+            return _result_to_dataframe(result, "query_trade_dates")
+
+        return self._run_query_with_retry(query)
