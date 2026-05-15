@@ -343,7 +343,7 @@ def _run_sina_fallback(
             fallback_reason=fallback_reason,
         )
         output_path = store.write_stock_spot_quote_sina(trade_date, response.data)
-        daily_bar_rows = spot_sina_to_daily_bar_unadjusted(response.data)
+        daily_bar_rows = _drop_delisted_daily_bar_rows(store, spot_sina_to_daily_bar_unadjusted(response.data))
         daily_bar_output_path = (
             _write_spot_daily_bar_rows(store, daily_bar_rows)
             if update_daily_bar_from_spot
@@ -485,10 +485,19 @@ def _ensure_spot_quote_close_window(
 
 
 def _drop_delisted_daily_bar_rows(store: ParquetStore, daily_bar_rows: pd.DataFrame) -> pd.DataFrame:
-    delist_df = store.read_latest_akshare_cn_stock_delist_sh()
-    if daily_bar_rows.empty or delist_df.empty or "code" not in delist_df.columns:
+    if daily_bar_rows.empty:
         return daily_bar_rows
-    delisted = set(normalize_akshare_code_list(delist_df["code"].dropna().astype(str).tolist()))
+
+    delist_frames = [
+        store.read_latest_akshare_cn_stock_delist_sh(),
+        store.read_latest_akshare_cn_stock_delist_sz(),
+    ]
+    delisted: set[str] = set()
+    for delist_df in delist_frames:
+        if delist_df.empty or "code" not in delist_df.columns:
+            continue
+        delisted.update(normalize_akshare_code_list(delist_df["code"].dropna().astype(str).tolist()))
+
     if not delisted:
         return daily_bar_rows
     codes = daily_bar_rows["code"].astype("string").map(lambda value: str(value).strip())

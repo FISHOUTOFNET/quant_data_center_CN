@@ -42,6 +42,7 @@ class FakeAStockClient:
     def __init__(self) -> None:
         self.calls: list[tuple[str, dict[str, object]]] = []
         self.fail_spot_em = False
+        self.include_sz_delisted_spot = False
 
     def fetch_akshare_cn_stock_delist_sh(self, symbol: str = "全部", snapshot_date: str | None = None) -> AkShareResponse:
         self.calls.append(("stock_info_sh_delist", {"symbol": symbol, "snapshot_date": snapshot_date}))
@@ -92,38 +93,23 @@ class FakeAStockClient:
         if self.fail_spot_em:
             raise RuntimeError("planned spot_em failure")
         data = _spot_em_data(trade_date or "2024-01-03")
+        if self.include_sz_delisted_spot:
+            data = pd.concat(
+                [data, pd.DataFrame([_spot_em_row(trade_date or "2024-01-03", "000001")])],
+                ignore_index=True,
+            )
         return _response("stock_zh_a_spot_em", {"trade_date": trade_date}, data)
 
     def fetch_spot_quote_sina(self, trade_date: str | None = None, fallback_reason: str = "") -> AkShareResponse:
         self.calls.append(
             ("stock_zh_a_spot", {"trade_date": trade_date, "fallback_reason": fallback_reason})
         )
-        data = pd.DataFrame(
-            [
-                {
-                    "trade_date": trade_date,
-                    "code": "600000",
-                    "source_symbol": "sh600000",
-                    "name": "PF Bank",
-                    "last_price": 8.3,
-                    "price_change": 0.1,
-                    "pct_change": 1.2,
-                    "bid": 8.29,
-                    "ask": 8.31,
-                    "prev_close": 8.2,
-                    "open": 8.2,
-                    "high": 8.4,
-                    "low": 8.1,
-                    "volume": 120000.0,
-                    "amount": 9960.0,
-                    "source_timestamp": "15:00:00",
-                    "source_endpoint": "stock_zh_a_spot",
-                    "is_fallback": True,
-                    "fallback_reason": fallback_reason,
-                    "fetched_at": datetime(2024, 1, 3, 16, 0),
-                }
-            ]
-        )
+        data = pd.DataFrame([_spot_sina_row(trade_date, "600000", "sh600000", fallback_reason)])
+        if self.include_sz_delisted_spot:
+            data = pd.concat(
+                [data, pd.DataFrame([_spot_sina_row(trade_date, "000001", "sz000001", fallback_reason)])],
+                ignore_index=True,
+            )
         return _response("stock_zh_a_spot", {"trade_date": trade_date}, data)
 
     def fetch_daily_bars(
@@ -278,6 +264,29 @@ def test_update_akshare_spot_success_writes_snapshot_and_hist_spot_quote_close(t
     assert client.calls == []
 
 
+def test_update_akshare_spot_filters_sz_delisted_codes_from_eastmoney_daily_bar(tmp_path) -> None:
+    _write_settings(tmp_path)
+    _write_sz_delist_snapshot(tmp_path)
+    client = FakeAStockClient()
+    client.include_sz_delisted_spot = True
+
+    update_akshare_spot(
+        end="2024-01-03",
+        root=tmp_path,
+        build_views=False,
+        client=client,
+        now=lambda: datetime(2024, 1, 3, 18, 0),
+    )
+
+    store = ParquetStore(root=tmp_path)
+    spot = store.read_stock_spot_quote_eastmoney("2024-01-03")
+    hist_active = store.read_akshare_daily_bars("unadjusted", "600000")
+    hist_delisted = store.read_akshare_daily_bars("unadjusted", "000001")
+    assert set(spot["code"].astype(str)) == {"600000", "000001"}
+    assert not hist_active.empty
+    assert hist_delisted.empty
+
+
 def test_update_akshare_spot_fallback_writes_sina_and_hist(tmp_path) -> None:
     _write_settings(tmp_path)
     client = FakeAStockClient()
@@ -304,6 +313,30 @@ def test_update_akshare_spot_fallback_writes_sina_and_hist(tmp_path) -> None:
     assert "planned spot_em failure" in fallback.loc[0, "fallback_reason"]
     assert hist.loc[0, "source_endpoint"] == "stock_zh_a_spot"
     assert hist.loc[0, "quality_status"] == "spot_quote_close"
+
+
+def test_update_akshare_spot_filters_sz_delisted_codes_from_sina_fallback_daily_bar(tmp_path) -> None:
+    _write_settings(tmp_path)
+    _write_sz_delist_snapshot(tmp_path)
+    client = FakeAStockClient()
+    client.fail_spot_em = True
+    client.include_sz_delisted_spot = True
+
+    update_akshare_spot(
+        end="2024-01-03",
+        root=tmp_path,
+        build_views=False,
+        client=client,
+        now=lambda: datetime(2024, 1, 3, 18, 0),
+    )
+
+    store = ParquetStore(root=tmp_path)
+    fallback = store.read_stock_spot_quote_sina("2024-01-03")
+    hist_active = store.read_akshare_daily_bars("unadjusted", "600000")
+    hist_delisted = store.read_akshare_daily_bars("unadjusted", "000001")
+    assert set(fallback["code"].astype(str)) == {"600000", "000001"}
+    assert not hist_active.empty
+    assert hist_delisted.empty
 
 
 def test_update_akshare_spot_rejects_realtime_window_before_fetch(tmp_path) -> None:
@@ -736,32 +769,84 @@ def _response(endpoint: str, params: dict[str, object], data: pd.DataFrame) -> A
 
 
 def _spot_em_data(trade_date: str) -> pd.DataFrame:
-    return pd.DataFrame(
-        [
-            {
-                "trade_date": trade_date,
-                "code": "600000",
-                "source_symbol": "600000",
-                "name": "PF Bank",
-                "last_price": 8.3,
-                "price_change": 0.1,
-                "pct_change": 1.2,
-                "open": 8.2,
-                "high": 8.4,
-                "low": 8.1,
-                "prev_close": 8.2,
-                "volume": 120000.0,
-                "amount": 9960.0,
-                "turnover_rate": 0.12,
-                "amplitude": 3.0,
-                "pe_dynamic": 5.1,
-                "pb": 0.71,
-                "total_market_cap": 101000000.0,
-                "float_market_cap": 81000000.0,
-                "source_endpoint": "stock_zh_a_spot_em",
-                "fetched_at": datetime(2024, 1, 3, 16, 0),
-            }
-        ]
+    return pd.DataFrame([_spot_em_row(trade_date, "600000")])
+
+
+def _spot_em_row(trade_date: str, code: str) -> dict[str, object]:
+    return {
+        "trade_date": trade_date,
+        "code": code,
+        "source_symbol": code,
+        "name": "PF Bank" if code == "600000" else "Old SZ Corp",
+        "last_price": 8.3,
+        "price_change": 0.1,
+        "pct_change": 1.2,
+        "open": 8.2,
+        "high": 8.4,
+        "low": 8.1,
+        "prev_close": 8.2,
+        "volume": 120000.0,
+        "amount": 9960.0,
+        "turnover_rate": 0.12,
+        "amplitude": 3.0,
+        "pe_dynamic": 5.1,
+        "pb": 0.71,
+        "total_market_cap": 101000000.0,
+        "float_market_cap": 81000000.0,
+        "source_endpoint": "stock_zh_a_spot_em",
+        "fetched_at": datetime(2024, 1, 3, 16, 0),
+    }
+
+
+def _spot_sina_row(
+    trade_date: str | None,
+    code: str,
+    source_symbol: str,
+    fallback_reason: str,
+) -> dict[str, object]:
+    return {
+        "trade_date": trade_date,
+        "code": code,
+        "source_symbol": source_symbol,
+        "name": "PF Bank" if code == "600000" else "Old SZ Corp",
+        "last_price": 8.3,
+        "price_change": 0.1,
+        "pct_change": 1.2,
+        "bid": 8.29,
+        "ask": 8.31,
+        "prev_close": 8.2,
+        "open": 8.2,
+        "high": 8.4,
+        "low": 8.1,
+        "volume": 120000.0,
+        "amount": 9960.0,
+        "source_timestamp": "15:00:00",
+        "source_endpoint": "stock_zh_a_spot",
+        "is_fallback": True,
+        "fallback_reason": fallback_reason,
+        "fetched_at": datetime(2024, 1, 3, 16, 0),
+    }
+
+
+def _write_sz_delist_snapshot(root) -> None:
+    ParquetStore(root=root).write_akshare_cn_stock_delist_sz(
+        "2024-01-03",
+        pd.DataFrame(
+            [
+                {
+                    "snapshot_date": "2024-01-03",
+                    "exchange": "sz",
+                    "market": "终止上市公司",
+                    "code": "000001",
+                    "source_symbol": "000001",
+                    "name": "Old SZ Corp",
+                    "list_date": "1991-04-03",
+                    "delist_date": "2024-01-02",
+                    "source_endpoint": "stock_info_sz_delist",
+                    "fetched_at": datetime(2024, 1, 3, 16, 0),
+                }
+            ]
+        ),
     )
 
 
