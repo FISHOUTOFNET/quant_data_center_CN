@@ -117,41 +117,63 @@ class DuckDBMetadataStore:
             else None
         )
         with self._connection() as conn:
-            if runs is not None and not runs.empty:
-                self._register_and_execute(conn, runs, "INSERT INTO pipeline_runs SELECT * FROM incoming")
-            if statuses is not None and not statuses.empty:
-                self._register_and_execute(
-                    conn,
-                    statuses,
-                    """
+            registered_relations: list[str] = []
+            transaction_open = False
+            try:
+                if runs is not None and not runs.empty:
+                    conn.register("incoming_runs", runs)
+                    registered_relations.append("incoming_runs")
+                if statuses is not None and not statuses.empty:
+                    conn.register("incoming_statuses", statuses)
+                    registered_relations.append("incoming_statuses")
+                if checkpoints is not None and not checkpoints.empty:
+                    conn.register("incoming_checkpoints", checkpoints)
+                    registered_relations.append("incoming_checkpoints")
+                if not registered_relations:
+                    return
+
+                conn.execute("BEGIN TRANSACTION")
+                transaction_open = True
+                if runs is not None and not runs.empty:
+                    conn.execute("INSERT INTO pipeline_runs SELECT * FROM incoming_runs")
+                if statuses is not None and not statuses.empty:
+                    conn.execute(
+                        """
                     DELETE FROM dataset_update_status
                     WHERE EXISTS (
                         SELECT 1
-                        FROM incoming
-                        WHERE incoming.dataset = dataset_update_status.dataset
-                          AND incoming.code = dataset_update_status.code
+                        FROM incoming_statuses
+                        WHERE incoming_statuses.dataset = dataset_update_status.dataset
+                          AND incoming_statuses.code = dataset_update_status.code
                     )
-                    """,
-                    "INSERT INTO dataset_update_status SELECT * FROM incoming",
-                )
-            if checkpoints is not None and not checkpoints.empty:
-                self._register_and_execute(
-                    conn,
-                    checkpoints,
-                    """
+                        """
+                    )
+                    conn.execute("INSERT INTO dataset_update_status SELECT * FROM incoming_statuses")
+                if checkpoints is not None and not checkpoints.empty:
+                    conn.execute(
+                        """
                     DELETE FROM pipeline_checkpoints
                     WHERE EXISTS (
                         SELECT 1
-                        FROM incoming
-                        WHERE incoming.pipeline = pipeline_checkpoints.pipeline
-                          AND incoming.dataset = pipeline_checkpoints.dataset
-                          AND incoming.code = pipeline_checkpoints.code
-                          AND incoming.start_date = pipeline_checkpoints.start_date
-                          AND incoming.end_date = pipeline_checkpoints.end_date
+                        FROM incoming_checkpoints
+                        WHERE incoming_checkpoints.pipeline = pipeline_checkpoints.pipeline
+                          AND incoming_checkpoints.dataset = pipeline_checkpoints.dataset
+                          AND incoming_checkpoints.code = pipeline_checkpoints.code
+                          AND incoming_checkpoints.start_date = pipeline_checkpoints.start_date
+                          AND incoming_checkpoints.end_date = pipeline_checkpoints.end_date
                     )
-                    """,
-                    "INSERT INTO pipeline_checkpoints SELECT * FROM incoming",
-                )
+                        """
+                    )
+                    conn.execute("INSERT INTO pipeline_checkpoints SELECT * FROM incoming_checkpoints")
+                conn.execute("COMMIT")
+                transaction_open = False
+            finally:
+                if transaction_open:
+                    with suppress(Exception):
+                        conn.execute("ROLLBACK")
+                for relation in reversed(registered_relations):
+                    with suppress(Exception):
+                        conn.unregister(relation)
 
     def read_pipeline_runs(self) -> pd.DataFrame:
         with self._connection() as conn:
@@ -269,18 +291,24 @@ class DuckDBMetadataStore:
         incoming: pd.DataFrame,
         *sqls: str,
     ) -> None:
+        registered = False
+        transaction_open = False
         conn.register("incoming", incoming)
+        registered = True
         try:
             conn.execute("BEGIN TRANSACTION")
-            try:
-                for sql in sqls:
-                    conn.execute(sql)
-            except Exception:
-                conn.execute("ROLLBACK")
-                raise
+            transaction_open = True
+            for sql in sqls:
+                conn.execute(sql)
             conn.execute("COMMIT")
+            transaction_open = False
         finally:
-            conn.unregister("incoming")
+            if transaction_open:
+                with suppress(Exception):
+                    conn.execute("ROLLBACK")
+            if registered:
+                with suppress(Exception):
+                    conn.unregister("incoming")
 
 
 def _clean_dataframe_for_schema(df: pd.DataFrame, schema: pa.Schema) -> pd.DataFrame:

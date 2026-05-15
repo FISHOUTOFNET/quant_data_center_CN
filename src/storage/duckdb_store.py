@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from contextlib import suppress
 import time
 from pathlib import Path
 
@@ -91,10 +92,20 @@ class DuckDBStore:
             self._cleanup_tmp_parquet_files()
         sqls = self.view_sqls()
         with self.connect() as conn:
-            for sql in sqls:
-                conn.execute(sql)
-            for view_name in LEGACY_VIEW_NAMES:
-                conn.execute(f"DROP VIEW IF EXISTS {self._quote(view_name)}")
+            transaction_open = False
+            try:
+                conn.execute("BEGIN TRANSACTION")
+                transaction_open = True
+                for sql in sqls:
+                    conn.execute(sql)
+                for view_name in LEGACY_VIEW_NAMES:
+                    conn.execute(f"DROP VIEW IF EXISTS {self._quote(view_name)}")
+                conn.execute("COMMIT")
+                transaction_open = False
+            finally:
+                if transaction_open:
+                    with suppress(Exception):
+                        conn.execute("ROLLBACK")
         logger.info("Built DuckDB views in {}", self.duckdb_file)
         return sqls
 

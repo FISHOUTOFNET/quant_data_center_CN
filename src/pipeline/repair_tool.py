@@ -21,8 +21,8 @@ from src.pipeline.common import (
     trading_range_bounds,
 )
 from src.pipeline.dry_run import blocked_record, dry_run_record
+from src.pipeline.finalization import _finalize_write_pipeline
 from src.pipeline.services import ensure_baostock_cn_trading_calendar_range, fetch_baostock_cn_stock_adjustment_factor, fetch_daily_bars, log_api_fetch
-from src.storage.duckdb_store import DuckDBStore
 from src.storage.parquet_store import ParquetStore
 from src.utils.config_mgr import ConfigManager
 from src.utils.logging import logger
@@ -45,154 +45,158 @@ def repair(
     start_candidate_date = date_iso(start)
     end_candidate_date = date_iso(end)
     results: list[dict[str, str | int]] = []
+    should_build_views = False
 
-    if dry_run:
-        try:
-            baostock_cn_trading_calendar_df = store.read_baostock_cn_trading_calendar()
-            start_date, end_date = trading_range_bounds(
-                baostock_cn_trading_calendar_df,
+    with _finalize_write_pipeline(
+        store=store,
+        build_views=lambda: should_build_views,
+        cleanup_tmp_files=lambda: len(results) > 0,
+    ):
+        if dry_run:
+            try:
+                baostock_cn_trading_calendar_df = store.read_baostock_cn_trading_calendar()
+                start_date, end_date = trading_range_bounds(
+                    baostock_cn_trading_calendar_df,
+                    start_candidate_date,
+                    end_candidate_date,
+                )
+            except Exception as exc:
+                return [
+                    blocked_record(
+                        dataset,
+                        code,
+                        start_candidate_date,
+                        end_candidate_date,
+                        operation="resolve_trading_range",
+                        message=str(exc),
+                        replacement_rows=0,
+                        total_rows=0,
+                        path="",
+                    )
+                ]
+
+            if dataset == BAOSTOCK_CN_STOCK_ADJUSTMENT_FACTOR_DATASET:
+                path = store.baostock_cn_stock_adjustment_factor_path(code)
+                return [
+                    dry_run_record(
+                        BAOSTOCK_CN_STOCK_ADJUSTMENT_FACTOR_DATASET,
+                        code,
+                        FULL_HISTORY_START_DATE,
+                        end_date,
+                        path,
+                        operation="write_baostock_cn_stock_adjustment_factor",
+                        replacement_rows=0,
+                        total_rows=0,
+                        path=str(path),
+                    )
+                ]
+
+            records: list[dict[str, object]] = []
+            for target_dataset in expand_daily_datasets(dataset):
+                path = store.baostock_daily_bar_path(target_dataset, code)
+                records.append(
+                    dry_run_record(
+                        target_dataset,
+                        code,
+                        start_date,
+                        end_date,
+                        path,
+                        operation="write_baostock_daily_bars",
+                        replacement_rows=0,
+                        total_rows=0,
+                        path=str(path),
+                    )
+                )
+            return records
+
+        store.ensure_layout()
+
+        with create_provider(config, provider) as data_provider:
+            baostock_cn_trading_calendar_df, _ = ensure_baostock_cn_trading_calendar_range(
+                store,
+                data_provider,
                 start_candidate_date,
                 end_candidate_date,
             )
-        except Exception as exc:
-            return [
-                blocked_record(
-                    dataset,
-                    code,
-                    start_candidate_date,
-                    end_candidate_date,
-                    operation="resolve_trading_range",
-                    message=str(exc),
-                    replacement_rows=0,
-                    total_rows=0,
-                    path="",
-                )
-            ]
+            start_date, end_date = trading_range_bounds(baostock_cn_trading_calendar_df, start_candidate_date, end_candidate_date)
 
-        if dataset == BAOSTOCK_CN_STOCK_ADJUSTMENT_FACTOR_DATASET:
-            path = store.baostock_cn_stock_adjustment_factor_path(code)
-            return [
-                dry_run_record(
+            if dataset == BAOSTOCK_CN_STOCK_ADJUSTMENT_FACTOR_DATASET:
+                fresh_factor = fetch_baostock_cn_stock_adjustment_factor(data_provider, code, FULL_HISTORY_START_DATE, end_date)
+                log_api_fetch(BAOSTOCK_CN_STOCK_ADJUSTMENT_FACTOR_DATASET, code, FULL_HISTORY_START_DATE, end_date, fresh_factor)
+                path = store.write_baostock_cn_stock_adjustment_factor(code, fresh_factor)
+                logger.info(
+                    "Repaired {} {} from {} to {} rows={}",
                     BAOSTOCK_CN_STOCK_ADJUSTMENT_FACTOR_DATASET,
                     code,
                     FULL_HISTORY_START_DATE,
                     end_date,
-                    path,
-                    operation="write_baostock_cn_stock_adjustment_factor",
-                    replacement_rows=0,
-                    total_rows=0,
-                    path=str(path),
+                    len(fresh_factor),
                 )
-            ]
-
-        records: list[dict[str, object]] = []
-        for target_dataset in expand_daily_datasets(dataset):
-            path = store.baostock_daily_bar_path(target_dataset, code)
-            records.append(
-                dry_run_record(
-                    target_dataset,
-                    code,
-                    start_date,
-                    end_date,
-                    path,
-                    operation="write_baostock_daily_bars",
-                    replacement_rows=0,
-                    total_rows=0,
-                    path=str(path),
+                results.append(
+                    {
+                        "dataset": BAOSTOCK_CN_STOCK_ADJUSTMENT_FACTOR_DATASET,
+                        "code": code,
+                        "replacement_rows": len(fresh_factor),
+                        "total_rows": len(fresh_factor),
+                        "path": str(path),
+                    }
                 )
-            )
-        return records
+            else:
+                target_datasets = expand_daily_datasets(dataset)
+                baostock_cn_stock_adjustment_factors = pd.DataFrame()
+                if any(is_adjusted_daily_dataset(target_dataset) for target_dataset in target_datasets):
+                    baostock_cn_stock_adjustment_factors = fetch_baostock_cn_stock_adjustment_factor(data_provider, code, FULL_HISTORY_START_DATE, end_date)
+                    log_api_fetch(BAOSTOCK_CN_STOCK_ADJUSTMENT_FACTOR_DATASET, code, FULL_HISTORY_START_DATE, end_date, baostock_cn_stock_adjustment_factors)
+                    store.write_baostock_cn_stock_adjustment_factor(code, baostock_cn_stock_adjustment_factors)
 
-    store.ensure_layout()
+                unadjusted_cache: dict[tuple[str, str], pd.DataFrame] = {}
+                for target_dataset in target_datasets:
+                    fresh = _repair_daily_frame(
+                        data_provider,
+                        config,
+                        target_dataset,
+                        code,
+                        start_date,
+                        end_date,
+                        baostock_cn_stock_adjustment_factors,
+                        unadjusted_cache,
+                    )
+                    if is_adjusted_daily_dataset(target_dataset):
+                        logger.info(
+                            "Local adjustment completed dataset={} code={} start_date={} end_date={} rows={}",
+                            target_dataset,
+                            code,
+                            start_date,
+                            end_date,
+                            len(fresh),
+                        )
+                    else:
+                        log_api_fetch(target_dataset, code, start_date, end_date, fresh)
 
-    with create_provider(config, provider) as data_provider:
-        baostock_cn_trading_calendar_df, _ = ensure_baostock_cn_trading_calendar_range(
-            store,
-            data_provider,
-            start_candidate_date,
-            end_candidate_date,
-        )
-        start_date, end_date = trading_range_bounds(baostock_cn_trading_calendar_df, start_candidate_date, end_candidate_date)
-
-        if dataset == BAOSTOCK_CN_STOCK_ADJUSTMENT_FACTOR_DATASET:
-            fresh_factor = fetch_baostock_cn_stock_adjustment_factor(data_provider, code, FULL_HISTORY_START_DATE, end_date)
-            log_api_fetch(BAOSTOCK_CN_STOCK_ADJUSTMENT_FACTOR_DATASET, code, FULL_HISTORY_START_DATE, end_date, fresh_factor)
-            path = store.write_baostock_cn_stock_adjustment_factor(code, fresh_factor)
-            logger.info(
-                "Repaired {} {} from {} to {} rows={}",
-                BAOSTOCK_CN_STOCK_ADJUSTMENT_FACTOR_DATASET,
-                code,
-                FULL_HISTORY_START_DATE,
-                end_date,
-                len(fresh_factor),
-            )
-            results.append(
-                {
-                    "dataset": BAOSTOCK_CN_STOCK_ADJUSTMENT_FACTOR_DATASET,
-                    "code": code,
-                    "replacement_rows": len(fresh_factor),
-                    "total_rows": len(fresh_factor),
-                    "path": str(path),
-                }
-            )
-        else:
-            target_datasets = expand_daily_datasets(dataset)
-            baostock_cn_stock_adjustment_factors = pd.DataFrame()
-            if any(is_adjusted_daily_dataset(target_dataset) for target_dataset in target_datasets):
-                baostock_cn_stock_adjustment_factors = fetch_baostock_cn_stock_adjustment_factor(data_provider, code, FULL_HISTORY_START_DATE, end_date)
-                log_api_fetch(BAOSTOCK_CN_STOCK_ADJUSTMENT_FACTOR_DATASET, code, FULL_HISTORY_START_DATE, end_date, baostock_cn_stock_adjustment_factors)
-                store.write_baostock_cn_stock_adjustment_factor(code, baostock_cn_stock_adjustment_factors)
-
-            unadjusted_cache: dict[tuple[str, str], pd.DataFrame] = {}
-            for target_dataset in target_datasets:
-                fresh = _repair_daily_frame(
-                    data_provider,
-                    config,
-                    target_dataset,
-                    code,
-                    start_date,
-                    end_date,
-                    baostock_cn_stock_adjustment_factors,
-                    unadjusted_cache,
-                )
-                if is_adjusted_daily_dataset(target_dataset):
+                    existing = store.read_baostock_daily_bars(target_dataset, code)
+                    merged = replace_daily_range(store, existing, fresh, start_date, end_date)
+                    path = store.write_baostock_daily_bars(target_dataset, code, merged)
                     logger.info(
-                        "Local adjustment completed dataset={} code={} start_date={} end_date={} rows={}",
+                        "Repaired {} {} from {} to {} replacement_rows={} total_rows={}",
                         target_dataset,
                         code,
                         start_date,
                         end_date,
                         len(fresh),
+                        len(merged),
                     )
-                else:
-                    log_api_fetch(target_dataset, code, start_date, end_date, fresh)
+                    results.append(
+                        {
+                            "dataset": target_dataset,
+                            "code": code,
+                            "replacement_rows": len(fresh),
+                            "total_rows": len(merged),
+                            "path": str(path),
+                        }
+                    )
 
-                existing = store.read_baostock_daily_bars(target_dataset, code)
-                merged = replace_daily_range(store, existing, fresh, start_date, end_date)
-                path = store.write_baostock_daily_bars(target_dataset, code, merged)
-                logger.info(
-                    "Repaired {} {} from {} to {} replacement_rows={} total_rows={}",
-                    target_dataset,
-                    code,
-                    start_date,
-                    end_date,
-                    len(fresh),
-                    len(merged),
-                )
-                results.append(
-                    {
-                        "dataset": target_dataset,
-                        "code": code,
-                        "replacement_rows": len(fresh),
-                        "total_rows": len(merged),
-                        "path": str(path),
-                    }
-                )
-
-    store.close()
-    if build_views:
-        DuckDBStore(root=config.root).build_views(cleanup_tmp_files=len(results) > 0)
-    return results
+        should_build_views = build_views
+        return results
 
 
 def _repair_daily_frame(

@@ -555,6 +555,25 @@ def test_update_akshare_stock_valuation_stops_submitting_after_circuit_open(
     assert not (tmp_path / "data" / "raw").exists()
 
 
+def test_update_akshare_no_tasks_closes_store_without_building_views(tmp_path, monkeypatch) -> None:
+    calls: list[str] = []
+
+    class FakeStore:
+        def __init__(self, root=None) -> None:
+            self.root = root
+
+        def close(self) -> None:
+            calls.append("close")
+
+    monkeypatch.setattr(update_akshare_module, "ParquetStore", FakeStore)
+    monkeypatch.setattr(update_akshare_module, "plan_akshare_tasks", lambda **kwargs: [])
+
+    records = update_akshare(root=tmp_path, build_views=True)
+
+    assert records == []
+    assert calls == ["close"]
+
+
 def _response(endpoint: str, params: dict[str, object], data: pd.DataFrame) -> AkShareResponse:
     return AkShareResponse(
         endpoint=endpoint,

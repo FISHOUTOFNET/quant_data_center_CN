@@ -25,9 +25,9 @@ from src.api.akshare_client import (
 from src.pipeline.akshare_tasks import AkShareTask, plan_akshare_tasks
 from src.pipeline.common import PipelineCheckpointLookup, checkpoint_row, should_skip_checkpoint
 from src.pipeline.dry_run import dry_run_record
+from src.pipeline.finalization import _finalize_write_pipeline
 from src.pipeline.services import PipelineMetadataBatch
 from src.storage.dataset_catalog import AKSHARE_VALUATION_EASTMONEY_DATASET
-from src.storage.duckdb_store import DuckDBStore
 from src.storage.parquet_store import ParquetStore
 from src.utils.config_mgr import ConfigManager
 from src.utils.logging import logger
@@ -117,156 +117,171 @@ def update_akshare(
 
     config = ConfigManager(root)
     store = ParquetStore(root=config.root)
-    tasks = plan_akshare_tasks(
-        config=config,
+    metadata_batch: PipelineMetadataBatch | None = None
+    should_build_views = False
+    progress_success = 0
+
+    def flush_metadata() -> None:
+        if metadata_batch is not None:
+            metadata_batch.flush()
+
+    with _finalize_write_pipeline(
         store=store,
-        dataset=dataset,
-        mode=mode,
-        code=code,
-        include_inactive=include_inactive,
-        max_codes=max_codes,
-        max_tasks=max_tasks,
-    )
-    if not tasks and not dry_run:
-        return []
-    if dry_run:
-        return [
-            dry_run_record(
+        metadata_flush=flush_metadata,
+        build_views=lambda: should_build_views,
+        cleanup_tmp_files=lambda: progress_success > 0,
+    ):
+        tasks = plan_akshare_tasks(
+            config=config,
+            store=store,
+            dataset=dataset,
+            mode=mode,
+            code=code,
+            include_inactive=include_inactive,
+            max_codes=max_codes,
+            max_tasks=max_tasks,
+        )
+        if not tasks and not dry_run:
+            return []
+        if dry_run:
+            return [
+                dry_run_record(
+                    task.dataset,
+                    task.key,
+                    task.start_date,
+                    task.end_date,
+                    task.output_path,
+                    operation="write_akshare_task",
+                )
+                for task in tasks
+            ]
+
+        store.ensure_layout()
+        checkpoint_lookup = PipelineCheckpointLookup.from_store(store) if resume and not force else None
+        ak_client = client or (
+            client_factory(config)
+            if client_factory is not None
+            else AkShareClient(config=config)
+        )
+        resolved_workers = _resolve_akshare_workers(config, workers)
+        metadata_batch = PipelineMetadataBatch(
+            store,
+            int(config.get("pipeline.metadata_flush_size", 200)),
+            count_by="run",
+        )
+        run_records: list[dict[str, object]] = []
+        concurrent_stock_valuation_tasks: list[AkShareTask] = []
+
+        planned_task_count = len(tasks)
+        akshare_cn_stock_valuation_eastmoney_tasks = [t for t in tasks if t.dataset == AKSHARE_VALUATION_EASTMONEY_DATASET.name]
+        other_tasks = [t for t in tasks if t.dataset != AKSHARE_VALUATION_EASTMONEY_DATASET.name]
+        akshare_cn_stock_valuation_eastmoney_tasks = _prefilter_akshare_cn_stock_valuation_eastmoney_tasks(
+            akshare_cn_stock_valuation_eastmoney_tasks,
+            store,
+            checkpoint_lookup,
+        )
+        tasks = other_tasks + akshare_cn_stock_valuation_eastmoney_tasks
+        progress_total = len(tasks)
+        progress_processed = 0
+        progress_failed = 0
+        progress_skipped = 0
+        logger.info(
+            "AkShare update started dataset={} mode={} force={} workers={} planned_tasks={} processing_tasks={}",
+            dataset,
+            mode,
+            force,
+            resolved_workers,
+            planned_task_count,
+            progress_total,
+        )
+
+        def log_progress(row: dict[str, object], task: AkShareTask | None = None) -> None:
+            nonlocal progress_processed, progress_success, progress_failed, progress_skipped
+            progress_processed += 1
+            status = str(row.get("status", "unknown"))
+            if status == "success":
+                progress_success += 1
+            elif status == "failed":
+                progress_failed += 1
+            elif status.startswith("skipped"):
+                progress_skipped += 1
+            logger.info(
+                "AkShare update progress {}/{} code={} dataset={} status={} rows={}",
+                progress_processed,
+                progress_total,
+                row.get("code", task.key if task is not None else ""),
+                row.get("dataset", task.dataset if task is not None else ""),
+                status,
+                row.get("row_count", 0),
+            )
+
+        def flush_concurrent_stock_valuation_tasks() -> None:
+            if not concurrent_stock_valuation_tasks:
+                return
+            _execute_stock_valuation_tasks_concurrently(
+                store,
+                ak_client,
+                list(concurrent_stock_valuation_tasks),
+                metadata_batch,
+                run_records,
+                resolved_workers,
+                progress_callback=log_progress,
+            )
+            concurrent_stock_valuation_tasks.clear()
+
+        for task in tasks:
+            if task.dataset != AKSHARE_VALUATION_EASTMONEY_DATASET.name and should_skip_checkpoint(
+                store,
+                PIPELINE_UPDATE_AKSHARE,
                 task.dataset,
                 task.key,
                 task.start_date,
                 task.end_date,
                 task.output_path,
-                operation="write_akshare_task",
+                resume,
+                force,
+                checkpoint_lookup,
+            ):
+                row = _run_row(
+                    task.dataset,
+                    task.key,
+                    "skipped_checkpoint",
+                    task.start_date,
+                    task.end_date,
+                    datetime.now(),
+                    datetime.now(),
+                    0,
+                    "checkpoint",
+                )
+                metadata_batch.add(run_row=row)
+                run_records.append(row)
+                log_progress(row, task)
+                continue
+
+            if task.dataset == AKSHARE_VALUATION_EASTMONEY_DATASET.name and resolved_workers > 1:
+                concurrent_stock_valuation_tasks.append(task)
+                continue
+
+            flush_concurrent_stock_valuation_tasks()
+            row = _execute_task(store, ak_client, task, run_records)
+            metadata_batch.add(
+                run_row=row["run_row"],
+                status_row=row.get("status_row"),
+                checkpoint=row.get("checkpoint_row"),
             )
-            for task in tasks
-        ]
-
-    store.ensure_layout()
-    checkpoint_lookup = PipelineCheckpointLookup.from_store(store) if resume and not force else None
-    ak_client = client or (
-        client_factory(config)
-        if client_factory is not None
-        else AkShareClient(config=config)
-    )
-    resolved_workers = _resolve_akshare_workers(config, workers)
-    metadata_batch = PipelineMetadataBatch(
-        store,
-        int(config.get("pipeline.metadata_flush_size", 200)),
-        count_by="run",
-    )
-    run_records: list[dict[str, object]] = []
-    concurrent_stock_valuation_tasks: list[AkShareTask] = []
-
-    planned_task_count = len(tasks)
-    akshare_cn_stock_valuation_eastmoney_tasks = [t for t in tasks if t.dataset == AKSHARE_VALUATION_EASTMONEY_DATASET.name]
-    other_tasks = [t for t in tasks if t.dataset != AKSHARE_VALUATION_EASTMONEY_DATASET.name]
-    akshare_cn_stock_valuation_eastmoney_tasks = _prefilter_akshare_cn_stock_valuation_eastmoney_tasks(akshare_cn_stock_valuation_eastmoney_tasks, store, checkpoint_lookup)
-    tasks = other_tasks + akshare_cn_stock_valuation_eastmoney_tasks
-    progress_total = len(tasks)
-    progress_processed = 0
-    progress_success = 0
-    progress_failed = 0
-    progress_skipped = 0
-    logger.info(
-        "AkShare update started dataset={} mode={} force={} workers={} planned_tasks={} processing_tasks={}",
-        dataset,
-        mode,
-        force,
-        resolved_workers,
-        planned_task_count,
-        progress_total,
-    )
-
-    def log_progress(row: dict[str, object], task: AkShareTask | None = None) -> None:
-        nonlocal progress_processed, progress_success, progress_failed, progress_skipped
-        progress_processed += 1
-        status = str(row.get("status", "unknown"))
-        if status == "success":
-            progress_success += 1
-        elif status == "failed":
-            progress_failed += 1
-        elif status.startswith("skipped"):
-            progress_skipped += 1
-        logger.info(
-            "AkShare update progress {}/{} code={} dataset={} status={} rows={}",
-            progress_processed,
-            progress_total,
-            row.get("code", task.key if task is not None else ""),
-            row.get("dataset", task.dataset if task is not None else ""),
-            status,
-            row.get("row_count", 0),
-        )
-
-    def flush_concurrent_stock_valuation_tasks() -> None:
-        if not concurrent_stock_valuation_tasks:
-            return
-        _execute_stock_valuation_tasks_concurrently(
-            store,
-            ak_client,
-            list(concurrent_stock_valuation_tasks),
-            metadata_batch,
-            run_records,
-            resolved_workers,
-            progress_callback=log_progress,
-        )
-        concurrent_stock_valuation_tasks.clear()
-
-    for task in tasks:
-        if task.dataset != AKSHARE_VALUATION_EASTMONEY_DATASET.name and should_skip_checkpoint(
-            store,
-            PIPELINE_UPDATE_AKSHARE,
-            task.dataset,
-            task.key,
-            task.start_date,
-            task.end_date,
-            task.output_path,
-            resume,
-            force,
-            checkpoint_lookup,
-        ):
-            row = _run_row(
-                task.dataset,
-                task.key,
-                "skipped_checkpoint",
-                task.start_date,
-                task.end_date,
-                datetime.now(),
-                datetime.now(),
-                0,
-                "checkpoint",
-            )
-            metadata_batch.add(run_row=row)
-            run_records.append(row)
-            log_progress(row, task)
-            continue
-
-        if task.dataset == AKSHARE_VALUATION_EASTMONEY_DATASET.name and resolved_workers > 1:
-            concurrent_stock_valuation_tasks.append(task)
-            continue
+            log_progress(row["run_row"], task)
 
         flush_concurrent_stock_valuation_tasks()
-        row = _execute_task(store, ak_client, task, run_records)
-        metadata_batch.add(
-            run_row=row["run_row"],
-            status_row=row.get("status_row"),
-            checkpoint=row.get("checkpoint_row"),
+        metadata_batch.flush()
+        should_build_views = build_views
+        logger.info(
+            "AkShare update completed processed={} success={} failed={} skipped={}",
+            progress_processed,
+            progress_success,
+            progress_failed,
+            progress_skipped,
         )
-        log_progress(row["run_row"], task)
-
-    flush_concurrent_stock_valuation_tasks()
-    metadata_batch.flush()
-    store.close()
-    if build_views:
-        DuckDBStore(root=config.root).build_views(cleanup_tmp_files=progress_success > 0)
-    logger.info(
-        "AkShare update completed processed={} success={} failed={} skipped={}",
-        progress_processed,
-        progress_success,
-        progress_failed,
-        progress_skipped,
-    )
-    return run_records
+        return run_records
 
 
 @dataclass(frozen=True)

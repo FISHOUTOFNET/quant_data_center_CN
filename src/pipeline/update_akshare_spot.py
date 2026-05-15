@@ -26,12 +26,12 @@ from src.pipeline.common import (
     should_skip_checkpoint,
 )
 from src.pipeline.dry_run import dry_run_record
+from src.pipeline.finalization import _finalize_write_pipeline
 from src.storage.dataset_catalog import (
     AKSHARE_SPOT_QUOTE_EASTMONEY_DATASET,
     AKSHARE_SPOT_QUOTE_SINA_DATASET,
     akshare_daily_bar_dataset_id,
 )
-from src.storage.duckdb_store import DuckDBStore
 from src.storage.parquet_store import ParquetStore
 from src.storage.schema import field_names, schema_for_dataset
 from src.utils.config_mgr import ConfigManager
@@ -53,172 +53,115 @@ def update_akshare_spot(
 
     config = ConfigManager(root)
     store = ParquetStore(root=config.root)
-    _ensure_spot_quote_close_window(config, now, store)
-    trade_date = _resolve_trade_date(config, end) if not dry_run else _resolve_trade_date_for_dry_run(config, end)
-    dataset = AKSHARE_SPOT_QUOTE_EASTMONEY_DATASET.name
-    output_path = store.akshare_cn_stock_spot_quote_eastmoney_path(trade_date)
-    if dry_run:
-        daily_bar_dataset = akshare_daily_bar_dataset_id("unadjusted")
-        return [
-            dry_run_record(
-                dataset,
-                "*",
-                trade_date,
-                trade_date,
-                output_path,
-                operation="write_stock_spot_quote_eastmoney",
-            ),
-            dry_run_record(
-                AKSHARE_SPOT_QUOTE_SINA_DATASET.name,
-                "*",
-                trade_date,
-                trade_date,
-                store.akshare_cn_stock_spot_quote_sina_path(trade_date),
-                operation="write_stock_spot_quote_sina",
-                message="fallback path if EastMoney fetch fails",
-            ),
-            dry_run_record(
-                daily_bar_dataset,
-                "*",
-                trade_date,
-                trade_date,
-                store.parquet_dir / daily_bar_dataset,
-                operation="append_akshare_daily_bar_batch",
-                message="spot-derived close snapshot daily bar path",
-            ),
-        ]
-
-    store.ensure_layout()
-    progress_processed = 0
+    should_build_views = False
     progress_success = 0
-    progress_failed = 0
-    progress_skipped = 0
-    logger.info(
-        "AkShare spot update started trade_date={} force={} resume={}",
-        trade_date,
-        force,
-        resume,
-    )
 
-    def log_spot_progress(current: int, total: int, row: dict[str, object]) -> None:
-        nonlocal progress_processed, progress_success, progress_failed, progress_skipped
-        progress_processed += 1
-        status = str(row.get("status", "unknown"))
-        if status == "success":
-            progress_success += 1
-        elif status == "failed":
-            progress_failed += 1
-        elif status.startswith("skipped"):
-            progress_skipped += 1
-        logger.info(
-            "AkShare spot progress {}/{} code={} dataset={} status={} rows={}",
-            current,
-            total,
-            row.get("code", "*"),
-            row.get("dataset", dataset),
-            status,
-            row.get("row_count", 0),
-        )
-
-    if should_skip_checkpoint(
-        store,
-        PIPELINE_UPDATE_AKSHARE_SPOT,
-        dataset,
-        "*",
-        trade_date,
-        trade_date,
-        output_path,
-        resume,
-        force,
+    with _finalize_write_pipeline(
+        store=store,
+        build_views=lambda: should_build_views,
+        cleanup_tmp_files=lambda: progress_success > 0,
     ):
-        log_spot_progress(
-            1,
-            1,
-            {"dataset": dataset, "code": "*", "status": "skipped_checkpoint", "row_count": 0},
-        )
-        store.close()
-        logger.info(
-            "AkShare spot update completed processed={} success={} failed={} skipped={}",
-            progress_processed,
-            progress_success,
-            progress_failed,
-            progress_skipped,
-        )
-        return []
-
-    ak_client = client or (
-        client_factory(config)
-        if client_factory is not None
-        else AkShareClient(config=config)
-    )
-    metadata: list[tuple[dict[str, object], dict[str, object], dict[str, object]]] = []
-
-    started_at = datetime.now()
-    try:
-        response = ak_client.fetch_spot_quote_eastmoney(trade_date=trade_date)
-    except Exception as exc:
-        ended_at = datetime.now()
-        stack = error_stack(exc)
-        metadata.append(
-            failed_metadata(
-                PIPELINE_UPDATE_AKSHARE_SPOT,
-                dataset,
-                "*",
-                trade_date,
-                trade_date,
-                started_at,
-                ended_at,
-                stack,
-                output_path,
-            )
-        )
-        log_spot_progress(1, 2, metadata[-1][0])
-        update_daily_bar_from_spot = bool(config.get("datasets.akshare_cn_stock_spot_quote.update_daily_bar_from_spot", True))
-        logger.info("AkShare spot fallback started trade_date={} reason={}", trade_date, str(exc))
-        fallback_metadata_start = len(metadata)
-        _run_sina_fallback(store, ak_client, trade_date, str(exc), metadata, update_daily_bar_from_spot)
-        if len(metadata) > fallback_metadata_start:
-            log_spot_progress(2, 2, metadata[fallback_metadata_start][0])
-    else:
-        try:
-            output_path = store.write_stock_spot_quote_eastmoney(trade_date, response.data)
-            daily_bar_rows = _drop_delisted_daily_bar_rows(store, spot_em_to_daily_bar_unadjusted(response.data))
-            update_daily_bar_from_spot = bool(config.get("datasets.akshare_cn_stock_spot_quote.update_daily_bar_from_spot", True))
-            daily_bar_output_path = (
-                _write_spot_daily_bar_rows(store, daily_bar_rows)
-                if update_daily_bar_from_spot
-                else store.parquet_dir / akshare_daily_bar_dataset_id("unadjusted")
-            )
-            ended_at = datetime.now()
-            metadata.append(
-                success_metadata(
-                    PIPELINE_UPDATE_AKSHARE_SPOT,
+        _ensure_spot_quote_close_window(config, now, store)
+        trade_date = _resolve_trade_date(config, end) if not dry_run else _resolve_trade_date_for_dry_run(config, end)
+        dataset = AKSHARE_SPOT_QUOTE_EASTMONEY_DATASET.name
+        output_path = store.akshare_cn_stock_spot_quote_eastmoney_path(trade_date)
+        if dry_run:
+            daily_bar_dataset = akshare_daily_bar_dataset_id("unadjusted")
+            return [
+                dry_run_record(
                     dataset,
                     "*",
                     trade_date,
                     trade_date,
-                    started_at,
-                    ended_at,
-                    len(response.data),
                     output_path,
-                )
+                    operation="write_stock_spot_quote_eastmoney",
+                ),
+                dry_run_record(
+                    AKSHARE_SPOT_QUOTE_SINA_DATASET.name,
+                    "*",
+                    trade_date,
+                    trade_date,
+                    store.akshare_cn_stock_spot_quote_sina_path(trade_date),
+                    operation="write_stock_spot_quote_sina",
+                    message="fallback path if EastMoney fetch fails",
+                ),
+                dry_run_record(
+                    daily_bar_dataset,
+                    "*",
+                    trade_date,
+                    trade_date,
+                    store.parquet_dir / daily_bar_dataset,
+                    operation="append_akshare_daily_bar_batch",
+                    message="spot-derived close snapshot daily bar path",
+                ),
+            ]
+
+        store.ensure_layout()
+        progress_processed = 0
+        progress_failed = 0
+        progress_skipped = 0
+        logger.info(
+            "AkShare spot update started trade_date={} force={} resume={}",
+            trade_date,
+            force,
+            resume,
+        )
+
+        def log_spot_progress(current: int, total: int, row: dict[str, object]) -> None:
+            nonlocal progress_processed, progress_success, progress_failed, progress_skipped
+            progress_processed += 1
+            status = str(row.get("status", "unknown"))
+            if status == "success":
+                progress_success += 1
+            elif status == "failed":
+                progress_failed += 1
+            elif status.startswith("skipped"):
+                progress_skipped += 1
+            logger.info(
+                "AkShare spot progress {}/{} code={} dataset={} status={} rows={}",
+                current,
+                total,
+                row.get("code", "*"),
+                row.get("dataset", dataset),
+                status,
+                row.get("row_count", 0),
             )
-            log_spot_progress(1, 1, metadata[-1][0])
-            if update_daily_bar_from_spot:
-                daily_bar_dataset = akshare_daily_bar_dataset_id("unadjusted")
-                metadata.append(
-                    success_metadata(
-                        PIPELINE_UPDATE_AKSHARE_SPOT,
-                        daily_bar_dataset,
-                        "*",
-                        trade_date,
-                        trade_date,
-                        started_at,
-                        ended_at,
-                        len(daily_bar_rows),
-                        daily_bar_output_path,
-                    )
-                )
+
+        if should_skip_checkpoint(
+            store,
+            PIPELINE_UPDATE_AKSHARE_SPOT,
+            dataset,
+            "*",
+            trade_date,
+            trade_date,
+            output_path,
+            resume,
+            force,
+        ):
+            log_spot_progress(
+                1,
+                1,
+                {"dataset": dataset, "code": "*", "status": "skipped_checkpoint", "row_count": 0},
+            )
+            logger.info(
+                "AkShare spot update completed processed={} success={} failed={} skipped={}",
+                progress_processed,
+                progress_success,
+                progress_failed,
+                progress_skipped,
+            )
+            return []
+
+        ak_client = client or (
+            client_factory(config)
+            if client_factory is not None
+            else AkShareClient(config=config)
+        )
+        metadata: list[tuple[dict[str, object], dict[str, object], dict[str, object]]] = []
+
+        started_at = datetime.now()
+        try:
+            response = ak_client.fetch_spot_quote_eastmoney(trade_date=trade_date)
         except Exception as exc:
             ended_at = datetime.now()
             stack = error_stack(exc)
@@ -235,20 +178,81 @@ def update_akshare_spot(
                     output_path,
                 )
             )
-            log_spot_progress(1, 1, metadata[-1][0])
+            log_spot_progress(1, 2, metadata[-1][0])
+            update_daily_bar_from_spot = bool(config.get("datasets.akshare_cn_stock_spot_quote.update_daily_bar_from_spot", True))
+            logger.info("AkShare spot fallback started trade_date={} reason={}", trade_date, str(exc))
+            fallback_metadata_start = len(metadata)
+            _run_sina_fallback(store, ak_client, trade_date, str(exc), metadata, update_daily_bar_from_spot)
+            if len(metadata) > fallback_metadata_start:
+                log_spot_progress(2, 2, metadata[fallback_metadata_start][0])
+        else:
+            try:
+                output_path = store.write_stock_spot_quote_eastmoney(trade_date, response.data)
+                daily_bar_rows = _drop_delisted_daily_bar_rows(store, spot_em_to_daily_bar_unadjusted(response.data))
+                update_daily_bar_from_spot = bool(config.get("datasets.akshare_cn_stock_spot_quote.update_daily_bar_from_spot", True))
+                daily_bar_output_path = (
+                    _write_spot_daily_bar_rows(store, daily_bar_rows)
+                    if update_daily_bar_from_spot
+                    else store.parquet_dir / akshare_daily_bar_dataset_id("unadjusted")
+                )
+                ended_at = datetime.now()
+                metadata.append(
+                    success_metadata(
+                        PIPELINE_UPDATE_AKSHARE_SPOT,
+                        dataset,
+                        "*",
+                        trade_date,
+                        trade_date,
+                        started_at,
+                        ended_at,
+                        len(response.data),
+                        output_path,
+                    )
+                )
+                log_spot_progress(1, 1, metadata[-1][0])
+                if update_daily_bar_from_spot:
+                    daily_bar_dataset = akshare_daily_bar_dataset_id("unadjusted")
+                    metadata.append(
+                        success_metadata(
+                            PIPELINE_UPDATE_AKSHARE_SPOT,
+                            daily_bar_dataset,
+                            "*",
+                            trade_date,
+                            trade_date,
+                            started_at,
+                            ended_at,
+                            len(daily_bar_rows),
+                            daily_bar_output_path,
+                        )
+                    )
+            except Exception as exc:
+                ended_at = datetime.now()
+                stack = error_stack(exc)
+                metadata.append(
+                    failed_metadata(
+                        PIPELINE_UPDATE_AKSHARE_SPOT,
+                        dataset,
+                        "*",
+                        trade_date,
+                        trade_date,
+                        started_at,
+                        ended_at,
+                        stack,
+                        output_path,
+                    )
+                )
+                log_spot_progress(1, 1, metadata[-1][0])
 
-    records = persist_metadata(store, metadata)
-    store.close()
-    if build_views:
-        DuckDBStore(root=config.root).build_views(cleanup_tmp_files=progress_success > 0)
-    logger.info(
-        "AkShare spot update completed processed={} success={} failed={} skipped={}",
-        progress_processed,
-        progress_success,
-        progress_failed,
-        progress_skipped,
-    )
-    return records
+        records = persist_metadata(store, metadata)
+        should_build_views = build_views
+        logger.info(
+            "AkShare spot update completed processed={} success={} failed={} skipped={}",
+            progress_processed,
+            progress_success,
+            progress_failed,
+            progress_skipped,
+        )
+        return records
 
 
 def spot_em_to_daily_bar_unadjusted(df: pd.DataFrame) -> pd.DataFrame:

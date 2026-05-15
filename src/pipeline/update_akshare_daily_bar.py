@@ -24,6 +24,7 @@ from src.pipeline.akshare_common import (
 from src.pipeline.akshare_universe import resolve_akshare_universe_codes
 from src.pipeline.common import PipelineCheckpointLookup, default_candidate_date
 from src.pipeline.dry_run import apply_limit, dry_run_record
+from src.pipeline.finalization import _finalize_write_pipeline
 from src.storage.dataset_catalog import (
     akshare_daily_bar_adjustments,
     akshare_daily_bar_dataset_id,
@@ -174,136 +175,141 @@ def update_akshare_daily_bar(
     mode = str(mode).strip().lower()
     config = ConfigManager(root)
     store = ParquetStore(root=config.root)
-    tasks = plan_akshare_daily_bar_tasks(
-        config=config,
-        store=store,
-        mode=mode,
-        adjustment=adjustment,
-        code=code,
-        start=start,
-        end=end,
-        max_codes=max_codes,
-        max_tasks=max_tasks,
-    )
-    if not tasks and not dry_run:
-        return []
-    if dry_run:
-        return [
-            dry_run_record(
-                task.dataset,
-                task.code,
-                task.start_date,
-                task.end_date,
-                task.output_path,
-                operation="write_akshare_daily_bar",
-                adjustment=task.adjustment,
-            )
-            for task in tasks
-        ]
-
-    store.ensure_layout()
-    checkpoint_lookup = PipelineCheckpointLookup.from_store(store) if resume and not force else None
-    ak_client = client or (
-        client_factory(config)
-        if client_factory is not None
-        else AkShareClient(config=config)
-    )
-    selected_tasks = _prefilter_daily_bar_tasks(tasks, store, checkpoint_lookup)
-    metadata: list[tuple[dict[str, object], dict[str, object], dict[str, object]]] = []
-    records: list[dict[str, object]] = []
-
-    resolved_workers = _resolve_workers(config, workers)
-    progress_total = len(selected_tasks)
-    progress_processed = 0
+    should_build_views = False
     progress_success = 0
-    progress_failed = 0
-    logger.info(
-        "AkShare daily bar update started mode={} adjustment={} force={} workers={} planned_tasks={} processing_tasks={}",
-        mode,
-        adjustment,
-        force,
-        resolved_workers,
-        len(tasks),
-        progress_total,
-    )
 
-    def daily_bar_progress_row(
-        task: AkShareDailyBarTask,
-        row: dict[str, object] | None,
-        metadata_start_count: int,
-    ) -> dict[str, object]:
-        if row is not None:
-            return row
-        if len(metadata) > metadata_start_count:
-            return metadata[-1][0]
-        return {
-            "dataset": task.dataset,
-            "code": task.code,
-            "status": "failed",
-            "row_count": 0,
-        }
+    with _finalize_write_pipeline(
+        store=store,
+        build_views=lambda: should_build_views,
+        cleanup_tmp_files=lambda: progress_success > 0,
+    ):
+        tasks = plan_akshare_daily_bar_tasks(
+            config=config,
+            store=store,
+            mode=mode,
+            adjustment=adjustment,
+            code=code,
+            start=start,
+            end=end,
+            max_codes=max_codes,
+            max_tasks=max_tasks,
+        )
+        if not tasks and not dry_run:
+            return []
+        if dry_run:
+            return [
+                dry_run_record(
+                    task.dataset,
+                    task.code,
+                    task.start_date,
+                    task.end_date,
+                    task.output_path,
+                    operation="write_akshare_daily_bar",
+                    adjustment=task.adjustment,
+                )
+                for task in tasks
+            ]
 
-    def log_daily_bar_progress(task: AkShareDailyBarTask, row: dict[str, object]) -> None:
-        nonlocal progress_processed, progress_success, progress_failed
-        progress_processed += 1
-        status = str(row.get("status", "unknown"))
-        if status == "success":
-            progress_success += 1
-        elif status == "failed":
-            progress_failed += 1
+        store.ensure_layout()
+        checkpoint_lookup = PipelineCheckpointLookup.from_store(store) if resume and not force else None
+        ak_client = client or (
+            client_factory(config)
+            if client_factory is not None
+            else AkShareClient(config=config)
+        )
+        selected_tasks = _prefilter_daily_bar_tasks(tasks, store, checkpoint_lookup)
+        metadata: list[tuple[dict[str, object], dict[str, object], dict[str, object]]] = []
+        records: list[dict[str, object]] = []
+
+        resolved_workers = _resolve_workers(config, workers)
+        progress_total = len(selected_tasks)
+        progress_processed = 0
+        progress_failed = 0
         logger.info(
-            "AkShare daily bar progress {}/{} code={} adjustment={} dataset={} status={} rows={}",
-            progress_processed,
+            "AkShare daily bar update started mode={} adjustment={} force={} workers={} planned_tasks={} processing_tasks={}",
+            mode,
+            adjustment,
+            force,
+            resolved_workers,
+            len(tasks),
             progress_total,
-            task.code,
-            task.adjustment,
-            row.get("dataset", task.dataset),
-            status,
-            row.get("row_count", 0),
         )
 
-    if resolved_workers == 1:
-        for task in selected_tasks:
-            metadata_start_count = len(metadata)
-            result = _fetch_daily_bar_task(ak_client, task)
-            row = _record_daily_bar_result(store, result, mode, metadata)
+        def daily_bar_progress_row(
+            task: AkShareDailyBarTask,
+            row: dict[str, object] | None,
+            metadata_start_count: int,
+        ) -> dict[str, object]:
             if row is not None:
-                records.append(row)
-            log_daily_bar_progress(task, daily_bar_progress_row(task, row, metadata_start_count))
-    else:
-        with ThreadPoolExecutor(max_workers=resolved_workers, thread_name_prefix="update-akshare-daily-bar") as executor:
-            futures: dict[Future[_DailyBarFetchResult], AkShareDailyBarTask] = {
-                executor.submit(_fetch_daily_bar_task, ak_client, task): task for task in selected_tasks
+                return row
+            if len(metadata) > metadata_start_count:
+                return metadata[-1][0]
+            return {
+                "dataset": task.dataset,
+                "code": task.code,
+                "status": "failed",
+                "row_count": 0,
             }
-            for future in as_completed(futures):
+
+        def log_daily_bar_progress(task: AkShareDailyBarTask, row: dict[str, object]) -> None:
+            nonlocal progress_processed, progress_success, progress_failed
+            progress_processed += 1
+            status = str(row.get("status", "unknown"))
+            if status == "success":
+                progress_success += 1
+            elif status == "failed":
+                progress_failed += 1
+            logger.info(
+                "AkShare daily bar progress {}/{} code={} adjustment={} dataset={} status={} rows={}",
+                progress_processed,
+                progress_total,
+                task.code,
+                task.adjustment,
+                row.get("dataset", task.dataset),
+                status,
+                row.get("row_count", 0),
+            )
+
+        if resolved_workers == 1:
+            for task in selected_tasks:
                 metadata_start_count = len(metadata)
-                try:
-                    result = future.result()
-                except Exception as exc:
-                    task = futures[future]
-                    result = _DailyBarFetchResult(
-                        task=task,
-                        started_at=datetime.now(),
-                        ended_at=datetime.now(),
-                        error=exc,
-                        error_stack=traceback.format_exc(),
-                    )
+                result = _fetch_daily_bar_task(ak_client, task)
                 row = _record_daily_bar_result(store, result, mode, metadata)
                 if row is not None:
                     records.append(row)
-                log_daily_bar_progress(result.task, daily_bar_progress_row(result.task, row, metadata_start_count))
+                log_daily_bar_progress(task, daily_bar_progress_row(task, row, metadata_start_count))
+        else:
+            with ThreadPoolExecutor(max_workers=resolved_workers, thread_name_prefix="update-akshare-daily-bar") as executor:
+                futures: dict[Future[_DailyBarFetchResult], AkShareDailyBarTask] = {
+                    executor.submit(_fetch_daily_bar_task, ak_client, task): task for task in selected_tasks
+                }
+                for future in as_completed(futures):
+                    metadata_start_count = len(metadata)
+                    try:
+                        result = future.result()
+                    except Exception as exc:
+                        task = futures[future]
+                        result = _DailyBarFetchResult(
+                            task=task,
+                            started_at=datetime.now(),
+                            ended_at=datetime.now(),
+                            error=exc,
+                            error_stack=traceback.format_exc(),
+                        )
+                    row = _record_daily_bar_result(store, result, mode, metadata)
+                    if row is not None:
+                        records.append(row)
+                    log_daily_bar_progress(result.task, daily_bar_progress_row(result.task, row, metadata_start_count))
 
-    persisted_records = persist_metadata(store, metadata)
-    store.close()
-    if build_views:
-        DuckDBStore(root=config.root).build_views(cleanup_tmp_files=progress_success > 0)
-    logger.info(
-        "AkShare daily bar update completed processed={} success={} failed={}",
-        progress_processed,
-        progress_success,
-        progress_failed,
-    )
-    return persisted_records if persisted_records else records
+        persisted_records = persist_metadata(store, metadata)
+        should_build_views = build_views
+        logger.info(
+            "AkShare daily bar update completed processed={} success={} failed={}",
+            progress_processed,
+            progress_success,
+            progress_failed,
+        )
+        return persisted_records if persisted_records else records
 
 
 def plan_akshare_daily_bar_tasks(

@@ -18,9 +18,9 @@ from src.analytics.valuation_percentile import compute_valuation_percentiles
 from src.pipeline.adjustments import UNADJUSTED_DAILY_DATASET
 from src.pipeline.common import PipelineCheckpointLookup, checkpoint_row, date_iso, should_skip_checkpoint
 from src.pipeline.dry_run import apply_limit, dry_run_record
+from src.pipeline.finalization import _finalize_write_pipeline
 from src.pipeline.update_daily_metadata import _run_row, _status_row
 from src.storage.dataset_catalog import BAOSTOCK_CN_STOCK_VALUATION_PERCENTILE_DATASET
-from src.storage.duckdb_store import DuckDBStore
 from src.storage.parquet_store import ParquetStore
 from src.utils.config_mgr import ConfigManager
 from src.utils.logging import logger
@@ -196,187 +196,191 @@ def _update_baostock_valuation_percentile_unlocked(
         "metadata_persist_seconds": 0.0,
     }
 
-    codes = apply_limit(_resolve_source_codes(store, code), max_codes, "max_codes")
-    resolved_workers = _resolve_workers(config, workers)
-    logger.info(
-        "Baostock valuation percentile update started mode={} force={} resume={} workers={} codes={}",
-        mode,
-        force,
-        resume,
-        resolved_workers,
-        len(codes),
-    )
+    should_build_views = False
 
-    tasks: list[_ValuationPercentileTask] = []
-    latest_prefilter_enabled = resume and not force and start is None
-    latest_prefilter_total = 0
-    latest_prefilter_skipped = 0
-    checkpoint_lookup: PipelineCheckpointLookup | None = None
+    with _finalize_write_pipeline(
+        store=store,
+        build_views=lambda: should_build_views,
+        cleanup_tmp_files=lambda: success_count > 0,
+    ):
+        codes = apply_limit(_resolve_source_codes(store, code), max_codes, "max_codes")
+        resolved_workers = _resolve_workers(config, workers)
+        logger.info(
+            "Baostock valuation percentile update started mode={} force={} resume={} workers={} codes={}",
+            mode,
+            force,
+            resume,
+            resolved_workers,
+            len(codes),
+        )
 
-    def get_checkpoint_lookup() -> PipelineCheckpointLookup | None:
-        nonlocal checkpoint_lookup
-        if not resume or force:
-            return None
-        if checkpoint_lookup is None:
-            checkpoint_lookup = _filtered_checkpoint_lookup(store)
-        return checkpoint_lookup
+        tasks: list[_ValuationPercentileTask] = []
+        latest_prefilter_enabled = resume and not force and start is None
+        latest_prefilter_total = 0
+        latest_prefilter_skipped = 0
+        checkpoint_lookup: PipelineCheckpointLookup | None = None
 
-    for stock_code in codes:
-        output_path = store.baostock_cn_stock_valuation_percentile_path(stock_code)
-        source_bounds = _source_date_bounds(store, stock_code)
-        if source_bounds is None:
-            continue
-        source_start, source_end = source_bounds
-        if latest_prefilter_enabled:
-            latest_prefilter_total += 1
-            if _target_covers_source_latest(store, stock_code, source_end):
-                latest_prefilter_skipped += 1
+        def get_checkpoint_lookup() -> PipelineCheckpointLookup | None:
+            nonlocal checkpoint_lookup
+            if not resume or force:
+                return None
+            if checkpoint_lookup is None:
+                checkpoint_lookup = _filtered_checkpoint_lookup(store)
+            return checkpoint_lookup
+
+        for stock_code in codes:
+            output_path = store.baostock_cn_stock_valuation_percentile_path(stock_code)
+            source_bounds = _source_date_bounds(store, stock_code)
+            if source_bounds is None:
+                continue
+            source_start, source_end = source_bounds
+            if latest_prefilter_enabled:
+                latest_prefilter_total += 1
+                if _target_covers_source_latest(store, stock_code, source_end):
+                    latest_prefilter_skipped += 1
+                    continue
+
+            replace_start = _replace_start(store, stock_code, mode, start)
+            checkpoint_start = replace_start or source_start
+
+            if not dry_run and _should_skip(
+                store,
+                dataset,
+                stock_code,
+                checkpoint_start,
+                source_end,
+                output_path,
+                resume,
+                force,
+                get_checkpoint_lookup(),
+            ):
                 continue
 
-        replace_start = _replace_start(store, stock_code, mode, start)
-        checkpoint_start = replace_start or source_start
-
-        if not dry_run and _should_skip(
-            store,
-            dataset,
-            stock_code,
-            checkpoint_start,
-            source_end,
-            output_path,
-            resume,
-            force,
-            get_checkpoint_lookup(),
-        ):
-            continue
-
-        tasks.append(
-            _ValuationPercentileTask(
-                root=config.root,
-                code=stock_code,
-                mode=mode,
-                replace_start=replace_start,
-                checkpoint_start=checkpoint_start,
-                source_end=source_end,
-                output_path=output_path,
+            tasks.append(
+                _ValuationPercentileTask(
+                    root=config.root,
+                    code=stock_code,
+                    mode=mode,
+                    replace_start=replace_start,
+                    checkpoint_start=checkpoint_start,
+                    source_end=source_end,
+                    output_path=output_path,
+                )
             )
-        )
 
-    tasks = apply_limit(tasks, max_tasks, "max_tasks")
+        tasks = apply_limit(tasks, max_tasks, "max_tasks")
 
-    if dry_run:
-        return [
-            dry_run_record(
+        if dry_run:
+            return [
+                dry_run_record(
+                    dataset,
+                    task.code,
+                    task.checkpoint_start,
+                    task.source_end,
+                    task.output_path,
+                    operation="write_baostock_cn_stock_valuation_percentile",
+                    mode=task.mode,
+                )
+                for task in tasks
+            ]
+
+        if latest_prefilter_skipped:
+            skipped_ratio = latest_prefilter_skipped / latest_prefilter_total * 100 if latest_prefilter_total else 0.0
+            logger.info(
+                "Baostock valuation percentile prefilter skipped {}/{} codes ({:.1f}%); processing {} codes",
+                latest_prefilter_skipped,
+                latest_prefilter_total,
+                skipped_ratio,
+                len(tasks),
+            )
+
+        progress_total = len(tasks)
+        progress_processed = 0
+        progress_success = 0
+        progress_failed = 0
+
+        def log_progress(row: dict[str, object]) -> None:
+            nonlocal progress_processed, progress_success, progress_failed
+            progress_processed += 1
+            status = str(row.get("status", "unknown"))
+            if status == "success":
+                progress_success += 1
+            elif status == "failed":
+                progress_failed += 1
+            logger.info(
+                "Baostock valuation percentile progress {}/{} code={} status={} rows={}",
+                progress_processed,
+                progress_total,
+                row.get("code", ""),
+                status,
+                row.get("row_count", 0),
+            )
+
+        def record_result(result: _ValuationPercentileResult) -> None:
+            nonlocal success_count
+            run_record_count = len(run_records)
+            if _record_valuation_result(
+                store,
+                result,
                 dataset,
-                task.code,
-                task.checkpoint_start,
-                task.source_end,
-                task.output_path,
-                operation="write_baostock_cn_stock_valuation_percentile",
-                mode=task.mode,
+                run_records,
+                status_rows,
+                checkpoint_rows,
+                timing_totals,
+            ):
+                success_count += 1
+            progress_row = (
+                run_records[-1]
+                if len(run_records) > run_record_count
+                else {
+                    "dataset": dataset,
+                    "code": result.task.code,
+                    "status": "skipped_empty",
+                    "row_count": 0,
+                }
             )
-            for task in tasks
-        ]
+            log_progress(progress_row)
 
-    if latest_prefilter_skipped:
-        skipped_ratio = latest_prefilter_skipped / latest_prefilter_total * 100 if latest_prefilter_total else 0.0
+        if resolved_workers == 1 or len(tasks) <= 1:
+            for task in tasks:
+                record_result(_compute_valuation_percentile_task(task))
+        else:
+            with ProcessPoolExecutor(max_workers=resolved_workers) as executor:
+                futures = {executor.submit(_compute_valuation_percentile_task, task): task for task in tasks}
+                for future in as_completed(futures):
+                    task = futures[future]
+                    try:
+                        result = future.result()
+                    except Exception:
+                        result = _ValuationPercentileResult(
+                            task=task,
+                            started_at=datetime.now(),
+                            ended_at=datetime.now(),
+                            error_stack=traceback.format_exc(),
+                        )
+                    record_result(result)
+
+        if run_records or status_rows or checkpoint_rows:
+            metadata_started = time.perf_counter()
+            store.persist_update_metadata(run_records, status_rows, checkpoint_rows)
+            timing_totals["metadata_persist_seconds"] += time.perf_counter() - metadata_started
+        should_build_views = build_views
         logger.info(
-            "Baostock valuation percentile prefilter skipped {}/{} codes ({:.1f}%); processing {} codes",
-            latest_prefilter_skipped,
-            latest_prefilter_total,
-            skipped_ratio,
-            len(tasks),
+            (
+                "Baostock valuation percentile timing summary compute={:.3f}s "
+                "parquet_write={:.3f}s metadata_persist={:.3f}s"
+            ),
+            timing_totals["compute_seconds"],
+            timing_totals["parquet_write_seconds"],
+            timing_totals["metadata_persist_seconds"],
         )
-
-    progress_total = len(tasks)
-    progress_processed = 0
-    progress_success = 0
-    progress_failed = 0
-
-    def log_progress(row: dict[str, object]) -> None:
-        nonlocal progress_processed, progress_success, progress_failed
-        progress_processed += 1
-        status = str(row.get("status", "unknown"))
-        if status == "success":
-            progress_success += 1
-        elif status == "failed":
-            progress_failed += 1
         logger.info(
-            "Baostock valuation percentile progress {}/{} code={} status={} rows={}",
-            progress_processed,
-            progress_total,
-            row.get("code", ""),
-            status,
-            row.get("row_count", 0),
+            "Baostock valuation percentile update completed records={} success={} failed={}",
+            len(run_records),
+            success_count,
+            progress_failed,
         )
-
-    def record_result(result: _ValuationPercentileResult) -> None:
-        nonlocal success_count
-        run_record_count = len(run_records)
-        if _record_valuation_result(
-            store,
-            result,
-            dataset,
-            run_records,
-            status_rows,
-            checkpoint_rows,
-            timing_totals,
-        ):
-            success_count += 1
-        progress_row = (
-            run_records[-1]
-            if len(run_records) > run_record_count
-            else {
-                "dataset": dataset,
-                "code": result.task.code,
-                "status": "skipped_empty",
-                "row_count": 0,
-            }
-        )
-        log_progress(progress_row)
-
-    if resolved_workers == 1 or len(tasks) <= 1:
-        for task in tasks:
-            record_result(_compute_valuation_percentile_task(task))
-    else:
-        with ProcessPoolExecutor(max_workers=resolved_workers) as executor:
-            futures = {executor.submit(_compute_valuation_percentile_task, task): task for task in tasks}
-            for future in as_completed(futures):
-                task = futures[future]
-                try:
-                    result = future.result()
-                except Exception:
-                    result = _ValuationPercentileResult(
-                        task=task,
-                        started_at=datetime.now(),
-                        ended_at=datetime.now(),
-                        error_stack=traceback.format_exc(),
-                    )
-                record_result(result)
-
-    if run_records or status_rows or checkpoint_rows:
-        metadata_started = time.perf_counter()
-        store.persist_update_metadata(run_records, status_rows, checkpoint_rows)
-        timing_totals["metadata_persist_seconds"] += time.perf_counter() - metadata_started
-    store.close()
-
-    if build_views:
-        DuckDBStore(root=config.root).build_views(cleanup_tmp_files=success_count > 0)
-    logger.info(
-        (
-            "Baostock valuation percentile timing summary compute={:.3f}s "
-            "parquet_write={:.3f}s metadata_persist={:.3f}s"
-        ),
-        timing_totals["compute_seconds"],
-        timing_totals["parquet_write_seconds"],
-        timing_totals["metadata_persist_seconds"],
-    )
-    logger.info(
-        "Baostock valuation percentile update completed records={} success={} failed={}",
-        len(run_records),
-        success_count,
-        progress_failed,
-    )
-    return run_records
+        return run_records
 
 
 def _compute_valuation_percentile_task(task: _ValuationPercentileTask) -> _ValuationPercentileResult:

@@ -4,6 +4,7 @@ from datetime import datetime
 
 import duckdb
 import pandas as pd
+import pytest
 
 from src.analytics.valuation_percentile import compute_valuation_percentiles
 from src.storage.duckdb_store import DuckDBStore
@@ -86,5 +87,30 @@ def test_duckdb_views_can_be_created_and_queried(
     assert value_result == (2,)
     assert spot_result == (1,)
     assert old_view_count == (0,)
+
+
+def test_duckdb_build_views_rolls_back_view_replacements_on_failure(tmp_path, monkeypatch) -> None:
+    duck_store = DuckDBStore(root=tmp_path)
+    duckdb_file = tmp_path / "data" / "duckdb" / "quant.duckdb"
+    duckdb_file.parent.mkdir(parents=True, exist_ok=True)
+    with duckdb.connect(str(duckdb_file)) as conn:
+        conn.execute("create view v_baostock_cn_stock_daily_bar_qfq as select 1 as marker")
+
+    monkeypatch.setattr(
+        duck_store,
+        "view_sqls",
+        lambda: [
+            "create or replace view v_baostock_cn_stock_daily_bar_qfq as select 2 as marker",
+            "select * from missing_relation_for_rollback_test",
+        ],
+    )
+
+    with pytest.raises(duckdb.CatalogException):
+        duck_store.build_views(cleanup_tmp_files=False)
+
+    with duckdb.connect(str(duckdb_file)) as conn:
+        marker = conn.execute("select marker from v_baostock_cn_stock_daily_bar_qfq").fetchone()
+
+    assert marker == (1,)
 
 

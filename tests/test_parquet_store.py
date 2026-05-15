@@ -3,6 +3,7 @@ from __future__ import annotations
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 
+import duckdb
 import pandas as pd
 import pytest
 
@@ -785,6 +786,126 @@ def test_persist_update_metadata_batches_match_individual_writes(tmp_path) -> No
         left = reader(individual)
         right = reader(batched)
         pd.testing.assert_frame_equal(left, right)
+
+
+def test_persist_update_metadata_rolls_back_run_and_status_when_checkpoint_write_fails(tmp_path) -> None:
+    duckdb_file = tmp_path / "data" / "duckdb" / "quant.duckdb"
+    duckdb_file.parent.mkdir(parents=True, exist_ok=True)
+    with duckdb.connect(str(duckdb_file)) as conn:
+        conn.execute(
+            """
+            CREATE TABLE pipeline_runs (
+                task_id VARCHAR,
+                dataset VARCHAR,
+                code VARCHAR,
+                status VARCHAR,
+                start_date DATE,
+                end_date DATE,
+                start_time TIMESTAMP,
+                end_time TIMESTAMP,
+                row_count BIGINT,
+                error_stack VARCHAR
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE dataset_update_status (
+                dataset VARCHAR,
+                code VARCHAR,
+                last_success_date DATE,
+                row_count BIGINT,
+                status VARCHAR,
+                updated_at TIMESTAMP,
+                error_stack VARCHAR
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO dataset_update_status VALUES (
+                'baostock_cn_stock_daily_bar_qfq',
+                'sh.600000',
+                DATE '2024-01-30',
+                1,
+                'success',
+                TIMESTAMP '2024-01-30 09:01:00',
+                ''
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE pipeline_checkpoints (
+                pipeline VARCHAR,
+                dataset VARCHAR,
+                code VARCHAR,
+                start_date DATE,
+                end_date DATE,
+                status VARCHAR,
+                row_count BIGINT,
+                output_path VARCHAR,
+                updated_at TIMESTAMP,
+                error_stack VARCHAR,
+                required_marker VARCHAR NOT NULL
+            )
+            """
+        )
+
+    store = ParquetStore(root=tmp_path)
+    now = datetime(2024, 1, 31, 9, 1)
+
+    with pytest.raises(duckdb.BinderException):
+        store.persist_update_metadata(
+            [
+                {
+                    "task_id": "task-1",
+                    "dataset": "baostock_cn_stock_daily_bar_qfq",
+                    "code": "sh.600000",
+                    "status": "success",
+                    "start_date": "2024-01-01",
+                    "end_date": "2024-01-31",
+                    "start_time": now,
+                    "end_time": now,
+                    "row_count": 2,
+                    "error_stack": "",
+                }
+            ],
+            [
+                {
+                    "dataset": "baostock_cn_stock_daily_bar_qfq",
+                    "code": "sh.600000",
+                    "last_success_date": "2024-01-31",
+                    "row_count": 2,
+                    "status": "success",
+                    "updated_at": now,
+                    "error_stack": "",
+                }
+            ],
+            [
+                {
+                    "pipeline": "update_daily",
+                    "dataset": "baostock_cn_stock_daily_bar_qfq",
+                    "code": "sh.600000",
+                    "start_date": "2024-01-01",
+                    "end_date": "2024-01-31",
+                    "status": "success",
+                    "row_count": 2,
+                    "output_path": "baostock_cn_stock_daily_bar_qfq/code=sh.600000/data.parquet",
+                    "updated_at": now,
+                    "error_stack": "",
+                }
+            ],
+        )
+
+    with duckdb.connect(str(duckdb_file)) as conn:
+        run_count = conn.execute("SELECT count(*) FROM pipeline_runs").fetchone()
+        status_row = conn.execute(
+            "SELECT last_success_date, row_count FROM dataset_update_status WHERE code = 'sh.600000'"
+        ).fetchone()
+
+    assert run_count == (0,)
+    assert status_row == (datetime(2024, 1, 30).date(), 1)
 
 
 def test_duckdb_metadata_ignores_parquet_metadata_files(tmp_path) -> None:
