@@ -9,7 +9,7 @@ from src.storage.dataset_catalog import DATASET_CATALOG
 from src.storage.parquet_store import ParquetStore
 
 
-def test_data_registry_generates_catalog_inventory_and_write_events(tmp_path, daily_sample) -> None:
+def test_data_registry_generates_catalog_and_inventory_without_write_events(tmp_path, daily_sample) -> None:
     store = ParquetStore(root=tmp_path)
     store.ensure_layout()
     registry = DataRegistry(root=tmp_path)
@@ -18,13 +18,8 @@ def test_data_registry_generates_catalog_inventory_and_write_events(tmp_path, da
     assert len(catalog) == len(DATASET_CATALOG)
     assert any(item["dataset_id"] == "baostock_cn_stock_daily_bar_qfq" for item in catalog)
 
-    path = store.write_baostock_daily_bars("baostock_cn_stock_daily_bar_qfq", "sh.600000", daily_sample())
-
-    events = registry.read_events()
-    assert events[-1]["dataset_id"] == "baostock_cn_stock_daily_bar_qfq"
-    assert events[-1]["code"] == "sh.600000"
-    assert events[-1]["row_count"] == 2
-    assert events[-1]["output_path"] == str(path.relative_to(tmp_path))
+    store.write_baostock_daily_bars("baostock_cn_stock_daily_bar_qfq", "sh.600000", daily_sample())
+    assert not (tmp_path / "data" / "registry" / "events.jsonl").exists()
 
     store.refresh_pending_registry_inventory()
     inventory = registry.read_inventory()
@@ -86,57 +81,40 @@ def test_data_registry_lists_partitions(tmp_path, daily_sample) -> None:
     ]
 
 
-def test_data_registry_write_events_do_not_refresh_inventory_by_default(tmp_path, daily_sample) -> None:
+def test_data_registry_writes_mark_inventory_without_creating_events(tmp_path, daily_sample) -> None:
     store = ParquetStore(root=tmp_path)
     store.ensure_layout()
-    path = store.write_baostock_daily_bars("baostock_cn_stock_daily_bar_qfq", "sh.600000", daily_sample())
+    store.write_baostock_daily_bars("baostock_cn_stock_daily_bar_qfq", "sh.600000", daily_sample())
     registry = DataRegistry(root=tmp_path)
 
-    assert registry.read_events()[-1]["output_path"] == str(path.relative_to(tmp_path))
+    assert not hasattr(registry, "read_events")
+    assert not (tmp_path / "data" / "registry" / "events.jsonl").exists()
     assert not registry.inventory_path.exists()
 
 
-def test_data_registry_append_event_defaults_to_event_only(tmp_path) -> None:
+def test_data_registry_event_write_api_is_removed(tmp_path) -> None:
     registry = DataRegistry(root=tmp_path)
 
-    registry.append_event(
-        "baostock_cn_stock_daily_bar_qfq",
-        "sh.600000",
-        2,
-        tmp_path / "data" / "parquet" / "baostock_cn_stock_daily_bar_qfq" / "code=sh.600000" / "data.parquet",
-    )
-
-    assert registry.read_events()[-1]["dataset_id"] == "baostock_cn_stock_daily_bar_qfq"
-    assert not registry.inventory_path.exists()
+    assert not hasattr(registry, "append_event")
+    assert not hasattr(registry, "publish_dataframe_write")
+    assert not hasattr(registry, "latest_event_id")
+    assert not hasattr(registry, "read_events")
 
 
-def test_data_registry_publish_dataframe_write_defaults_to_event_only(tmp_path, daily_sample) -> None:
-    registry = DataRegistry(root=tmp_path)
+def test_data_registry_status_excludes_event_id(tmp_path) -> None:
+    status = DataRegistry(root=tmp_path).status()
 
-    registry.publish_dataframe_write(
-        "baostock_cn_stock_daily_bar_qfq",
-        "sh.600000",
-        daily_sample(),
-        tmp_path / "data" / "parquet" / "baostock_cn_stock_daily_bar_qfq" / "code=sh.600000" / "data.parquet",
-    )
-
-    assert registry.read_events()[-1]["dataset_id"] == "baostock_cn_stock_daily_bar_qfq"
-    assert not registry.inventory_path.exists()
+    assert "latest_event_id" not in status
+    assert not (tmp_path / "data" / "registry" / "events.jsonl").exists()
 
 
 def test_data_registry_explicit_refresh_inventory_remains_available(tmp_path, daily_sample) -> None:
     store = ParquetStore(root=tmp_path)
     store.ensure_layout()
-    path = store.write_baostock_daily_bars("baostock_cn_stock_daily_bar_qfq", "sh.600000", daily_sample())
+    store.write_baostock_daily_bars("baostock_cn_stock_daily_bar_qfq", "sh.600000", daily_sample())
     registry = DataRegistry(root=tmp_path)
 
-    registry.publish_dataframe_write(
-        "baostock_cn_stock_daily_bar_qfq",
-        "sh.600000",
-        daily_sample(),
-        path,
-        refresh_inventory=True,
-    )
+    registry.refresh_inventory(["baostock_cn_stock_daily_bar_qfq"])
 
     inventory = registry.read_inventory()
     row = inventory.loc[inventory["dataset_id"] == "baostock_cn_stock_daily_bar_qfq"].iloc[0]

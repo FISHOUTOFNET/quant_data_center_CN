@@ -130,30 +130,11 @@ def test_valuation_percentile_direct_write_defers_registry_inventory_by_default(
     daily_sample,
     monkeypatch,
 ) -> None:
-    publish_calls: list[dict[str, object]] = []
     refresh_calls: list[list[str]] = []
 
     class FakeRegistry:
         def __init__(self, root=None) -> None:
             self.root = root
-
-        def publish_dataframe_write(
-            self,
-            dataset: str,
-            code: str,
-            df: pd.DataFrame,
-            destination,
-            refresh_inventory: bool = True,
-        ) -> None:
-            publish_calls.append(
-                {
-                    "dataset": dataset,
-                    "code": code,
-                    "rows": len(df),
-                    "destination": destination,
-                    "refresh_inventory": refresh_inventory,
-                }
-            )
 
         def refresh_inventory(self, dataset_ids=None, status_rows=None):
             del status_rows
@@ -167,9 +148,6 @@ def test_valuation_percentile_direct_write_defers_registry_inventory_by_default(
 
     store.write_baostock_cn_stock_valuation_percentile("sh.600000", frame)
 
-    assert len(publish_calls) == 1
-    assert publish_calls[0]["dataset"] == "baostock_cn_stock_valuation_percentile"
-    assert publish_calls[0]["refresh_inventory"] is False
     assert refresh_calls == []
 
 
@@ -178,29 +156,16 @@ def test_valuation_percentile_write_can_defer_registry_inventory_refresh(
     daily_sample,
     monkeypatch,
 ) -> None:
-    publish_calls: list[dict[str, object]] = []
+    refresh_calls: list[list[str]] = []
 
     class FakeRegistry:
         def __init__(self, root=None) -> None:
             self.root = root
 
-        def publish_dataframe_write(
-            self,
-            dataset: str,
-            code: str,
-            df: pd.DataFrame,
-            destination,
-            refresh_inventory: bool = True,
-        ) -> None:
-            publish_calls.append(
-                {
-                    "dataset": dataset,
-                    "code": code,
-                    "rows": len(df),
-                    "destination": destination,
-                    "refresh_inventory": refresh_inventory,
-                }
-            )
+        def refresh_inventory(self, dataset_ids=None, status_rows=None):
+            del status_rows
+            refresh_calls.append(list(dataset_ids or []))
+            return pd.DataFrame()
 
     monkeypatch.setattr(parquet_store_module, "DataRegistry", FakeRegistry)
     store = ParquetStore(root=tmp_path)
@@ -213,8 +178,38 @@ def test_valuation_percentile_write_can_defer_registry_inventory_refresh(
         refresh_registry_inventory=False,
     )
 
-    assert len(publish_calls) == 1
-    assert publish_calls[0]["refresh_inventory"] is False
+    assert refresh_calls == []
+
+
+def test_valuation_percentile_write_can_refresh_registry_inventory_immediately(
+    tmp_path,
+    daily_sample,
+    monkeypatch,
+) -> None:
+    refresh_calls: list[list[str]] = []
+
+    class FakeRegistry:
+        def __init__(self, root=None) -> None:
+            self.root = root
+
+        def refresh_inventory(self, dataset_ids=None, status_rows=None):
+            del status_rows
+            refresh_calls.append(list(dataset_ids or []))
+            return pd.DataFrame()
+
+    monkeypatch.setattr(parquet_store_module, "DataRegistry", FakeRegistry)
+    store = ParquetStore(root=tmp_path)
+    store.ensure_layout()
+    frame = compute_valuation_percentiles(daily_sample())
+
+    store.write_baostock_cn_stock_valuation_percentile(
+        "sh.600000",
+        frame,
+        refresh_registry_inventory=True,
+    )
+    store.refresh_pending_registry_inventory()
+
+    assert refresh_calls == [["baostock_cn_stock_valuation_percentile"]]
 
 
 def test_parquet_store_refreshes_pending_registry_inventory_once_after_writes(
@@ -227,16 +222,6 @@ def test_parquet_store_refreshes_pending_registry_inventory_once_after_writes(
     class FakeRegistry:
         def __init__(self, root=None) -> None:
             self.root = root
-
-        def publish_dataframe_write(
-            self,
-            dataset: str,
-            code: str,
-            df: pd.DataFrame,
-            destination,
-            refresh_inventory: bool = True,
-        ) -> None:
-            assert refresh_inventory is False
 
         def refresh_inventory(self, dataset_ids=None, status_rows=None):
             refresh_calls.append(
@@ -277,9 +262,6 @@ def test_parquet_store_metadata_status_marks_pending_inventory_without_immediate
     class FakeRegistry:
         def __init__(self, root=None) -> None:
             self.root = root
-
-        def publish_dataframe_write(self, *args, **kwargs) -> None:
-            return None
 
         def refresh_inventory(self, dataset_ids=None, status_rows=None):
             refresh_calls.append(

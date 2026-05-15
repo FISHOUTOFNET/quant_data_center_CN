@@ -534,30 +534,11 @@ def test_update_baostock_valuation_percentile_defers_per_stock_registry_inventor
         "sz.000001",
         _source_daily([("2024-01-02", 6.0)], code="sz.000001"),
     )
-    publish_calls: list[dict[str, object]] = []
     refresh_calls: list[dict[str, object]] = []
 
     class FakeRegistry:
         def __init__(self, root=None) -> None:
             self.root = root
-
-        def publish_dataframe_write(
-            self,
-            dataset: str,
-            code: str,
-            df: pd.DataFrame,
-            destination,
-            refresh_inventory: bool = True,
-        ) -> None:
-            publish_calls.append(
-                {
-                    "dataset": dataset,
-                    "code": code,
-                    "rows": len(df),
-                    "destination": destination,
-                    "refresh_inventory": refresh_inventory,
-                }
-            )
 
         def refresh_inventory(self, dataset_ids=None, status_rows=None):
             refresh_calls.append(
@@ -582,7 +563,6 @@ def test_update_baostock_valuation_percentile_defers_per_stock_registry_inventor
         ("sh.600000", "success"),
         ("sz.000001", "success"),
     ]
-    assert [call["refresh_inventory"] for call in publish_calls] == [False, False]
     assert refresh_calls == [
         {
             "dataset_ids": ["baostock_cn_stock_valuation_percentile"],

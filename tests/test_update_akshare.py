@@ -231,15 +231,11 @@ def test_update_akshare_defers_registry_inventory_until_run_end(
     _write_baostock_cn_trading_calendar(store, "2024-01-03")
     store.close()
 
-    publish_refresh_flags = []
     refresh_calls = []
 
     class FakeRegistry:
         def __init__(self, root=None) -> None:
             self.root = root
-
-        def publish_dataframe_write(self, dataset_id, code, df, output_path, refresh_inventory=True):
-            publish_refresh_flags.append(refresh_inventory)
 
         def refresh_inventory(self, dataset_ids=None, status_rows=None):
             refresh_calls.append(
@@ -265,8 +261,6 @@ def test_update_akshare_defers_registry_inventory_until_run_end(
     )
 
     assert [item["status"] for item in records] == ["success", "success"]
-    assert publish_refresh_flags
-    assert set(publish_refresh_flags) == {False}
     assert refresh_calls == [
         {
             "dataset_ids": ["akshare_cn_stock_valuation_eastmoney"],

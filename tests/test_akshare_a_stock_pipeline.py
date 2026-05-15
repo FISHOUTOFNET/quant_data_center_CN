@@ -425,15 +425,11 @@ def test_update_akshare_delist_and_spot_force_log_progress(tmp_path, monkeypatch
 
 def test_update_akshare_daily_bar_defers_registry_inventory_until_run_end(tmp_path, monkeypatch) -> None:
     _write_settings(tmp_path)
-    publish_refresh_flags = []
     refresh_calls = []
 
     class FakeRegistry:
         def __init__(self, root=None) -> None:
             self.root = root
-
-        def publish_dataframe_write(self, dataset_id, code, df, output_path, refresh_inventory=True):
-            publish_refresh_flags.append(refresh_inventory)
 
         def refresh_inventory(self, dataset_ids=None, status_rows=None):
             refresh_calls.append(
@@ -460,8 +456,6 @@ def test_update_akshare_daily_bar_defers_registry_inventory_until_run_end(tmp_pa
     )
 
     assert [item["status"] for item in records] == ["success", "success"]
-    assert publish_refresh_flags
-    assert set(publish_refresh_flags) == {False}
     assert refresh_calls == [
         {
             "dataset_ids": ["akshare_cn_stock_daily_bar_unadjusted"],
@@ -472,15 +466,11 @@ def test_update_akshare_daily_bar_defers_registry_inventory_until_run_end(tmp_pa
 
 def test_update_akshare_spot_defers_registry_inventory_until_run_end(tmp_path, monkeypatch) -> None:
     _write_settings(tmp_path)
-    publish_refresh_flags = []
     refresh_calls = []
 
     class FakeRegistry:
         def __init__(self, root=None) -> None:
             self.root = root
-
-        def publish_dataframe_write(self, dataset_id, code, df, output_path, refresh_inventory=True):
-            publish_refresh_flags.append(refresh_inventory)
 
         def refresh_inventory(self, dataset_ids=None, status_rows=None):
             refresh_calls.append(
@@ -503,8 +493,6 @@ def test_update_akshare_spot_defers_registry_inventory_until_run_end(tmp_path, m
     )
 
     assert [item["status"] for item in records] == ["success", "success"]
-    assert publish_refresh_flags
-    assert set(publish_refresh_flags) == {False}
     assert refresh_calls == [
         {
             "dataset_ids": ["akshare_cn_stock_daily_bar_unadjusted", "akshare_cn_stock_spot_quote_eastmoney"],
@@ -515,15 +503,11 @@ def test_update_akshare_spot_defers_registry_inventory_until_run_end(tmp_path, m
 
 def test_update_akshare_delist_defers_registry_inventory_until_run_end(tmp_path, monkeypatch) -> None:
     _write_settings(tmp_path)
-    publish_refresh_flags = []
     refresh_calls = []
 
     class FakeRegistry:
         def __init__(self, root=None) -> None:
             self.root = root
-
-        def publish_dataframe_write(self, dataset_id, code, df, output_path, refresh_inventory=True):
-            publish_refresh_flags.append(refresh_inventory)
 
         def refresh_inventory(self, dataset_ids=None, status_rows=None):
             refresh_calls.append(
@@ -547,8 +531,6 @@ def test_update_akshare_delist_defers_registry_inventory_until_run_end(tmp_path,
     )
 
     assert [item["status"] for item in records] == ["success", "success"]
-    assert publish_refresh_flags
-    assert set(publish_refresh_flags) == {False}
     assert refresh_calls == [
         {
             "dataset_ids": ["akshare_cn_stock_delist_sh", "akshare_cn_stock_delist_sz"],

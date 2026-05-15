@@ -91,15 +91,11 @@ def test_repair_normalizes_non_trading_range_to_trading_bounds(
     def create_provider(config, provider: str | None = None):
         return FakeProvider(config)
 
-    publish_refresh_flags = []
     refresh_calls = []
 
     class FakeRegistry:
         def __init__(self, root=None) -> None:
             self.root = root
-
-        def publish_dataframe_write(self, dataset_id, code, df, output_path, refresh_inventory=True):
-            publish_refresh_flags.append(refresh_inventory)
 
         def refresh_inventory(self, dataset_ids=None, status_rows=None):
             refresh_calls.append(
@@ -137,8 +133,6 @@ def test_repair_normalizes_non_trading_range_to_trading_bounds(
             "end_date": "2024-01-12",
         }
     ]
-    assert publish_refresh_flags
-    assert set(publish_refresh_flags) == {False}
     assert refresh_calls == [
         {
             "dataset_ids": [

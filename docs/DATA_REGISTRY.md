@@ -16,7 +16,6 @@ The registry is stored under `data/registry/`:
 
 - `catalog.json`: all known Dataset definitions from `DATASET_CATALOG`, including schema, view name, source, code format, partition column, and lifecycle.
 - `inventory.parquet`: physical storage inventory, including file count, partition count, row count, date bounds, latest partition, and latest pipeline status.
-- `events.jsonl`: append-only write events. `event_id` is monotonic, so consumers can resume from the last seen event.
 
 ## Discovery
 
@@ -37,22 +36,6 @@ List partitions:
 ```http
 GET http://127.0.0.1:8765/v1/datasets/akshare_cn_stock_daily_bar_unadjusted/partitions
 ```
-
-## Events
-
-Poll events after the last consumed event:
-
-```http
-GET http://127.0.0.1:8765/v1/events?since_event_id=120
-```
-
-Subscribe to server-sent events:
-
-```http
-GET http://127.0.0.1:8765/v1/events/stream?since_event_id=120
-```
-
-Each event includes `dataset_id`, `code`, date bounds, `row_count`, `output_path`, `occurred_at`, and `event_id`.
 
 ## Query
 

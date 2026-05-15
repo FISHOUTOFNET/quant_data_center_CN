@@ -3,12 +3,11 @@
 from __future__ import annotations
 
 import json
-import time
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import urlparse
 
 import duckdb
 import pandas as pd
@@ -130,7 +129,6 @@ class RegistryRequestHandler(BaseHTTPRequestHandler):
         try:
             parsed = urlparse(self.path)
             path = parsed.path.rstrip("/") or "/"
-            query = parse_qs(parsed.query)
             if path == "/v1/datasets":
                 self._send_json({"datasets": self.data_registry.dataset_discovery()})
                 return
@@ -139,14 +137,6 @@ class RegistryRequestHandler(BaseHTTPRequestHandler):
                 return
             if path == "/v1/status":
                 self._send_json(self.data_registry.status())
-                return
-            if path == "/v1/events":
-                since = _query_int(query, "since_event_id", 0)
-                self._send_json({"events": self.data_registry.read_events(since_event_id=since)})
-                return
-            if path == "/v1/events/stream":
-                since = _query_int(query, "since_event_id", 0)
-                self._stream_events(since)
                 return
             self._send_error(HTTPStatus.NOT_FOUND, "Unknown endpoint")
         except ValueError as exc:
@@ -178,21 +168,6 @@ class RegistryRequestHandler(BaseHTTPRequestHandler):
             return
         dataset_id = suffix.strip("/")
         self._send_json(self.data_registry.dataset_detail(dataset_id))
-
-    def _stream_events(self, since_event_id: int) -> None:
-        self.send_response(HTTPStatus.OK)
-        self.send_header("Content-Type", "text/event-stream; charset=utf-8")
-        self.send_header("Cache-Control", "no-cache")
-        self.end_headers()
-        latest = since_event_id
-        while True:
-            events = self.data_registry.read_events(since_event_id=latest)
-            for event in events:
-                latest = max(latest, int(event.get("event_id", latest)))
-                payload = "data: " + json.dumps(event, ensure_ascii=False, default=str) + "\n\n"
-                self.wfile.write(payload.encode("utf-8"))
-                self.wfile.flush()
-            time.sleep(1)
 
     def _read_json_body(self) -> dict[str, Any]:
         length = int(self.headers.get("Content-Length", "0"))
@@ -240,8 +215,3 @@ def _quote_identifier(name: str) -> str:
     return '"' + name.replace('"', '""') + '"'
 
 
-def _query_int(query: dict[str, list[str]], key: str, default: int) -> int:
-    values = query.get(key)
-    if not values:
-        return default
-    return int(values[0])

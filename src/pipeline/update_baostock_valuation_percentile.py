@@ -193,7 +193,6 @@ def _update_baostock_valuation_percentile_unlocked(
     timing_totals = {
         "compute_seconds": 0.0,
         "parquet_write_seconds": 0.0,
-        "registry_publish_seconds": 0.0,
         "metadata_persist_seconds": 0.0,
     }
 
@@ -365,11 +364,10 @@ def _update_baostock_valuation_percentile_unlocked(
     logger.info(
         (
             "Baostock valuation percentile timing summary compute={:.3f}s "
-            "parquet_write={:.3f}s registry_publish={:.3f}s metadata_persist={:.3f}s"
+            "parquet_write={:.3f}s metadata_persist={:.3f}s"
         ),
         timing_totals["compute_seconds"],
         timing_totals["parquet_write_seconds"],
-        timing_totals["registry_publish_seconds"],
         timing_totals["metadata_persist_seconds"],
     )
     logger.info(
@@ -455,7 +453,6 @@ def _record_valuation_result(
             timing=write_timing,
         )
         timing_totals["parquet_write_seconds"] += write_timing.get("parquet_write_seconds", 0.0)
-        timing_totals["registry_publish_seconds"] += write_timing.get("registry_publish_seconds", 0.0)
         row_count = len(final)
         run_row = _run_row(
             dataset,

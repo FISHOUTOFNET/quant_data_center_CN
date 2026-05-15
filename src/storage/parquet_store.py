@@ -396,7 +396,7 @@ class ParquetStore:
         definition.validator(cleaned)
         destination = self.baostock_daily_bar_path(dataset, code)
         self.atomic_write(cleaned, definition.schema, destination)
-        self._publish_dataset_write(dataset, code, cleaned, destination)
+        self._refresh_or_mark_registry_inventory(dataset)
         logger.info(
             "Daily Parquet stored dataset={} code={} rows={} path={}",
             dataset,
@@ -422,7 +422,7 @@ class ParquetStore:
         cleaned = self.clean_baostock_cn_stock_adjustment_factor_frame(code, df)
         destination = self.baostock_cn_stock_adjustment_factor_path(code)
         self.atomic_write(cleaned, BAOSTOCK_CN_STOCK_ADJUSTMENT_FACTOR_DATASET.schema, destination)
-        self._publish_dataset_write(BAOSTOCK_CN_STOCK_ADJUSTMENT_FACTOR_DATASET.name, code, cleaned, destination)
+        self._refresh_or_mark_registry_inventory(BAOSTOCK_CN_STOCK_ADJUSTMENT_FACTOR_DATASET.name)
         return destination
 
     def clean_baostock_cn_stock_adjustment_factor_frame(self, code: str, df: pd.DataFrame) -> pd.DataFrame:
@@ -457,16 +457,10 @@ class ParquetStore:
         self.atomic_write(cleaned, BAOSTOCK_CN_STOCK_VALUATION_PERCENTILE_DATASET.schema, destination)
         if timing is not None:
             timing["parquet_write_seconds"] = time.perf_counter() - write_started
-        publish_started = time.perf_counter()
-        self._publish_dataset_write(
+        self._refresh_or_mark_registry_inventory(
             BAOSTOCK_CN_STOCK_VALUATION_PERCENTILE_DATASET.name,
-            code,
-            cleaned,
-            destination,
             refresh_inventory=refresh_registry_inventory,
         )
-        if timing is not None:
-            timing["registry_publish_seconds"] = time.perf_counter() - publish_started
         return destination
 
     def read_baostock_cn_stock_valuation_percentile(self, code: str) -> pd.DataFrame:
@@ -510,7 +504,7 @@ class ParquetStore:
                 shutil.rmtree(old_partition, ignore_errors=True)
                 logger.info("Removed old baostock_cn_stock_basic partition: {}", old_partition)
         self.atomic_write(cleaned, BAOSTOCK_CN_STOCK_BASIC_DATASET.schema, destination)
-        self._publish_dataset_write(BAOSTOCK_CN_STOCK_BASIC_DATASET.name, "*", cleaned, destination)
+        self._refresh_or_mark_registry_inventory(BAOSTOCK_CN_STOCK_BASIC_DATASET.name)
         return destination
 
     def write_baostock_cn_trading_calendar(self, df: pd.DataFrame) -> Path:
@@ -524,7 +518,7 @@ class ParquetStore:
         cleaned = cleaned.sort_values(["calendar_date"]).reset_index(drop=True) if not cleaned.empty else cleaned
         BAOSTOCK_CN_TRADING_CALENDAR_DATASET.validator(cleaned)
         self.atomic_write(cleaned, BAOSTOCK_CN_TRADING_CALENDAR_DATASET.schema, destination)
-        self._publish_dataset_write(BAOSTOCK_CN_TRADING_CALENDAR_DATASET.name, "*", cleaned, destination)
+        self._refresh_or_mark_registry_inventory(BAOSTOCK_CN_TRADING_CALENDAR_DATASET.name)
         return destination
 
     def read_baostock_cn_trading_calendar(self) -> pd.DataFrame:
@@ -542,7 +536,7 @@ class ParquetStore:
         AKSHARE_VALUATION_EASTMONEY_DATASET.validator(cleaned)
         destination = self.akshare_cn_stock_valuation_eastmoney_path(code)
         self.atomic_write(cleaned, AKSHARE_VALUATION_EASTMONEY_DATASET.schema, destination)
-        self._publish_dataset_write(AKSHARE_VALUATION_EASTMONEY_DATASET.name, code, cleaned, destination)
+        self._refresh_or_mark_registry_inventory(AKSHARE_VALUATION_EASTMONEY_DATASET.name)
         logger.info(
             "AkShare Parquet stored dataset={} code={} rows={} path={}",
             AKSHARE_VALUATION_EASTMONEY_DATASET.name,
@@ -567,7 +561,7 @@ class ParquetStore:
         AKSHARE_DELIST_SH_DATASET.validator(cleaned)
         destination = self.akshare_cn_stock_delist_sh_path(snapshot_date)
         self.atomic_write(cleaned, AKSHARE_DELIST_SH_DATASET.schema, destination)
-        self._publish_dataset_write(AKSHARE_DELIST_SH_DATASET.name, "*", cleaned, destination)
+        self._refresh_or_mark_registry_inventory(AKSHARE_DELIST_SH_DATASET.name)
         return destination
 
     def read_akshare_cn_stock_delist_sh(self, snapshot_date: str) -> pd.DataFrame:
@@ -590,7 +584,7 @@ class ParquetStore:
         AKSHARE_DELIST_SZ_DATASET.validator(cleaned)
         destination = self.akshare_cn_stock_delist_sz_path(snapshot_date)
         self.atomic_write(cleaned, AKSHARE_DELIST_SZ_DATASET.schema, destination)
-        self._publish_dataset_write(AKSHARE_DELIST_SZ_DATASET.name, "*", cleaned, destination)
+        self._refresh_or_mark_registry_inventory(AKSHARE_DELIST_SZ_DATASET.name)
         return destination
 
     def read_akshare_cn_stock_delist_sz(self, snapshot_date: str) -> pd.DataFrame:
@@ -613,7 +607,7 @@ class ParquetStore:
         AKSHARE_SPOT_QUOTE_EASTMONEY_DATASET.validator(cleaned)
         destination = self.akshare_cn_stock_spot_quote_eastmoney_path(trade_date)
         self.atomic_write(cleaned, AKSHARE_SPOT_QUOTE_EASTMONEY_DATASET.schema, destination)
-        self._publish_dataset_write(AKSHARE_SPOT_QUOTE_EASTMONEY_DATASET.name, "*", cleaned, destination)
+        self._refresh_or_mark_registry_inventory(AKSHARE_SPOT_QUOTE_EASTMONEY_DATASET.name)
         return destination
 
     def read_stock_spot_quote_eastmoney(self, trade_date: str) -> pd.DataFrame:
@@ -636,7 +630,7 @@ class ParquetStore:
         AKSHARE_SPOT_QUOTE_SINA_DATASET.validator(cleaned)
         destination = self.akshare_cn_stock_spot_quote_sina_path(trade_date)
         self.atomic_write(cleaned, AKSHARE_SPOT_QUOTE_SINA_DATASET.schema, destination)
-        self._publish_dataset_write(AKSHARE_SPOT_QUOTE_SINA_DATASET.name, "*", cleaned, destination)
+        self._refresh_or_mark_registry_inventory(AKSHARE_SPOT_QUOTE_SINA_DATASET.name)
         return destination
 
     def read_stock_spot_quote_sina(self, trade_date: str) -> pd.DataFrame:
@@ -663,7 +657,7 @@ class ParquetStore:
         definition.validator(cleaned)
         destination = self.akshare_daily_bar_path(adjustment, code)
         self.atomic_write(cleaned, definition.schema, destination)
-        self._publish_dataset_write(dataset, code, cleaned, destination)
+        self._refresh_or_mark_registry_inventory(dataset)
         return destination
 
     def upsert_akshare_daily_bars(self, adjustment: str, code: str, df: pd.DataFrame) -> Path:
@@ -900,26 +894,17 @@ class ParquetStore:
             self._pending_registry_status_rows.extend(valid_rows)
             self._pending_registry_dataset_ids.update(str(row["dataset"]) for row in valid_rows)
 
-    def _publish_dataset_write(
+    def _refresh_or_mark_registry_inventory(
         self,
         dataset: str,
-        code: str,
-        df: pd.DataFrame,
-        destination: Path,
         refresh_inventory: bool | None = None,
     ) -> None:
         should_refresh_inventory = bool(refresh_inventory) if refresh_inventory is not None else False
         if not should_refresh_inventory:
             self._mark_registry_dataset_write(dataset)
+            return
         try:
-            DataRegistry(root=self.root).publish_dataframe_write(
-                dataset,
-                code,
-                df,
-                destination,
-                refresh_inventory=should_refresh_inventory,
-            )
+            DataRegistry(root=self.root).refresh_inventory([dataset])
         except Exception as exc:
-            if should_refresh_inventory:
-                self._mark_registry_dataset_write(dataset)
-            logger.warning("Failed to publish registry event dataset={} path={}: {}", dataset, destination, exc)
+            self._mark_registry_dataset_write(dataset)
+            logger.warning("Failed to refresh registry inventory for dataset={}: {}", dataset, exc)

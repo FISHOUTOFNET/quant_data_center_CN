@@ -14,7 +14,7 @@ from src.storage.data_registry import DataRegistry
 from src.storage.parquet_store import ParquetStore
 
 
-def test_registry_http_gateway_lists_datasets_events_and_queries_parquet_when_duckdb_file_is_locked(
+def test_registry_http_gateway_lists_datasets_and_queries_parquet_when_duckdb_file_is_locked(
     tmp_path,
     daily_sample,
 ) -> None:
@@ -34,9 +34,6 @@ def test_registry_http_gateway_lists_datasets_events_and_queries_parquet_when_du
                 for item in datasets["datasets"]
             )
 
-            events = _get_json(f"{base_url}/v1/events?since_event_id=0")
-            assert events["events"][-1]["dataset_id"] == "baostock_cn_stock_daily_bar_qfq"
-
             result = _post_json(
                 f"{base_url}/v1/query",
                 {
@@ -52,6 +49,21 @@ def test_registry_http_gateway_lists_datasets_events_and_queries_parquet_when_du
             assert result["rows"][0]["close"] == 8.3
     finally:
         locked_conn.close()
+
+
+def test_registry_http_gateway_returns_404_for_removed_events_endpoint(tmp_path, daily_sample) -> None:
+    store = ParquetStore(root=tmp_path)
+    store.ensure_layout()
+    store.write_baostock_daily_bars("baostock_cn_stock_daily_bar_qfq", "sh.600000", daily_sample())
+
+    with _registry_server(DataRegistry(root=tmp_path), tmp_path) as base_url:
+        with pytest.raises(HTTPError) as events_exc:
+            _get_json(f"{base_url}/v1/events?since_event_id=0")
+        assert events_exc.value.code == 404
+
+        with pytest.raises(HTTPError) as stream_exc:
+            _get_json(f"{base_url}/v1/events/stream?since_event_id=0", timeout=1)
+        assert stream_exc.value.code == 404
 
 
 def test_registry_http_gateway_rejects_unknown_query_columns(tmp_path, daily_sample) -> None:
@@ -91,8 +103,8 @@ def _registry_server(registry: DataRegistry, root):
         thread.join(timeout=5)
 
 
-def _get_json(url: str):
-    with urlopen(url, timeout=10) as response:
+def _get_json(url: str, timeout: int = 10):
+    with urlopen(url, timeout=timeout) as response:
         return json.loads(response.read().decode("utf-8"))
 
 

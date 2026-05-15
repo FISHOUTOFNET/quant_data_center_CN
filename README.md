@@ -127,8 +127,8 @@ qdc serve-registry --host 127.0.0.1 --port 8765
 常用入口：
 
 - `GET /v1/datasets`：查看当前有哪些 Dataset、schema、视图名和最新状态。
-- `GET /v1/events?since_event_id=0`：轮询最新写入事件。
-- `GET /v1/events/stream`：用 SSE 秒级订阅写入事件。
+- `GET /v1/datasets/{dataset_id}/partitions`：查看某个 Dataset 的物理分区文件。
+- `GET /v1/status`：查看 Registry 当前状态。
 - `POST /v1/query`：用结构化 JSON 查询 Parquet 数据。
 
 详细协议见 `docs/DATA_REGISTRY.md`。

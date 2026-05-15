@@ -309,15 +309,11 @@ def test_update_daily_defers_registry_inventory_until_run_end(
     provider_factory, _state = _fake_provider_factory(baostock_cn_stock_basic_sample(), daily_sample())
     monkeypatch.setattr(update_daily_module, "create_provider", provider_factory)
 
-    publish_refresh_flags = []
     refresh_calls = []
 
     class FakeRegistry:
         def __init__(self, root=None) -> None:
             self.root = root
-
-        def publish_dataframe_write(self, dataset_id, code, df, output_path, refresh_inventory=True):
-            publish_refresh_flags.append(refresh_inventory)
 
         def refresh_inventory(self, dataset_ids=None, status_rows=None):
             refresh_calls.append(
@@ -346,8 +342,6 @@ def test_update_daily_defers_registry_inventory_until_run_end(
         ("baostock_cn_stock_daily_bar_qfq", "sh.600000"),
         ("baostock_cn_stock_daily_bar_qfq", "sz.000001"),
     ]
-    assert publish_refresh_flags
-    assert set(publish_refresh_flags) == {False}
     assert refresh_calls == [
         {
             "dataset_ids": [

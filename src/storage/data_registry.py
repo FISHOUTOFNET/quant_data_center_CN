@@ -1,10 +1,9 @@
-"""Public registry of datasets, physical inventory, and write events."""
+"""Public registry of datasets and physical inventory."""
 
 from __future__ import annotations
 
 import json
 from contextlib import suppress
-from dataclasses import asdict, dataclass
 from datetime import date, datetime
 from pathlib import Path
 from threading import RLock
@@ -27,7 +26,6 @@ DATE_COLUMN_PRIORITY = (
     "dividend_operate_date",
     "fetched_at",
 )
-EVENTS_FILE = "events.jsonl"
 CATALOG_FILE = "catalog.json"
 INVENTORY_FILE = "inventory.parquet"
 _LOCKS: dict[Path, RLock] = {}
@@ -58,19 +56,6 @@ REGISTRY_INVENTORY_SCHEMA = pa.schema(
 )
 
 
-@dataclass(frozen=True)
-class DatasetEvent:
-    event_id: int
-    dataset_id: str
-    code: str
-    min_date: str
-    max_date: str
-    row_count: int
-    output_path: str
-    occurred_at: str
-    operation: str = "write"
-
-
 class DataRegistry:
     """Maintain a file-backed read model for application-layer discovery."""
 
@@ -80,7 +65,6 @@ class DataRegistry:
         self.registry_dir = self.root / "data" / "registry"
         self.catalog_path = self.registry_dir / CATALOG_FILE
         self.inventory_path = self.registry_dir / INVENTORY_FILE
-        self.events_path = self.registry_dir / EVENTS_FILE
         self._lock = _lock_for(self.registry_dir)
 
     def ensure(self) -> None:
@@ -92,8 +76,6 @@ class DataRegistry:
                 self.write_catalog()
             if not self.inventory_path.exists():
                 self.refresh_inventory()
-            if not self.events_path.exists():
-                self.events_path.touch()
 
     def write_catalog(self) -> list[dict[str, Any]]:
         rows = [self._catalog_row(definition) for definition in DATASET_CATALOG.values()]
@@ -183,65 +165,6 @@ class DataRegistry:
                 rows.append(_partition_file_row(directory.name[len(prefix):], path))
         return rows
 
-    def append_event(
-        self,
-        dataset_id: str,
-        code: str,
-        row_count: int,
-        output_path: str | Path,
-        min_date: str = "",
-        max_date: str = "",
-        refresh_inventory: bool = False,
-    ) -> DatasetEvent:
-        if dataset_id not in DATASET_CATALOG:
-            raise ValueError(f"Unknown dataset: {dataset_id}")
-        with self._lock:
-            self.registry_dir.mkdir(parents=True, exist_ok=True)
-            if not self.catalog_path.exists():
-                self.write_catalog()
-            event = DatasetEvent(
-                event_id=self.latest_event_id() + 1,
-                dataset_id=dataset_id,
-                code=code,
-                min_date=min_date,
-                max_date=max_date,
-                row_count=int(row_count),
-                output_path=_relative_to_root(self.root, output_path),
-                occurred_at=datetime.now().isoformat(timespec="milliseconds"),
-            )
-            with self.events_path.open("a", encoding="utf-8") as f:
-                f.write(json.dumps(asdict(event), ensure_ascii=False, default=_json_default) + "\n")
-        if refresh_inventory:
-            self.refresh_inventory([dataset_id])
-        return event
-
-    def latest_event_id(self) -> int:
-        latest = 0
-        if not self.events_path.exists():
-            return latest
-        with self.events_path.open("r", encoding="utf-8") as f:
-            for line in f:
-                if not line.strip():
-                    continue
-                with suppress(Exception):
-                    latest = max(latest, int(json.loads(line).get("event_id", 0)))
-        return latest
-
-    def read_events(self, since_event_id: int = 0, limit: int | None = None) -> list[dict[str, Any]]:
-        if not self.events_path.exists():
-            return []
-        events: list[dict[str, Any]] = []
-        with self.events_path.open("r", encoding="utf-8") as f:
-            for line in f:
-                if not line.strip():
-                    continue
-                event = json.loads(line)
-                if int(event.get("event_id", 0)) > since_event_id:
-                    events.append(event)
-                    if limit is not None and len(events) >= limit:
-                        break
-        return events
-
     def status(self) -> dict[str, Any]:
         self.ensure()
         inventory = self.read_inventory()
@@ -249,28 +172,8 @@ class DataRegistry:
             "dataset_count": len(DATASET_CATALOG),
             "managed_dataset_count": sum(1 for item in DATASET_CATALOG.values() if item.lifecycle == "managed"),
             "inventory_updated_at": _max_timestamp_string(inventory.get("updated_at")) if not inventory.empty else "",
-            "latest_event_id": self.latest_event_id(),
             "registry_dir": str(self.registry_dir),
         }
-
-    def publish_dataframe_write(
-        self,
-        dataset_id: str,
-        code: str,
-        df: pd.DataFrame,
-        output_path: str | Path,
-        refresh_inventory: bool = False,
-    ) -> DatasetEvent:
-        min_date, max_date = _frame_date_bounds(df, DATASET_CATALOG[dataset_id].schema)
-        return self.append_event(
-            dataset_id=dataset_id,
-            code=code,
-            row_count=len(df),
-            output_path=output_path,
-            min_date=min_date,
-            max_date=max_date,
-            refresh_inventory=refresh_inventory,
-        )
 
     def _catalog_row(self, definition: DatasetDefinition) -> dict[str, Any]:
         return {
@@ -434,18 +337,6 @@ def _partition_file_row(partition_value: str, path: Path) -> dict[str, Any]:
     }
 
 
-def _frame_date_bounds(df: pd.DataFrame, schema: pa.Schema) -> tuple[str, str]:
-    if df.empty:
-        return "", ""
-    date_column = _date_column(schema)
-    if date_column is None or date_column not in df.columns:
-        return "", ""
-    values = pd.to_datetime(df[date_column], errors="coerce").dropna()
-    if values.empty:
-        return "", ""
-    return values.min().date().isoformat(), values.max().date().isoformat()
-
-
 def _clean_inventory(df: pd.DataFrame) -> pd.DataFrame:
     cleaned = pd.DataFrame(index=df.index)
     for field in REGISTRY_INVENTORY_SCHEMA:
@@ -493,13 +384,6 @@ def _value_to_date_string(value: Any) -> str:
     if pd.isna(parsed):
         return ""
     return parsed.date().isoformat()
-
-
-def _relative_to_root(root: Path, path: str | Path) -> str:
-    candidate = Path(path)
-    with suppress(ValueError):
-        return str(candidate.resolve().relative_to(root))
-    return str(candidate)
 
 
 def _lock_for(path: Path) -> RLock:
