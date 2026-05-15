@@ -54,6 +54,53 @@ def _configure_command_logging(root: Path | None, dry_run: bool = False) -> None
     configure_logging(root, file_logging=not dry_run)
 
 
+def _print_pipeline_run_summary(command: str, records: list[dict[str, object]]) -> None:
+    total = len(records)
+    success = 0
+    failed = 0
+    skipped = 0
+    other_counts: dict[str, int] = {}
+    failed_codes: list[str] = []
+    seen_failed_codes: set[str] = set()
+
+    for item in records:
+        status = str(item.get("status", ""))
+        if status == "success":
+            success += 1
+        elif status == "failed":
+            failed += 1
+            code = item.get("code")
+            if code is not None:
+                code_text = str(code)
+                if code_text not in seen_failed_codes:
+                    failed_codes.append(code_text)
+                    seen_failed_codes.add(code_text)
+        elif status.startswith("skipped"):
+            skipped += 1
+        else:
+            other_counts[status] = other_counts.get(status, 0) + 1
+
+    other_text = ",".join(f"{status}:{count}" for status, count in other_counts.items())
+    failed_codes_text = ", ".join(failed_codes)
+    summary = f"summary: total={total} success={success} failed={failed} skipped={skipped}"
+    if other_text:
+        summary = f"{summary} other={other_text}"
+
+    click.echo(summary)
+    if failed_codes:
+        click.echo(f"failed_codes: {failed_codes_text}")
+    logger.info(
+        "Pipeline run summary command={} total={} success={} failed={} skipped={} other={} failed_codes={}",
+        command,
+        total,
+        success,
+        failed,
+        skipped,
+        other_text,
+        failed_codes_text,
+    )
+
+
 @click.group()
 def cli() -> None:
     """Quant data center CLI."""
@@ -111,6 +158,7 @@ def update_daily(
     )
     for item in records:
         click.echo(f"{item['dataset']} {item['code']} status={item['status']} rows={item['row_count']}")
+    _print_pipeline_run_summary("update-baostock-daily", records)
 
 
 @cli.command("update-akshare-valuation")
@@ -159,6 +207,7 @@ def update_akshare(
     )
     for item in records:
         click.echo(f"{item['dataset']} {item['code']} status={item['status']} rows={item['row_count']}")
+    _print_pipeline_run_summary("update-akshare-valuation", records)
 
 
 @cli.command("update-akshare-delist")
@@ -199,6 +248,7 @@ def update_akshare_delist(
     )
     for item in records:
         click.echo(f"{item['dataset']} {item['code']} status={item['status']} rows={item['row_count']}")
+    _print_pipeline_run_summary("update-akshare-delist", records)
 
 
 @cli.command("update-akshare-spot-quote")
@@ -229,6 +279,7 @@ def update_akshare_spot(
     )
     for item in records:
         click.echo(f"{item['dataset']} {item['code']} status={item['status']} rows={item['row_count']}")
+    _print_pipeline_run_summary("update-akshare-spot-quote", records)
 
 
 @cli.command("update-akshare-daily-bar")
@@ -280,6 +331,7 @@ def update_akshare_daily_bar(
     )
     for item in records:
         click.echo(f"{item['dataset']} {item['code']} status={item['status']} rows={item['row_count']}")
+    _print_pipeline_run_summary("update-akshare-daily-bar", records)
 
 
 @cli.command("update-baostock-valuation-percentile")
@@ -325,6 +377,7 @@ def update_baostock_valuation_percentile(
     )
     for item in records:
         click.echo(f"{item['dataset']} {item['code']} status={item['status']} rows={item['row_count']}")
+    _print_pipeline_run_summary("update-baostock-valuation-percentile", records)
 
 
 @cli.command("repair-baostock-daily")

@@ -5,6 +5,93 @@ from click.testing import CliRunner
 import src.cli as cli_module
 
 
+class FakeCliLogger:
+    def __init__(self) -> None:
+        self.entries: list[tuple[str, str, tuple[object, ...]]] = []
+
+    def remove(self) -> None:
+        pass
+
+    def add(self, *args, **kwargs) -> None:
+        pass
+
+    def info(self, message: str, *args: object) -> None:
+        self.entries.append(("info", message, args))
+
+
+def test_update_daily_cli_prints_pipeline_summary_and_failed_codes(monkeypatch) -> None:
+    fake_logger = FakeCliLogger()
+
+    def fake_update_daily(**kwargs):
+        return [
+            {"dataset": "daily", "code": "sh.600000", "status": "success", "row_count": 1},
+            {"dataset": "daily", "code": "sz.000001", "status": "failed", "row_count": 0},
+            {"dataset": "daily", "code": "sh.600001", "status": "skipped_checkpoint", "row_count": 0},
+            {"dataset": "daily", "code": "sz.000002", "status": "dry_run", "row_count": 0},
+            {"dataset": "daily", "code": "sh.600002", "status": "dry_run_blocked", "row_count": 0},
+        ]
+
+    monkeypatch.setattr(cli_module, "logger", fake_logger)
+    monkeypatch.setattr(cli_module, "run_update_daily", fake_update_daily)
+
+    result = CliRunner().invoke(cli_module.cli, ["update-baostock-daily", "--no-build-duckdb-views"])
+
+    assert result.exit_code == 0
+    assert "summary: total=5 success=1 failed=1 skipped=1 other=dry_run:1,dry_run_blocked:1" in result.output
+    assert "failed_codes: sz.000001" in result.output
+    assert (
+        "info",
+        "Pipeline run summary command={} total={} success={} failed={} skipped={} other={} failed_codes={}",
+        ("update-baostock-daily", 5, 1, 1, 1, "dry_run:1,dry_run_blocked:1", "sz.000001"),
+    ) in fake_logger.entries
+
+
+def test_update_daily_cli_deduplicates_failed_codes(monkeypatch) -> None:
+    def fake_update_daily(**kwargs):
+        return [
+            {"dataset": "daily", "code": "sh.600000", "status": "failed", "row_count": 0},
+            {"dataset": "daily", "code": "sh.600000", "status": "failed", "row_count": 0},
+            {"dataset": "daily", "code": "sz.000001", "status": "failed", "row_count": 0},
+        ]
+
+    monkeypatch.setattr(cli_module, "run_update_daily", fake_update_daily)
+
+    result = CliRunner().invoke(cli_module.cli, ["update-baostock-daily", "--no-build-duckdb-views"])
+
+    assert result.exit_code == 0
+    assert "summary: total=3 success=0 failed=3 skipped=0" in result.output
+    assert "failed_codes: sh.600000, sz.000001" in result.output
+
+
+def test_update_daily_cli_reports_dry_run_statuses_as_other(monkeypatch) -> None:
+    def fake_update_daily(**kwargs):
+        return [
+            {"dataset": "daily", "code": "sh.600000", "status": "dry_run", "row_count": 0},
+            {"dataset": "daily", "code": "sz.000001", "status": "dry_run_blocked", "row_count": 0},
+        ]
+
+    monkeypatch.setattr(cli_module, "run_update_daily", fake_update_daily)
+
+    result = CliRunner().invoke(cli_module.cli, ["update-baostock-daily", "--dry-run", "--no-build-duckdb-views"])
+
+    assert result.exit_code == 0
+    assert "summary: total=2 success=0 failed=0 skipped=0 other=dry_run:1,dry_run_blocked:1" in result.output
+    assert "failed_codes:" not in result.output
+
+
+def test_update_daily_cli_prints_empty_pipeline_summary(monkeypatch) -> None:
+    def fake_update_daily(**kwargs):
+        return []
+
+    monkeypatch.setattr(cli_module, "run_update_daily", fake_update_daily)
+
+    result = CliRunner().invoke(cli_module.cli, ["update-baostock-daily", "--no-build-duckdb-views"])
+
+    assert result.exit_code == 0
+    assert "summary: total=0 success=0 failed=0 skipped=0" in result.output
+    assert "failed_codes:" not in result.output
+
+
 def test_update_daily_full_cli_passes_explicit_provider(monkeypatch) -> None:
     captured: dict[str, object] = {}
 
