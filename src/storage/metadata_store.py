@@ -5,6 +5,7 @@ from __future__ import annotations
 from contextlib import contextmanager, suppress
 from pathlib import Path
 from threading import RLock
+import time
 from typing import Iterator
 
 import duckdb
@@ -18,9 +19,13 @@ from src.storage.schema import (
     field_names,
 )
 from src.utils import paths
+from src.utils.logging import logger
 
 
+DATASET_STATUS_KEY_COLUMNS = ["dataset", "code"]
 CHECKPOINT_KEY_COLUMNS = ["pipeline", "dataset", "code", "start_date", "end_date"]
+DUCKDB_CONNECT_MAX_RETRIES = 5
+DUCKDB_CONNECT_RETRY_DELAY = 0.5
 _DB_LOCKS: dict[Path, RLock] = {}
 _DB_LOCKS_GUARD = RLock()
 
@@ -47,7 +52,6 @@ class DuckDBMetadataStore:
         self.duckdb_file = (duckdb_file or self.root / "data" / "duckdb" / "quant.duckdb").resolve()
         self._lock = _lock_for(self.duckdb_file)
         self._initialized = False
-        self._conn: duckdb.DuckDBPyConnection | None = None
 
     def append_pipeline_runs(self, df: pd.DataFrame) -> None:
         cleaned = _clean_dataframe_for_schema(df, PIPELINE_RUNS_SCHEMA)
@@ -61,7 +65,10 @@ class DuckDBMetadataStore:
             )
 
     def upsert_dataset_update_status(self, df: pd.DataFrame) -> None:
-        incoming = _clean_dataframe_for_schema(df, DATASET_UPDATE_STATUS_SCHEMA)
+        incoming = _dedupe_latest(
+            _clean_dataframe_for_schema(df, DATASET_UPDATE_STATUS_SCHEMA),
+            DATASET_STATUS_KEY_COLUMNS,
+        )
         if incoming.empty:
             return
         with self._connection() as conn:
@@ -81,7 +88,10 @@ class DuckDBMetadataStore:
             )
 
     def upsert_pipeline_checkpoints(self, df: pd.DataFrame) -> None:
-        incoming = _clean_dataframe_for_schema(df, PIPELINE_CHECKPOINTS_SCHEMA)
+        incoming = _dedupe_latest(
+            _clean_dataframe_for_schema(df, PIPELINE_CHECKPOINTS_SCHEMA),
+            CHECKPOINT_KEY_COLUMNS,
+        )
         if incoming.empty:
             return
         with self._connection() as conn:
@@ -110,9 +120,19 @@ class DuckDBMetadataStore:
         checkpoint_rows: list[dict[str, object]],
     ) -> None:
         runs = _clean_dataframe_for_schema(pd.DataFrame(run_rows), PIPELINE_RUNS_SCHEMA) if run_rows else None
-        statuses = _clean_dataframe_for_schema(pd.DataFrame(status_rows), DATASET_UPDATE_STATUS_SCHEMA) if status_rows else None
+        statuses = (
+            _dedupe_latest(
+                _clean_dataframe_for_schema(pd.DataFrame(status_rows), DATASET_UPDATE_STATUS_SCHEMA),
+                DATASET_STATUS_KEY_COLUMNS,
+            )
+            if status_rows
+            else None
+        )
         checkpoints = (
-            _clean_dataframe_for_schema(pd.DataFrame(checkpoint_rows), PIPELINE_CHECKPOINTS_SCHEMA)
+            _dedupe_latest(
+                _clean_dataframe_for_schema(pd.DataFrame(checkpoint_rows), PIPELINE_CHECKPOINTS_SCHEMA),
+                CHECKPOINT_KEY_COLUMNS,
+            )
             if checkpoint_rows
             else None
         )
@@ -202,9 +222,6 @@ class DuckDBMetadataStore:
 
     def close(self) -> None:
         with self._lock:
-            if self._conn is not None:
-                self._conn.close()
-                self._conn = None
             self._initialized = False
 
     def __del__(self) -> None:
@@ -215,15 +232,37 @@ class DuckDBMetadataStore:
     def _connection(self) -> Iterator[duckdb.DuckDBPyConnection]:
         with self._lock:
             self.duckdb_file.parent.mkdir(parents=True, exist_ok=True)
-            if self._conn is None:
-                self._conn = duckdb.connect(str(self.duckdb_file))
-            self._ensure_initialized(self._conn)
-            yield self._conn
+            conn = self._connect_with_retry()
+            try:
+                self._ensure_initialized(conn)
+                yield conn
+            finally:
+                with suppress(Exception):
+                    conn.close()
 
     def _ensure_initialized(self, conn: duckdb.DuckDBPyConnection) -> None:
-        if not self._initialized:
-            self._create_tables(conn)
-            self._initialized = True
+        self._create_tables(conn)
+        self._initialized = True
+
+    def _connect_with_retry(self) -> duckdb.DuckDBPyConnection:
+        last_error: Exception | None = None
+        for attempt in range(DUCKDB_CONNECT_MAX_RETRIES):
+            try:
+                return duckdb.connect(str(self.duckdb_file))
+            except (duckdb.IOException, OSError) as exc:
+                last_error = exc
+                if attempt < DUCKDB_CONNECT_MAX_RETRIES - 1:
+                    delay = DUCKDB_CONNECT_RETRY_DELAY * (2**attempt)
+                    logger.warning(
+                        "Failed to connect to metadata DuckDB {}, retrying in {:.3f}s (attempt {}/{}): {}",
+                        self.duckdb_file,
+                        delay,
+                        attempt + 1,
+                        DUCKDB_CONNECT_MAX_RETRIES,
+                        str(exc),
+                    )
+                    time.sleep(delay)
+        raise last_error
 
     def _create_tables(self, conn: duckdb.DuckDBPyConnection) -> None:
         conn.execute(
@@ -320,6 +359,12 @@ def _clean_dataframe_for_schema(df: pd.DataFrame, schema: pa.Schema) -> pd.DataF
             series = pd.Series(pd.NA, index=df.index, name=field.name)
         cleaned[field.name] = _coerce_series(series, field.type)
     return cleaned.reset_index(drop=True)
+
+
+def _dedupe_latest(df: pd.DataFrame, key_columns: list[str]) -> pd.DataFrame:
+    if df.empty:
+        return df
+    return df.drop_duplicates(subset=key_columns, keep="last").reset_index(drop=True)
 
 
 def _coerce_series(series: pd.Series, arrow_type: pa.DataType) -> pd.Series:

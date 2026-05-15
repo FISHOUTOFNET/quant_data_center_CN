@@ -10,6 +10,7 @@ import pytest
 from src.analytics.valuation_percentile import compute_valuation_percentiles
 from src.pipeline.common import PipelineCheckpointLookup, should_skip_checkpoint
 from src.pipeline.services import PipelineMetadataBatch
+import src.storage.metadata_store as metadata_store_module
 import src.storage.parquet_store as parquet_store_module
 from src.storage.parquet_store import ParquetStore
 
@@ -786,6 +787,166 @@ def test_persist_update_metadata_batches_match_individual_writes(tmp_path) -> No
         left = reader(individual)
         right = reader(batched)
         pd.testing.assert_frame_equal(left, right)
+
+
+def test_persist_update_metadata_keeps_latest_status_and_checkpoint_with_duplicate_keys(tmp_path) -> None:
+    now = datetime(2024, 1, 31, 9, 1)
+    later = datetime(2024, 1, 31, 9, 2)
+    run_rows = [
+        {
+            "task_id": "task-1",
+            "dataset": "baostock_cn_stock_daily_bar_qfq",
+            "code": "sh.600000",
+            "status": "failed",
+            "start_date": "2024-01-01",
+            "end_date": "2024-01-31",
+            "start_time": now,
+            "end_time": now,
+            "row_count": 1,
+            "error_stack": "first",
+        },
+        {
+            "task_id": "task-2",
+            "dataset": "baostock_cn_stock_daily_bar_qfq",
+            "code": "sh.600000",
+            "status": "success",
+            "start_date": "2024-01-01",
+            "end_date": "2024-01-31",
+            "start_time": later,
+            "end_time": later,
+            "row_count": 2,
+            "error_stack": "",
+        },
+    ]
+    status_rows = [
+        {
+            "dataset": "baostock_cn_stock_daily_bar_qfq",
+            "code": "sh.600000",
+            "last_success_date": "2024-01-30",
+            "row_count": 1,
+            "status": "failed",
+            "updated_at": now,
+            "error_stack": "first",
+        },
+        {
+            "dataset": "baostock_cn_stock_daily_bar_qfq",
+            "code": "sh.600000",
+            "last_success_date": "2024-01-31",
+            "row_count": 2,
+            "status": "success",
+            "updated_at": later,
+            "error_stack": "",
+        },
+    ]
+    checkpoint_rows = [
+        {
+            "pipeline": "update_daily",
+            "dataset": "baostock_cn_stock_daily_bar_qfq",
+            "code": "sh.600000",
+            "start_date": "2024-01-01",
+            "end_date": "2024-01-31",
+            "status": "failed",
+            "row_count": 1,
+            "output_path": "old.parquet",
+            "updated_at": now,
+            "error_stack": "first",
+        },
+        {
+            "pipeline": "update_daily",
+            "dataset": "baostock_cn_stock_daily_bar_qfq",
+            "code": "sh.600000",
+            "start_date": "2024-01-01",
+            "end_date": "2024-01-31",
+            "status": "success",
+            "row_count": 2,
+            "output_path": "new.parquet",
+            "updated_at": later,
+            "error_stack": "",
+        },
+    ]
+
+    store = ParquetStore(root=tmp_path)
+    store.persist_update_metadata(run_rows, status_rows, checkpoint_rows)
+
+    runs = store.read_pipeline_runs()
+    statuses = store.read_dataset_update_status()
+    checkpoints = store.read_pipeline_checkpoints()
+    assert len(runs) == 2
+    assert len(statuses) == 1
+    assert statuses.loc[0, "row_count"] == 2
+    assert str(statuses.loc[0, "status"]) == "success"
+    assert pd.to_datetime(statuses.loc[0, "last_success_date"]).date().isoformat() == "2024-01-31"
+    assert len(checkpoints) == 1
+    assert checkpoints.loc[0, "row_count"] == 2
+    assert str(checkpoints.loc[0, "output_path"]) == "new.parquet"
+
+
+def test_duckdb_metadata_store_does_not_reuse_connection_across_threads(tmp_path, monkeypatch) -> None:
+    created_connections = []
+
+    class ThreadBoundConnection:
+        def __init__(self) -> None:
+            import threading
+
+            self.thread_id = threading.get_ident()
+            self.closed = False
+            created_connections.append(self)
+
+        def _assert_current_thread(self) -> None:
+            import threading
+
+            if threading.get_ident() != self.thread_id:
+                raise RuntimeError("connection used from a different thread")
+
+        def execute(self, sql: str):
+            del sql
+            self._assert_current_thread()
+            return self
+
+        def register(self, name: str, df: pd.DataFrame) -> None:
+            del name, df
+            self._assert_current_thread()
+
+        def unregister(self, name: str) -> None:
+            del name
+            self._assert_current_thread()
+
+        def close(self) -> None:
+            self._assert_current_thread()
+            self.closed = True
+
+    monkeypatch.setattr(metadata_store_module.duckdb, "connect", lambda path: ThreadBoundConnection())
+
+    store = metadata_store_module.DuckDBMetadataStore(root=tmp_path)
+    now = datetime(2024, 1, 31, 9, 1)
+
+    def persist(index: int) -> None:
+        store.persist_update_metadata(
+            [
+                {
+                    "task_id": f"task-{index}",
+                    "dataset": "baostock_cn_stock_daily_bar_qfq",
+                    "code": f"sh.{600000 + index}",
+                    "status": "success",
+                    "start_date": "2024-01-01",
+                    "end_date": "2024-01-31",
+                    "start_time": now,
+                    "end_time": now,
+                    "row_count": 2,
+                    "error_stack": "",
+                }
+            ],
+            [],
+            [],
+        )
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        executor.submit(persist, 0).result()
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        executor.submit(persist, 1).result()
+
+    assert len(created_connections) == 2
+    assert all(conn.closed for conn in created_connections)
 
 
 def test_persist_update_metadata_rolls_back_run_and_status_when_checkpoint_write_fails(tmp_path) -> None:
