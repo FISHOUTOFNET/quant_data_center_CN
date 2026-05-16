@@ -157,6 +157,7 @@ def update_akshare_spot(
             if client_factory is not None
             else AkShareClient(config=config)
         )
+        spot_daily_bar_write_workers = _spot_daily_bar_write_workers(config)
         metadata: list[tuple[dict[str, object], dict[str, object], dict[str, object]]] = []
 
         started_at = datetime.now()
@@ -182,7 +183,15 @@ def update_akshare_spot(
             update_daily_bar_from_spot = bool(config.get("datasets.akshare_cn_stock_spot_quote.update_daily_bar_from_spot", True))
             logger.info("AkShare spot fallback started trade_date={} reason={}", trade_date, str(exc))
             fallback_metadata_start = len(metadata)
-            _run_sina_fallback(store, ak_client, trade_date, str(exc), metadata, update_daily_bar_from_spot)
+            _run_sina_fallback(
+                store,
+                ak_client,
+                trade_date,
+                str(exc),
+                metadata,
+                update_daily_bar_from_spot,
+                write_workers=spot_daily_bar_write_workers,
+            )
             if len(metadata) > fallback_metadata_start:
                 log_spot_progress(2, 2, metadata[fallback_metadata_start][0])
         else:
@@ -191,7 +200,11 @@ def update_akshare_spot(
                 daily_bar_rows = _drop_delisted_daily_bar_rows(store, spot_em_to_daily_bar_unadjusted(response.data))
                 update_daily_bar_from_spot = bool(config.get("datasets.akshare_cn_stock_spot_quote.update_daily_bar_from_spot", True))
                 daily_bar_output_path = (
-                    _write_spot_daily_bar_rows(store, daily_bar_rows)
+                    _write_spot_daily_bar_rows(
+                        store,
+                        daily_bar_rows,
+                        write_workers=spot_daily_bar_write_workers,
+                    )
                     if update_daily_bar_from_spot
                     else store.parquet_dir / akshare_daily_bar_dataset_id("unadjusted")
                 )
@@ -311,20 +324,40 @@ def spot_sina_to_daily_bar_unadjusted(df: pd.DataFrame) -> pd.DataFrame:
     return daily_bar[field_names(schema)].reset_index(drop=True)
 
 
-def _write_spot_daily_bar_rows(store: ParquetStore, daily_bar_rows: pd.DataFrame) -> Path:
+def _spot_daily_bar_write_workers(config: ConfigManager) -> int:
+    raw_value = config.get("pipeline.spot_daily_bar_write_workers", 1)
+    try:
+        return max(1, int(raw_value))
+    except (TypeError, ValueError):
+        logger.warning("Invalid pipeline.spot_daily_bar_write_workers={}, using 1", raw_value)
+        return 1
+
+
+def _write_spot_daily_bar_rows(
+    store: ParquetStore,
+    daily_bar_rows: pd.DataFrame,
+    *,
+    write_workers: int = 1,
+) -> Path:
     dataset = akshare_daily_bar_dataset_id("unadjusted")
     dataset_dir = store.parquet_dir / dataset
     if daily_bar_rows.empty:
         dataset_dir.mkdir(parents=True, exist_ok=True)
         return dataset_dir
     
-    stats = store.append_akshare_daily_bar_batch("unadjusted", daily_bar_rows, skip_existing=True)
+    stats = store.append_akshare_daily_bar_batch(
+        "unadjusted",
+        daily_bar_rows,
+        skip_existing=True,
+        write_workers=write_workers,
+    )
     
-    if stats['skipped'] > 0:
+    if stats["skipped"] > 0 or stats.get("fallback", 0) > 0:
         logger.info(
-            "Spot daily-bar batch append completed updated={} skipped={}",
-            stats['updated'],
-            stats['skipped'],
+            "Spot daily-bar batch append completed updated={} skipped={} fallback={}",
+            stats["updated"],
+            stats["skipped"],
+            stats.get("fallback", 0),
         )
     
     return dataset_dir
@@ -337,6 +370,8 @@ def _run_sina_fallback(
     fallback_reason: str,
     metadata: list[tuple[dict[str, object], dict[str, object], dict[str, object]]],
     update_daily_bar_from_spot: bool,
+    *,
+    write_workers: int = 1,
 ) -> None:
     dataset = AKSHARE_SPOT_QUOTE_SINA_DATASET.name
     output_path = store.akshare_cn_stock_spot_quote_sina_path(trade_date)
@@ -349,7 +384,7 @@ def _run_sina_fallback(
         output_path = store.write_stock_spot_quote_sina(trade_date, response.data)
         daily_bar_rows = _drop_delisted_daily_bar_rows(store, spot_sina_to_daily_bar_unadjusted(response.data))
         daily_bar_output_path = (
-            _write_spot_daily_bar_rows(store, daily_bar_rows)
+            _write_spot_daily_bar_rows(store, daily_bar_rows, write_workers=write_workers)
             if update_daily_bar_from_spot
             else store.parquet_dir / akshare_daily_bar_dataset_id("unadjusted")
         )

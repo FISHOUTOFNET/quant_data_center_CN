@@ -339,6 +339,45 @@ def test_update_akshare_spot_filters_sz_delisted_codes_from_sina_fallback_daily_
     assert hist_delisted.empty
 
 
+def test_write_spot_daily_bar_rows_passes_configured_workers(tmp_path, monkeypatch) -> None:
+    store = ParquetStore(root=tmp_path)
+    store.ensure_layout()
+    captured: dict[str, object] = {}
+
+    def fake_append(adjustment: str, rows: pd.DataFrame, skip_existing: bool = True, write_workers: int = 1):
+        captured["adjustment"] = adjustment
+        captured["row_count"] = len(rows)
+        captured["skip_existing"] = skip_existing
+        captured["write_workers"] = write_workers
+        return {"updated": 1, "skipped": 0, "fallback": 0}
+
+    monkeypatch.setattr(store, "append_akshare_daily_bar_batch", fake_append)
+
+    output_path = update_akshare_spot_module._write_spot_daily_bar_rows(
+        store,
+        pd.DataFrame(
+            [
+                _daily_bar_row(
+                    "600000",
+                    "unadjusted",
+                    close=8.3,
+                    source_endpoint="stock_zh_a_spot_em",
+                    quality_status="spot_quote_close",
+                )
+            ]
+        ),
+        write_workers=3,
+    )
+
+    assert output_path == store.parquet_dir / "akshare_cn_stock_daily_bar_unadjusted"
+    assert captured == {
+        "adjustment": "unadjusted",
+        "row_count": 1,
+        "skip_existing": True,
+        "write_workers": 3,
+    }
+
+
 def test_update_akshare_spot_rejects_realtime_window_before_fetch(tmp_path) -> None:
     _write_settings(tmp_path)
     store = ParquetStore(root=tmp_path)

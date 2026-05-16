@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
+import threading
+import time
 
 import duckdb
 import pandas as pd
@@ -463,6 +465,206 @@ def test_akshare_a_stock_writes_and_hist_upsert_overrides_spot(tmp_path) -> None
     assert hist.loc[0, "close"] == 8.31
     assert hist.loc[0, "source_endpoint"] == "stock_zh_a_hist"
     assert hist.loc[0, "quality_status"] == "daily_bar_confirmed"
+
+
+def test_append_akshare_daily_bar_batch_appends_new_date_without_full_upsert(tmp_path, monkeypatch) -> None:
+    store = ParquetStore(root=tmp_path)
+    store.ensure_layout()
+    store.write_akshare_daily_bars(
+        "unadjusted",
+        "600000",
+        pd.DataFrame([_akshare_hist_row("stock_zh_a_hist", "daily_bar_confirmed", 8.2, daily_bar_date="2024-01-02")]),
+    )
+
+    def fail_full_upsert(*args, **kwargs):
+        raise AssertionError("append-only path should not call full upsert")
+
+    monkeypatch.setattr(store, "upsert_akshare_daily_bars", fail_full_upsert)
+
+    stats = store.append_akshare_daily_bar_batch(
+        "unadjusted",
+        pd.DataFrame([_akshare_hist_row("stock_zh_a_spot_em", "spot_quote_close", 8.3, daily_bar_date="2024-01-03")]),
+    )
+
+    hist = store.read_akshare_daily_bars("unadjusted", "600000")
+    assert stats == {"updated": 1, "skipped": 0, "fallback": 0}
+    assert pd.to_datetime(hist["date"]).dt.strftime("%Y-%m-%d").tolist() == ["2024-01-02", "2024-01-03"]
+    assert hist["close"].tolist() == [8.2, 8.3]
+
+
+def test_append_akshare_daily_bar_batch_skips_existing_single_date_without_rewrite(tmp_path, monkeypatch) -> None:
+    store = ParquetStore(root=tmp_path)
+    store.ensure_layout()
+    store.write_akshare_daily_bars(
+        "unadjusted",
+        "600000",
+        pd.DataFrame([_akshare_hist_row("stock_zh_a_spot_em", "spot_quote_close", 8.3, daily_bar_date="2024-01-03")]),
+    )
+    path = store.akshare_daily_bar_path("unadjusted", "600000")
+    before_mtime = path.stat().st_mtime_ns
+
+    def fail_full_upsert(*args, **kwargs):
+        raise AssertionError("existing spot date should skip without full upsert")
+
+    monkeypatch.setattr(store, "upsert_akshare_daily_bars", fail_full_upsert)
+
+    stats = store.append_akshare_daily_bar_batch(
+        "unadjusted",
+        pd.DataFrame([_akshare_hist_row("stock_zh_a_spot_em", "spot_quote_close", 8.3, daily_bar_date="2024-01-03")]),
+    )
+
+    assert stats == {"updated": 0, "skipped": 1, "fallback": 0}
+    assert path.stat().st_mtime_ns == before_mtime
+
+
+def test_append_akshare_daily_bar_batch_falls_back_for_overlapping_date(tmp_path) -> None:
+    store = ParquetStore(root=tmp_path)
+    store.ensure_layout()
+    store.write_akshare_daily_bars(
+        "unadjusted",
+        "600000",
+        pd.DataFrame([_akshare_hist_row("stock_zh_a_spot_em", "spot_quote_close", 8.3, daily_bar_date="2024-01-03")]),
+    )
+
+    stats = store.append_akshare_daily_bar_batch(
+        "unadjusted",
+        pd.DataFrame([_akshare_hist_row("stock_zh_a_hist", "daily_bar_confirmed", 8.31, daily_bar_date="2024-01-03")]),
+        skip_existing=False,
+    )
+
+    hist = store.read_akshare_daily_bars("unadjusted", "600000")
+    assert stats == {"updated": 1, "skipped": 0, "fallback": 1}
+    assert len(hist) == 1
+    assert hist.loc[0, "close"] == 8.31
+    assert hist.loc[0, "quality_status"] == "daily_bar_confirmed"
+
+
+def test_append_akshare_daily_bar_batch_falls_back_for_date_before_existing_max(tmp_path) -> None:
+    store = ParquetStore(root=tmp_path)
+    store.ensure_layout()
+    store.write_akshare_daily_bars(
+        "unadjusted",
+        "600000",
+        pd.DataFrame(
+            [
+                _akshare_hist_row("stock_zh_a_hist", "daily_bar_confirmed", 8.1, daily_bar_date="2024-01-01"),
+                _akshare_hist_row("stock_zh_a_hist", "daily_bar_confirmed", 8.3, daily_bar_date="2024-01-03"),
+            ]
+        ),
+    )
+
+    stats = store.append_akshare_daily_bar_batch(
+        "unadjusted",
+        pd.DataFrame([_akshare_hist_row("stock_zh_a_hist", "daily_bar_confirmed", 8.2, daily_bar_date="2024-01-02")]),
+        skip_existing=True,
+    )
+
+    hist = store.read_akshare_daily_bars("unadjusted", "600000")
+    assert stats == {"updated": 1, "skipped": 0, "fallback": 1}
+    assert pd.to_datetime(hist["date"]).dt.strftime("%Y-%m-%d").tolist() == [
+        "2024-01-01",
+        "2024-01-02",
+        "2024-01-03",
+    ]
+
+
+def test_append_akshare_daily_bar_batch_rejects_non_six_digit_code(tmp_path) -> None:
+    store = ParquetStore(root=tmp_path)
+    store.ensure_layout()
+    row = _akshare_hist_row("stock_zh_a_spot_em", "spot_quote_close", 8.3)
+    row["code"] = "sh.600000"
+
+    with pytest.raises(ValueError, match="AkShare partition code must be 6 digits"):
+        store.append_akshare_daily_bar_batch("unadjusted", pd.DataFrame([row]))
+
+
+def test_atomic_write_allows_parallel_writes_to_different_paths(tmp_path, monkeypatch, daily_sample) -> None:
+    store = ParquetStore(root=tmp_path)
+    store.ensure_layout()
+    original_write_table = parquet_store_module.pq.write_table
+    active = 0
+    max_active = 0
+    active_lock = threading.Lock()
+
+    def slow_write_table(*args, **kwargs):
+        nonlocal active, max_active
+        with active_lock:
+            active += 1
+            max_active = max(max_active, active)
+        try:
+            time.sleep(0.05)
+            return original_write_table(*args, **kwargs)
+        finally:
+            with active_lock:
+                active -= 1
+
+    monkeypatch.setattr(parquet_store_module.pq, "write_table", slow_write_table)
+    first = daily_sample()
+    second = daily_sample().assign(code="sh.600001")
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        futures = [
+            executor.submit(store.write_baostock_daily_bars, "baostock_cn_stock_daily_bar_unadjusted", "sh.600000", first),
+            executor.submit(store.write_baostock_daily_bars, "baostock_cn_stock_daily_bar_unadjusted", "sh.600001", second),
+        ]
+        for future in futures:
+            future.result()
+
+    assert max_active == 2
+
+
+def test_concurrent_akshare_upserts_to_same_code_keep_all_dates(tmp_path, monkeypatch) -> None:
+    store = ParquetStore(root=tmp_path)
+    store.ensure_layout()
+    store.write_akshare_daily_bars(
+        "unadjusted",
+        "600000",
+        pd.DataFrame([_akshare_hist_row("stock_zh_a_hist", "daily_bar_confirmed", 8.1, daily_bar_date="2024-01-01")]),
+    )
+    path = store.akshare_daily_bar_path("unadjusted", "600000")
+    original_date_bounds = store._parquet_date_bounds
+    first_reader_waiting = threading.Event()
+    release_first_reader = threading.Event()
+
+    def delayed_date_bounds(target_path):
+        if target_path == path and not first_reader_waiting.is_set():
+            first_reader_waiting.set()
+            release_first_reader.wait(timeout=1)
+        return original_date_bounds(target_path)
+
+    monkeypatch.setattr(store, "_parquet_date_bounds", delayed_date_bounds)
+
+    def append_date(daily_bar_date: str, close: float) -> None:
+        store.upsert_akshare_daily_bars(
+            "unadjusted",
+            "600000",
+            pd.DataFrame(
+                [
+                    _akshare_hist_row(
+                        "stock_zh_a_hist",
+                        "daily_bar_confirmed",
+                        close,
+                        daily_bar_date=daily_bar_date,
+                    )
+                ]
+            ),
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        first = executor.submit(append_date, "2024-01-02", 8.2)
+        assert first_reader_waiting.wait(timeout=1)
+        second = executor.submit(append_date, "2024-01-03", 8.3)
+        time.sleep(0.05)
+        release_first_reader.set()
+        first.result()
+        second.result()
+
+    hist = store.read_akshare_daily_bars("unadjusted", "600000")
+    assert pd.to_datetime(hist["date"]).dt.strftime("%Y-%m-%d").tolist() == [
+        "2024-01-01",
+        "2024-01-02",
+        "2024-01-03",
+    ]
 
 
 def test_writes_reject_missing_partition_keys(
@@ -1176,11 +1378,18 @@ def test_metadata_batch_flush_size_one_keeps_concurrent_rows(tmp_path) -> None:
     assert len(store.read_pipeline_checkpoints()) == 20
 
 
-def _akshare_hist_row(source_endpoint: str, quality_status: str, close: float) -> dict[str, object]:
+def _akshare_hist_row(
+    source_endpoint: str,
+    quality_status: str,
+    close: float,
+    *,
+    daily_bar_date: str = "2024-01-03",
+    code: str = "600000",
+) -> dict[str, object]:
     return {
-        "date": "2024-01-03",
-        "code": "600000",
-        "source_symbol": "600000",
+        "date": daily_bar_date,
+        "code": code,
+        "source_symbol": code,
         "open": 8.2,
         "high": 8.4,
         "low": 8.1,

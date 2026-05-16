@@ -6,10 +6,11 @@ import os
 import re
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import suppress
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
-from threading import RLock
+from threading import Lock, RLock
 
 import pandas as pd
 import pyarrow as pa
@@ -124,7 +125,8 @@ class ParquetStore:
         self.root = (root or paths.ROOT).resolve()
         self.parquet_dir = (parquet_dir or self.root / "data" / "parquet").resolve()
         self.metadata_dir = (metadata_dir or self.root / "data" / "metadata").resolve()
-        self._parquet_write_lock = RLock()
+        self._parquet_write_locks_guard = Lock()
+        self._parquet_write_locks: dict[Path, RLock] = {}
         self._registry_inventory_lock = RLock()
         self._pending_registry_dataset_ids: set[str] = set()
         self._pending_registry_status_rows: list[dict[str, object]] = []
@@ -331,6 +333,15 @@ class ParquetStore:
         cleaned = self.clean_dataframe_for_schema(df, schema)
         return pa.Table.from_pandas(cleaned, schema=schema, preserve_index=False)
 
+    def _parquet_write_lock_for(self, destination: Path) -> RLock:
+        key = destination.resolve()
+        with self._parquet_write_locks_guard:
+            lock = self._parquet_write_locks.get(key)
+            if lock is None:
+                lock = RLock()
+                self._parquet_write_locks[key] = lock
+            return lock
+
     def atomic_write(self, df: pd.DataFrame, schema: pa.Schema, destination: Path) -> None:
         """Write DataFrame to Parquet file with atomic replacement and retry logic.
         
@@ -347,14 +358,19 @@ class ParquetStore:
             OSError: If all write attempts fail
             PermissionError: If all write attempts fail due to permission issues
         """
+        table = pa.Table.from_pandas(df, schema=schema, preserve_index=False)
+        self._atomic_write_table(table, destination)
+
+    def _atomic_write_table(self, table: pa.Table, destination: Path) -> None:
+        """Write an Arrow table to Parquet with per-destination atomic replacement."""
         destination.parent.mkdir(parents=True, exist_ok=True)
         tmp_path = destination.parent / f"data.{uuid.uuid4().hex}.tmp.parquet"
-        table = pa.Table.from_pandas(df, schema=schema, preserve_index=False)
+        write_lock = self._parquet_write_lock_for(destination)
         
         last_error: Exception | None = None
         for attempt in range(PARQUET_WRITE_MAX_RETRIES):
             try:
-                with self._parquet_write_lock:
+                with write_lock:
                     pq.write_table(table, tmp_path)
                     os.replace(tmp_path, destination)
                 return
@@ -644,8 +660,26 @@ class ParquetStore:
         dataset = akshare_daily_bar_dataset_id(adjustment)
         definition = dataset_definition(dataset)
         cleaned = self.clean_dataframe_for_schema(df, definition.schema)
+        return self._write_cleaned_akshare_daily_bars(adjustment, code, cleaned)
+
+    def _write_cleaned_akshare_daily_bars(self, adjustment: str, code: str, cleaned: pd.DataFrame) -> Path:
+        code = _akshare_partition_code(code)
+        dataset = akshare_daily_bar_dataset_id(adjustment)
+        definition = dataset_definition(dataset)
+        cleaned = self._prepare_cleaned_akshare_daily_bars(adjustment, code, cleaned)
+        destination = self.akshare_daily_bar_path(adjustment, code)
+        self.atomic_write(cleaned, definition.schema, destination)
+        self._refresh_or_mark_registry_inventory(dataset)
+        return destination
+
+    def _prepare_cleaned_akshare_daily_bars(
+        self,
+        adjustment: str,
+        code: str,
+        cleaned: pd.DataFrame,
+    ) -> pd.DataFrame:
+        normalized_adjustment = akshare_daily_bar_dataset_id(adjustment).rsplit("_", 1)[-1]
         if not cleaned.empty:
-            normalized_adjustment = akshare_daily_bar_dataset_id(adjustment).rsplit("_", 1)[-1]
             self._require_partition_value(cleaned, "code", code, "AkShare daily bar file code")
             self._require_partition_value(
                 cleaned,
@@ -654,32 +688,43 @@ class ParquetStore:
                 "AkShare daily bar adjustment",
             )
             cleaned = cleaned.sort_values(["code", "adjustment", "date"]).reset_index(drop=True)
-        definition.validator(cleaned)
-        destination = self.akshare_daily_bar_path(adjustment, code)
-        self.atomic_write(cleaned, definition.schema, destination)
-        self._refresh_or_mark_registry_inventory(dataset)
-        return destination
+        dataset_definition(akshare_daily_bar_dataset_id(adjustment)).validator(cleaned)
+        return cleaned
 
     def upsert_akshare_daily_bars(self, adjustment: str, code: str, df: pd.DataFrame) -> Path:
         code = _akshare_partition_code(code)
         dataset = akshare_daily_bar_dataset_id(adjustment)
         definition = dataset_definition(dataset)
-        existing = self.read_akshare_daily_bars(adjustment, code)
-        fresh = self.clean_dataframe_for_schema(df, definition.schema)
-        combined = pd.concat([existing, fresh], ignore_index=True)
-        combined = self.clean_dataframe_for_schema(combined, definition.schema)
-        if not combined.empty:
-            combined["_date_key"] = pd.to_datetime(combined["date"], errors="coerce").dt.strftime("%Y-%m-%d")
-            combined = (
-                combined.drop_duplicates(["code", "_date_key", "adjustment"], keep="last")
-                .drop(columns=["_date_key"])
-                .sort_values(["code", "adjustment", "date"])
-                .reset_index(drop=True)
+        destination = self.akshare_daily_bar_path(adjustment, code)
+        with self._parquet_write_lock_for(destination):
+            fresh = self.clean_dataframe_for_schema(df, definition.schema)
+            mode, path = self._try_write_cleaned_akshare_daily_bars_fast(
+                adjustment,
+                code,
+                fresh,
+                skip_existing=False,
             )
-        return self.write_akshare_daily_bars(adjustment, code, combined)
+            if mode in {"updated", "skipped"} and path is not None:
+                return path
+            existing = self.read_akshare_daily_bars(adjustment, code)
+            combined = pd.concat([existing, fresh], ignore_index=True)
+            combined = self.clean_dataframe_for_schema(combined, definition.schema)
+            if not combined.empty:
+                combined["_date_key"] = pd.to_datetime(combined["date"], errors="coerce").dt.strftime("%Y-%m-%d")
+                combined = (
+                    combined.drop_duplicates(["code", "_date_key", "adjustment"], keep="last")
+                    .drop(columns=["_date_key"])
+                    .sort_values(["code", "adjustment", "date"])
+                    .reset_index(drop=True)
+                )
+            return self._write_cleaned_akshare_daily_bars(adjustment, code, combined)
 
     def append_akshare_daily_bar_batch(
-        self, adjustment: str, daily_bar_rows: pd.DataFrame, skip_existing: bool = True
+        self,
+        adjustment: str,
+        daily_bar_rows: pd.DataFrame,
+        skip_existing: bool = True,
+        write_workers: int = 1,
     ) -> dict[str, int]:
         """Batch append spot hist rows with optimized incremental update.
         
@@ -693,50 +738,149 @@ class ParquetStore:
             skip_existing: If True, skip stocks whose latest data already exists
             
         Returns:
-            Dictionary with statistics: {'updated': count, 'skipped': count}
+            Dictionary with statistics: {'updated': count, 'skipped': count, 'fallback': count}
         """
         if daily_bar_rows.empty:
-            return {'updated': 0, 'skipped': 0}
+            return {'updated': 0, 'skipped': 0, 'fallback': 0}
         
         dataset = akshare_daily_bar_dataset_id(adjustment)
         definition = dataset_definition(dataset)
-        stats = {'updated': 0, 'skipped': 0}
-        
-        for code, group in daily_bar_rows.groupby("code", dropna=False, sort=False):
+        cleaned_rows = self.clean_dataframe_for_schema(daily_bar_rows, definition.schema)
+        stats = {'updated': 0, 'skipped': 0, 'fallback': 0}
+
+        grouped_rows = list(cleaned_rows.groupby("code", dropna=False, sort=False))
+
+        def write_group(item: tuple[object, pd.DataFrame]) -> str | None:
+            code, group = item
             if pd.isna(code) or str(code).strip() == "":
-                continue
+                return None
             
             code_str = _akshare_partition_code(str(code))
-            daily_bar_path = self.akshare_daily_bar_path(adjustment, code_str)
-            
-            if skip_existing and daily_bar_path.exists():
-                try:
-                    existing_tail = pd.read_parquet(
-                        daily_bar_path, 
-                        columns=['date'],
-                    ).tail(10)
-                    
-                    new_dates = set(
-                        pd.to_datetime(group['date'], errors='coerce')
-                        .dt.strftime('%Y-%m-%d')
-                        .dropna()
-                    )
-                    existing_dates = set(
-                        pd.to_datetime(existing_tail['date'], errors='coerce')
-                        .dt.strftime('%Y-%m-%d')
-                        .dropna()
-                    )
-                    
-                    if new_dates.issubset(existing_dates):
-                        stats['skipped'] += 1
-                        continue
-                except Exception:
-                    pass
-            
-            self.upsert_akshare_daily_bars(adjustment, code_str, group.reset_index(drop=True))
-            stats['updated'] += 1
+            mode, _path = self._try_write_cleaned_akshare_daily_bars_fast(
+                adjustment,
+                code_str,
+                group.reset_index(drop=True),
+                skip_existing=skip_existing,
+            )
+            if mode == "fallback":
+                self.upsert_akshare_daily_bars(adjustment, code_str, group.reset_index(drop=True))
+            return mode
+
+        worker_count = max(1, int(write_workers or 1))
+        if worker_count == 1 or len(grouped_rows) <= 1:
+            modes = [write_group(item) for item in grouped_rows]
+        else:
+            modes = []
+            with ThreadPoolExecutor(max_workers=worker_count) as executor:
+                futures = [executor.submit(write_group, item) for item in grouped_rows]
+                for future in as_completed(futures):
+                    modes.append(future.result())
+
+        for mode in modes:
+            if mode in stats:
+                stats[mode] += 1
+                if mode == "fallback":
+                    stats["updated"] += 1
         
         return stats
+
+    def _try_write_cleaned_akshare_daily_bars_fast(
+        self,
+        adjustment: str,
+        code: str,
+        fresh: pd.DataFrame,
+        *,
+        skip_existing: bool,
+    ) -> tuple[str, Path | None]:
+        """Try create/skip/append-only daily bars without full pandas upsert."""
+
+        code = _akshare_partition_code(code)
+        dataset = akshare_daily_bar_dataset_id(adjustment)
+        definition = dataset_definition(dataset)
+        destination = self.akshare_daily_bar_path(adjustment, code)
+        with self._parquet_write_lock_for(destination):
+            fresh = self._prepare_cleaned_akshare_daily_bars(adjustment, code, fresh)
+            if not destination.exists():
+                return "updated", self._write_cleaned_akshare_daily_bars(adjustment, code, fresh)
+            if fresh.empty:
+                return "skipped", destination
+
+            date_keys = self._date_keys(fresh["date"])
+            if date_keys.isna().any():
+                return "fallback", None
+            if fresh.duplicated(["code", "date", "adjustment"]).any():
+                return "fallback", None
+            if not date_keys.is_monotonic_increasing:
+                return "fallback", None
+
+            bounds = self._parquet_date_bounds(destination)
+            if bounds is None:
+                return "fallback", None
+            _existing_min, existing_max = bounds
+            new_min = str(date_keys.iloc[0])
+            new_max = str(date_keys.iloc[-1])
+            unique_new_dates = set(date_keys.astype(str).tolist())
+
+            if skip_existing and len(unique_new_dates) == 1 and new_max == existing_max:
+                return "skipped", destination
+            if new_min <= existing_max:
+                return "fallback", None
+
+            try:
+                existing_table = pq.ParquetFile(destination).read()
+                schema_names = field_names(definition.schema)
+                existing_table = existing_table.select(schema_names).cast(definition.schema)
+                fresh_table = pa.Table.from_pandas(fresh, schema=definition.schema, preserve_index=False)
+                combined_table = pa.concat_tables([existing_table, fresh_table], promote_options="none")
+            except Exception:
+                return "fallback", None
+
+            self._atomic_write_table(combined_table, destination)
+            self._refresh_or_mark_registry_inventory(dataset)
+            return "updated", destination
+
+    def _date_keys(self, values: pd.Series) -> pd.Series:
+        return pd.to_datetime(values, errors="coerce").dt.strftime("%Y-%m-%d")
+
+    def _parquet_date_bounds(self, path: Path) -> tuple[str, str] | None:
+        try:
+            parquet_file = pq.ParquetFile(path)
+            metadata = parquet_file.metadata
+            if metadata is None or metadata.num_rows == 0:
+                return None
+            date_index = parquet_file.schema_arrow.get_field_index("date")
+            if date_index < 0:
+                return None
+            min_values: list[str] = []
+            max_values: list[str] = []
+            for row_group_index in range(metadata.num_row_groups):
+                column = metadata.row_group(row_group_index).column(date_index)
+                statistics = column.statistics
+                if statistics is None or not statistics.has_min_max:
+                    return None
+                min_key = self._metadata_date_key(statistics.min)
+                max_key = self._metadata_date_key(statistics.max)
+                if min_key is None or max_key is None:
+                    return None
+                min_values.append(min_key)
+                max_values.append(max_key)
+            if not min_values or not max_values:
+                return None
+            return min(min_values), max(max_values)
+        except Exception:
+            return None
+
+    def _metadata_date_key(self, value: object) -> str | None:
+        if isinstance(value, bytes):
+            value = value.decode("utf-8")
+        if isinstance(value, datetime):
+            return value.date().isoformat()
+        if isinstance(value, date):
+            return value.isoformat()
+        parsed = pd.to_datetime(value, errors="coerce")
+        if pd.isna(parsed):
+            return None
+        return parsed.strftime("%Y-%m-%d")
 
     def read_akshare_daily_bars(self, adjustment: str, code: str) -> pd.DataFrame:
         code = _akshare_partition_code(code)

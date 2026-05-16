@@ -75,6 +75,7 @@ pipeline:
   metadata_flush_size: 200
   background_workers: 4
   baostock_valuation_percentile_workers: 4
+  spot_daily_bar_write_workers: 1
 
 storage:
   duckdb_file: data/duckdb/quant.duckdb
