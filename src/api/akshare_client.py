@@ -14,6 +14,7 @@ from src.api.akshare.adapters.capital_structure_em import CapitalStructureEmAdap
 from src.api.akshare.adapters.daily_bar import DailyBarAdapter
 from src.api.akshare.adapters.delist_sh import DelistShAdapter
 from src.api.akshare.adapters.delist_sz import DelistSzAdapter
+from src.api.akshare.adapters.report_disclosure import ReportDisclosureAdapter
 from src.api.akshare.adapters.spot_quote_eastmoney import SpotQuoteEastmoneyAdapter
 from src.api.akshare.adapters.spot_quote_sina import SpotQuoteSinaAdapter
 from src.api.akshare.adapters.valuation_eastmoney import ValuationEastmoneyAdapter
@@ -102,6 +103,16 @@ class AkShareClient:
             trade_date=date_iso(trade_date, now.date().isoformat()),
             fallback_reason=fallback_reason,
             fetched_at=now,
+        )
+        return self._fetch_adapter(adapter)
+
+    def fetch_report_disclosure(self, market: str = "沪深京", period: str | None = None) -> AkShareResponse:
+        if period is None:
+            raise ValueError("stock_report_disclosure requires period")
+        adapter = ReportDisclosureAdapter(
+            market=market,
+            period=period,
+            fetched_at=self._now(),
         )
         return self._fetch_adapter(adapter)
 

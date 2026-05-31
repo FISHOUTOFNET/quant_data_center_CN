@@ -37,6 +37,7 @@ class AkShareUpdateRequest:
     client: Any | None = None
     client_factory: Callable[[ConfigManager], Any] | None = None
     now: Callable[[], datetime] | None = None
+    period: tuple[str, ...] | list[str] | str | None = ()
 
 
 @dataclass(frozen=True)
@@ -312,6 +313,7 @@ def _modules_for_target(target: str) -> Iterable[AkShareDatasetModule]:
     from src.pipeline.akshare.modules.capital_structure_em import CapitalStructureEmModule
     from src.pipeline.akshare.modules.daily_bar import DailyBarModule
     from src.pipeline.akshare.modules.delist import DelistModule
+    from src.pipeline.akshare.modules.report_disclosure import ReportDisclosureModule
     from src.pipeline.akshare.modules.spot_quote import SpotQuoteModule
     from src.pipeline.akshare.modules.valuation_eastmoney import ValuationEastmoneyModule
 
@@ -321,6 +323,7 @@ def _modules_for_target(target: str) -> Iterable[AkShareDatasetModule]:
         "daily_bar": DailyBarModule(),
         "spot_quote": SpotQuoteModule(),
         "delist": DelistModule(),
+        "report_disclosure": ReportDisclosureModule(),
     }
     if target == "all":
         return [
@@ -328,6 +331,7 @@ def _modules_for_target(target: str) -> Iterable[AkShareDatasetModule]:
             registry["capital_structure"],
             registry["delist"],
             registry["spot_quote"],
+            registry["report_disclosure"],
             registry["daily_bar"],
         ]
     try:
@@ -337,10 +341,20 @@ def _modules_for_target(target: str) -> Iterable[AkShareDatasetModule]:
 
 
 def _validate_request(request: AkShareUpdateRequest) -> None:
-    if request.target not in {"valuation", "capital_structure", "daily_bar", "spot_quote", "delist", "all"}:
+    if request.target not in {
+        "valuation",
+        "capital_structure",
+        "daily_bar",
+        "spot_quote",
+        "delist",
+        "report_disclosure",
+        "all",
+    }:
         raise ValueError(f"Unsupported AkShare update target: {request.target}")
     if request.adjustment is not None and request.target != "daily_bar":
         raise ValueError("--adjustment is only valid for --target daily_bar")
+    if request.period and request.target != "report_disclosure":
+        raise ValueError("--period is only valid for --target report_disclosure")
 
 
 def _call_optional(module: AkShareDatasetModule, name: str, *args: Any) -> Any:

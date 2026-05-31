@@ -144,6 +144,28 @@ class FakeAStockClient:
             data,
         )
 
+    def fetch_report_disclosure(self, market: str = "沪深京", period: str | None = None) -> AkShareResponse:
+        self.calls.append(("stock_report_disclosure", {"market": market, "period": period}))
+        data = pd.DataFrame(
+            [
+                {
+                    "report_period": period,
+                    "period_end_date": _period_end_date(str(period)),
+                    "market": market,
+                    "code": "000001",
+                    "name": "PF Bank",
+                    "first_scheduled_date": "2026-03-15",
+                    "first_changed_date": None,
+                    "second_changed_date": None,
+                    "third_changed_date": None,
+                    "actual_disclosure_date": "2026-04-20",
+                    "source_endpoint": "stock_report_disclosure",
+                    "fetched_at": datetime(2026, 1, 2, 9, 0),
+                }
+            ]
+        )
+        return _response("stock_report_disclosure", {"market": market, "period": period}, data)
+
 
 class CircuitOpenDailyBarClient(FakeAStockClient):
     def __init__(self, circuit_code: str = "600000") -> None:
@@ -173,7 +195,6 @@ class CircuitOpenDailyBarClient(FakeAStockClient):
             data,
         )
 
-
 def update_akshare_delist(**kwargs):
     snapshot_date = kwargs.pop("snapshot_date", None)
     if snapshot_date is not None and "end" not in kwargs:
@@ -187,6 +208,10 @@ def update_akshare_spot(**kwargs):
 
 def update_akshare_daily_bar(**kwargs):
     return update_akshare(AkShareUpdateRequest(target="daily_bar", **kwargs))
+
+
+def update_akshare_report_disclosure(**kwargs):
+    return update_akshare(AkShareUpdateRequest(target="report_disclosure", **kwargs))
 
 
 def test_update_akshare_delist_writes_manual_delist_snapshot(tmp_path) -> None:
@@ -680,6 +705,90 @@ def test_update_akshare_daily_bar_incremental_overrides_spot_and_full_writes_adj
     assert qfq.loc[0, "adjustment"] == "qfq"
 
 
+def test_update_akshare_report_disclosure_partial_uses_recent_four_periods(tmp_path) -> None:
+    _write_settings(tmp_path)
+    client = FakeAStockClient()
+
+    records = update_akshare_report_disclosure(
+        root=tmp_path,
+        build_views=False,
+        client=client,
+        now=lambda: datetime(2026, 5, 31, 12, 0),
+    )
+
+    assert [call[1]["period"] for call in client.calls if call[0] == "stock_report_disclosure"] == [
+        "2025半年报",
+        "2025三季",
+        "2025年报",
+        "2026一季",
+    ]
+    assert all(call[1]["market"] == "沪深京" for call in client.calls)
+    assert [item["status"] for item in records] == ["success", "success", "success", "success"]
+
+
+def test_update_akshare_report_disclosure_full_uses_1990_start_and_max_tasks(tmp_path) -> None:
+    _write_settings(tmp_path)
+    client = FakeAStockClient()
+
+    update_akshare_report_disclosure(
+        mode="full",
+        max_tasks=3,
+        root=tmp_path,
+        build_views=False,
+        client=client,
+        now=lambda: datetime(2026, 5, 31, 12, 0),
+    )
+
+    assert [call[1]["period"] for call in client.calls if call[0] == "stock_report_disclosure"] == [
+        "1990一季",
+        "1990半年报",
+        "1990三季",
+    ]
+
+
+def test_update_akshare_report_disclosure_writes_partitions_and_resumes(tmp_path) -> None:
+    _write_settings(tmp_path)
+    client = FakeAStockClient()
+
+    first = update_akshare_report_disclosure(
+        period=("2025年报",),
+        root=tmp_path,
+        build_views=False,
+        client=client,
+        now=lambda: datetime(2026, 5, 31, 12, 0),
+    )
+    store = ParquetStore(root=tmp_path)
+    loaded = store.read_dataset("akshare_cn_stock_report_disclosure", {"report_period": "2025年报"})
+
+    assert [item["status"] for item in first] == ["success"]
+    assert loaded.loc[0, "report_period"] == "2025年报"
+    assert loaded.loc[0, "market"] == "沪深京"
+    assert loaded.loc[0, "code"] == "000001"
+    assert loaded.loc[0, "source_endpoint"] == "stock_report_disclosure"
+
+    client.calls.clear()
+    skipped = update_akshare_report_disclosure(
+        period=("2025年报",),
+        root=tmp_path,
+        build_views=False,
+        client=client,
+        now=lambda: datetime(2026, 5, 31, 12, 0),
+    )
+    assert skipped == []
+    assert client.calls == []
+
+    forced = update_akshare_report_disclosure(
+        period=("2025年报",),
+        root=tmp_path,
+        build_views=False,
+        force=True,
+        client=client,
+        now=lambda: datetime(2026, 5, 31, 12, 0),
+    )
+    assert [item["status"] for item in forced] == ["success"]
+    assert [call[1]["period"] for call in client.calls if call[0] == "stock_report_disclosure"] == ["2025年报"]
+
+
 def _response(endpoint: str, params: dict[str, object], data: pd.DataFrame) -> AkShareResponse:
     return AkShareResponse(
         endpoint=endpoint,
@@ -746,6 +855,17 @@ def _daily_bar_row(
         "quality_status": quality_status,
         "fetched_at": datetime(2024, 1, 3, 16, 0),
     }
+
+
+def _period_end_date(period: str) -> str:
+    year = period[:4]
+    suffix = period[4:]
+    return {
+        "一季": f"{year}-03-31",
+        "半年报": f"{year}-06-30",
+        "三季": f"{year}-09-30",
+        "年报": f"{year}-12-31",
+    }[suffix]
 
 
 def _log_entries(logger: FakeLogger, message: str) -> list[tuple[str, str, tuple[object, ...]]]:

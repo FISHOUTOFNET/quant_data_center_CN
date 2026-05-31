@@ -62,7 +62,9 @@ def akshare() -> None:
 @akshare.command("update")
 @click.option(
     "--target",
-    type=click.Choice(["valuation", "capital_structure", "daily_bar", "spot_quote", "delist", "all"]),
+    type=click.Choice(
+        ["valuation", "capital_structure", "daily_bar", "spot_quote", "delist", "report_disclosure", "all"]
+    ),
     default="valuation",
     show_default=True,
 )
@@ -82,6 +84,11 @@ def akshare() -> None:
 @click.option(
     "--market", default=None, help="Delist market parameter. Uses exchange-specific defaults if not specified."
 )
+@click.option(
+    "--period",
+    multiple=True,
+    help="Report disclosure period, e.g. 2025年报. Can be repeated.",
+)
 @click.option("--start", default=None, help="Start date, YYYY-MM-DD. Required for daily_bar incremental mode.")
 @click.option(
     "--end", default=None, help="End or snapshot/trade date, YYYY-MM-DD. Defaults through target-specific resolution."
@@ -98,6 +105,7 @@ def akshare_update(
     code: tuple[str, ...],
     include_inactive: bool,
     market: str | None,
+    period: tuple[str, ...],
     start: str | None,
     end: str | None,
     max_tasks: int | None,
@@ -116,6 +124,7 @@ def akshare_update(
             code=code,
             include_inactive=include_inactive,
             market=market,
+            period=period,
             start=start,
             end=end,
             max_tasks=max_tasks,

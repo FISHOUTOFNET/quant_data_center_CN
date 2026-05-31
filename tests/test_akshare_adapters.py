@@ -8,6 +8,7 @@ import pytest
 from src.api.akshare.adapters.capital_structure_em import CapitalStructureEmAdapter
 from src.api.akshare.adapters.daily_bar import DailyBarAdapter
 from src.api.akshare.adapters.delist_sh import DelistShAdapter
+from src.api.akshare.adapters.report_disclosure import ReportDisclosureAdapter
 from src.api.akshare.adapters.spot_quote_eastmoney import SpotQuoteEastmoneyAdapter
 from src.api.akshare.adapters.spot_quote_sina import SpotQuoteSinaAdapter
 from src.api.akshare.adapters.valuation_eastmoney import ValuationEastmoneyAdapter
@@ -273,3 +274,41 @@ def test_delist_sh_adapter_cleans_symbols_and_tracks_endpoint_metadata() -> None
     assert mapped.loc[0, "exchange"] == "sh"
     assert mapped.loc[0, "market"] == "全部"
     assert mapped.loc[0, "source_endpoint"] == "stock_info_sh_delist"
+
+
+def test_report_disclosure_adapter_maps_fields_and_empty_schema() -> None:
+    adapter = ReportDisclosureAdapter(
+        market="沪深京",
+        period="2025年报",
+        fetched_at=datetime(2026, 1, 2, 9, 0),
+    )
+    raw = pd.DataFrame(
+        [
+            {
+                "股票代码": "000001",
+                "股票简称": "平安银行",
+                "首次预约": "2026-03-15",
+                "初次变更": "",
+                "二次变更": None,
+                "三次变更": "2026-04-10",
+                "实际披露": "2026-04-20",
+            }
+        ]
+    )
+
+    mapped = adapter.normalize(raw)
+    empty = adapter.normalize(pd.DataFrame())
+
+    assert adapter.endpoint == "stock_report_disclosure"
+    assert adapter.params == {"market": "沪深京", "period": "2025年报"}
+    assert mapped.loc[0, "report_period"] == "2025年报"
+    assert str(mapped.loc[0, "period_end_date"]) == "2025-12-31"
+    assert mapped.loc[0, "market"] == "沪深京"
+    assert mapped.loc[0, "code"] == "000001"
+    assert mapped.loc[0, "name"] == "平安银行"
+    assert str(mapped.loc[0, "first_scheduled_date"]) == "2026-03-15"
+    assert pd.isna(mapped.loc[0, "first_changed_date"])
+    assert str(mapped.loc[0, "third_changed_date"]) == "2026-04-10"
+    assert mapped.loc[0, "source_endpoint"] == "stock_report_disclosure"
+    assert list(empty.columns) == list(mapped.columns)
+    assert empty.empty

@@ -48,6 +48,10 @@ api:
         source: sina
         failure_threshold: 1
         cooldown_minutes: 180
+      stock_report_disclosure:
+        source: cninfo
+        failure_threshold: 3
+        cooldown_minutes: 30
       stock_zh_a_hist:
         source: eastmoney
         failure_threshold: 5
@@ -76,6 +80,8 @@ datasets:
     full_start: "1990-01-01"
   akshare_cn_stock_spot_quote:
     update_daily_bar_from_spot: true
+  akshare_cn_stock_report_disclosure:
+    full_start_year: 1990
 
 pipeline:
   lookback_days: 10

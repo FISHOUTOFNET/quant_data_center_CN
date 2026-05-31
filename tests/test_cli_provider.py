@@ -198,6 +198,7 @@ def test_update_akshare_a_stock_cli_commands_pass_arguments(monkeypatch) -> None
         "code": (),
         "include_inactive": False,
         "market": "沪市",
+        "period": (),
         "start": None,
         "end": "2024-01-03",
         "max_tasks": None,
@@ -217,6 +218,7 @@ def test_update_akshare_a_stock_cli_commands_pass_arguments(monkeypatch) -> None
         "code": (),
         "include_inactive": False,
         "market": None,
+        "period": (),
         "start": None,
         "end": "2024-01-03",
         "max_tasks": None,
@@ -302,6 +304,56 @@ def test_akshare_cli_rejects_adjustment_for_non_daily_bar_target() -> None:
 
     assert result.exit_code != 0
     assert "--adjustment is only valid for --target daily_bar" in result.output
+
+
+def test_akshare_cli_accepts_report_disclosure_periods(monkeypatch) -> None:
+    captured = {}
+
+    def fake_update(request):
+        captured.update(request.__dict__)
+        return [
+            {
+                "dataset": "akshare_cn_stock_report_disclosure",
+                "code": "沪深京",
+                "status": "success",
+                "row_count": 1,
+            }
+        ]
+
+    monkeypatch.setattr("src.cli.run_update_akshare", fake_update)
+
+    result = CliRunner().invoke(
+        cli_module.cli,
+        [
+            "akshare",
+            "update",
+            "--target",
+            "report_disclosure",
+            "--market",
+            "沪深京",
+            "--period",
+            "2025三季",
+            "--period",
+            "2025年报",
+            "--no-build-duckdb-views",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert captured["target"] == "report_disclosure"
+    assert captured["market"] == "沪深京"
+    assert captured["period"] == ("2025三季", "2025年报")
+    assert "akshare_cn_stock_report_disclosure 沪深京 status=success rows=1" in result.output
+
+
+def test_akshare_cli_rejects_period_for_non_report_disclosure_target() -> None:
+    result = CliRunner().invoke(
+        cli_module.cli,
+        ["akshare", "update", "--target", "valuation", "--period", "2025年报"],
+    )
+
+    assert result.exit_code != 0
+    assert "--period is only valid for --target report_disclosure" in result.output
 
 
 def test_akshare_cli_accepts_capital_structure_target(monkeypatch) -> None:

@@ -53,6 +53,9 @@ if "%QDC_WEEKEND_WINDOW%"=="1" (
     call :run_step "akshare update valuation full" "python -m src.cli akshare update --target valuation --mode full --no-build-duckdb-views"
     if errorlevel 1 goto :failed
 
+    call :run_step "akshare update report_disclosure" "python -m src.cli akshare update --target report_disclosure --no-build-duckdb-views"
+    if errorlevel 1 goto :failed
+
     call :run_step "akshare update daily_bar incremental all from !QDC_HIST_START!" "python -m src.cli akshare update --target daily_bar --mode incremental --adjustment all --start %QDC_HIST_START% --no-build-duckdb-views"
     if errorlevel 1 goto :failed
 

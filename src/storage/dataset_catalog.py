@@ -15,6 +15,7 @@ from src.quality.validators import (
     validate_akshare_cn_stock_delist_sh,
     validate_akshare_cn_stock_delist_sz,
     validate_akshare_cn_stock_institution_holding,
+    validate_akshare_cn_stock_report_disclosure,
     validate_akshare_cn_stock_spot_quote_eastmoney,
     validate_akshare_cn_stock_spot_quote_sina,
     validate_akshare_cn_stock_valuation_eastmoney,
@@ -32,6 +33,7 @@ from src.storage.schema import (
     AKSHARE_DAILY_BAR_SCHEMA,
     AKSHARE_DELIST_SH_SCHEMA,
     AKSHARE_DELIST_SZ_SCHEMA,
+    AKSHARE_REPORT_DISCLOSURE_SCHEMA,
     AKSHARE_SPOT_QUOTE_EASTMONEY_SCHEMA,
     AKSHARE_SPOT_QUOTE_SINA_SCHEMA,
     AKSHARE_STOCK_INSTITUTION_HOLDING_SCHEMA,
@@ -244,6 +246,20 @@ AKSHARE_SPOT_QUOTE_SINA_DATASET = DatasetDefinition(
     unique_columns=("trade_date", "code"),
 )
 
+AKSHARE_REPORT_DISCLOSURE_DATASET = DatasetDefinition(
+    id="akshare_cn_stock_report_disclosure",
+    logical_name="cn_stock_report_disclosure",
+    source="akshare",
+    endpoint="stock_report_disclosure",
+    code_format="six_digit",
+    schema=AKSHARE_REPORT_DISCLOSURE_SCHEMA,
+    validator=validate_akshare_cn_stock_report_disclosure,
+    view_name="v_akshare_cn_stock_report_disclosure",
+    partition_column="report_period",
+    sort_columns=("report_period", "code"),
+    unique_columns=("report_period", "code"),
+)
+
 AKSHARE_DAILY_BAR_ADJUSTMENTS = ("unadjusted", "qfq", "hfq")
 AKSHARE_DAILY_BAR_DATASETS = tuple(
     DatasetDefinition(
@@ -328,6 +344,7 @@ AKSHARE_A_STOCK_DATASET_NAMES = (
     AKSHARE_DELIST_SZ_DATASET.id,
     AKSHARE_SPOT_QUOTE_EASTMONEY_DATASET.id,
     AKSHARE_SPOT_QUOTE_SINA_DATASET.id,
+    AKSHARE_REPORT_DISCLOSURE_DATASET.id,
     *(definition.id for definition in AKSHARE_DAILY_BAR_DATASETS),
     AKSHARE_STOCK_INSTITUTION_HOLDING_DATASET.id,
 )
@@ -346,6 +363,7 @@ DATASET_CATALOG = {
         AKSHARE_DELIST_SZ_DATASET,
         AKSHARE_SPOT_QUOTE_EASTMONEY_DATASET,
         AKSHARE_SPOT_QUOTE_SINA_DATASET,
+        AKSHARE_REPORT_DISCLOSURE_DATASET,
         *AKSHARE_DAILY_BAR_DATASETS,
         AKSHARE_STOCK_INSTITUTION_HOLDING_DATASET,
         QLIB_CN_CALENDAR_DAY_DATASET,
@@ -403,6 +421,7 @@ def akshare_a_stock_definitions() -> tuple[DatasetDefinition, ...]:
         AKSHARE_DELIST_SZ_DATASET,
         AKSHARE_SPOT_QUOTE_EASTMONEY_DATASET,
         AKSHARE_SPOT_QUOTE_SINA_DATASET,
+        AKSHARE_REPORT_DISCLOSURE_DATASET,
         *AKSHARE_DAILY_BAR_DATASETS,
         AKSHARE_STOCK_INSTITUTION_HOLDING_DATASET,
     )
