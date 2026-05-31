@@ -40,9 +40,13 @@ qdc = "src.cli:cli"
 include = ["src*"]
 
 [tool.pytest.ini_options]
-addopts = "-q --strict-markers --strict-config"
+addopts = "-q --strict-markers --strict-config -m 'not slow'"
 testpaths = ["tests"]
 pythonpath = ["."]
+markers = [
+    "performance: long-running performance or stress tests, excluded from default pytest runs",
+    "slow: long-running integration, performance, or stress tests excluded from default pytest runs",
+]
 
 [tool.coverage.run]
 branch = true

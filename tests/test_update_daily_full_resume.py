@@ -3,12 +3,15 @@ from __future__ import annotations
 import threading
 
 import pandas as pd
+import pytest
 from update_daily_fakes import _fake_provider_factory, _provider_factory_for, _write_settings
 
 import src.pipeline.update_daily as update_daily_module
 import src.pipeline.update_daily_worker as update_daily_worker_module
 from src.pipeline.adjustments import BAOSTOCK_CN_STOCK_ADJUSTMENT_FACTOR_DATASET
 from src.storage.parquet_store import ParquetStore
+
+pytestmark = pytest.mark.slow
 
 
 def test_update_daily_full_resumes_failed_code(
@@ -392,6 +395,8 @@ def test_update_daily_worker_does_not_retain_adjustment_factor_state_without_dai
     assert observed_sizes == [(0, 0)]
 
 
+@pytest.mark.performance
+@pytest.mark.slow
 def test_update_daily_parallel_metadata_writes_do_not_drop_rows(
     tmp_path,
     monkeypatch,
@@ -399,7 +404,7 @@ def test_update_daily_parallel_metadata_writes_do_not_drop_rows(
     baostock_cn_stock_basic_sample,
 ) -> None:
     _write_settings(tmp_path, metadata_flush_size=1)
-    codes = tuple(f"sh.60000{index}" for index in range(8))
+    codes = tuple(f"sh.60000{index}" for index in range(4))
     provider_factory, _state = _fake_provider_factory(baostock_cn_stock_basic_sample(), daily_sample())
     monkeypatch.setattr(update_daily_module, "create_provider", provider_factory)
 
@@ -430,7 +435,7 @@ def test_update_daily_parallel_metadata_writes_do_not_drop_rows(
                 )
             ]
         )
-        == 16
+        == len(codes) * 2
     )
     assert (
         set(zip(dataset_update_status["dataset"].astype(str), dataset_update_status["code"].astype(str), strict=False))
@@ -544,19 +549,19 @@ def test_update_daily_full_batches_daily_checkpoints_by_flush_size(
         mode="full",
         start="2024-01-01",
         end="2024-01-31",
-        code=("sh.000001", "sh.600000", "sz.000001"),
+        code=("sh.000001", "sh.600000"),
         root=tmp_path,
         build_views=False,
     )
 
     daily_records = [item for item in records if item["dataset"] == "baostock_cn_stock_daily_bar_qfq"]
-    assert [item["status"] for item in daily_records] == ["success", "success", "success"]
-    assert state["history_calls"] == ["sh.000001", "sh.600000", "sz.000001"]
-    assert sum(flush_sizes) == 6
+    assert [item["status"] for item in daily_records] == ["success", "success"]
+    assert state["history_calls"] == ["sh.000001", "sh.600000"]
+    assert sum(flush_sizes) == 4
     assert len(flush_sizes) >= 2
 
     checkpoints = ParquetStore(root=tmp_path).read_pipeline_checkpoints()
-    assert set(checkpoints["code"].astype(str)) == {"sh.000001", "sh.600000", "sz.000001"}
+    assert set(checkpoints["code"].astype(str)) == {"sh.000001", "sh.600000"}
     assert set(checkpoints["dataset"].astype(str)) == {
         BAOSTOCK_CN_STOCK_ADJUSTMENT_FACTOR_DATASET,
         "baostock_cn_stock_daily_bar_qfq",

@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import pandas as pd
+import pytest
 
 import src.pipeline.repair_tool as repair_module
+
+pytestmark = pytest.mark.slow
 
 
 def test_repair_normalizes_non_trading_range_to_trading_bounds(

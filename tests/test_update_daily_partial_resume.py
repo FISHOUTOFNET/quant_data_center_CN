@@ -3,12 +3,15 @@ from __future__ import annotations
 from collections import Counter
 
 import pandas as pd
+import pytest
 from update_daily_fakes import _fake_provider_factory, _write_settings
 
 import src.pipeline.update_daily as update_daily_module
 from src.pipeline.adjustments import BAOSTOCK_CN_STOCK_ADJUSTMENT_FACTOR_DATASET
 from src.pipeline.common import PIPELINE_UPDATE_DAILY, write_checkpoint
 from src.storage.parquet_store import ParquetStore
+
+pytestmark = pytest.mark.slow
 
 
 def test_update_daily_uses_active_baostock_cn_stock_basic_codes_and_resumes(

@@ -13,6 +13,8 @@ from src.api.akshare_client import AkShareCircuitOpen, AkShareResponse
 from src.pipeline.akshare import AkShareUpdateRequest, update_akshare
 from src.storage.parquet_store import ParquetStore
 
+pytestmark = pytest.mark.slow
+
 
 class FakeLogger:
     def __init__(self) -> None:

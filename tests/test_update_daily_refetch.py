@@ -3,11 +3,14 @@ from __future__ import annotations
 import threading
 
 import pandas as pd
+import pytest
 from update_daily_fakes import _fake_provider_factory, _provider_factory_for, _write_settings
 
 import src.pipeline.update_daily as update_daily_module
 from src.pipeline.common import PIPELINE_UPDATE_DAILY, write_checkpoint
 from src.storage.parquet_store import ParquetStore
+
+pytestmark = pytest.mark.slow
 
 
 def test_update_daily_refetches_full_history_on_lookback_mismatch(

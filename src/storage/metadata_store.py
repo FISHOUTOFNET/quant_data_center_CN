@@ -120,42 +120,70 @@ class DuckDBMetadataStore:
             if checkpoint_rows
             else None
         )
+        if _is_empty_frame(runs) and _is_empty_frame(statuses) and _is_empty_frame(checkpoints):
+            return
         with self._connection() as conn:
+            self._persist_update_metadata_transaction(conn, runs, statuses, checkpoints)
+
+    def _persist_update_metadata_transaction(
+        self,
+        conn: duckdb.DuckDBPyConnection,
+        runs: pd.DataFrame | None,
+        statuses: pd.DataFrame | None,
+        checkpoints: pd.DataFrame | None,
+    ) -> None:
+        registered: list[str] = []
+        try:
             if runs is not None and not runs.empty:
-                self._register_and_execute(conn, runs, "INSERT INTO pipeline_runs SELECT * FROM incoming")
+                conn.register("incoming_runs", runs)
+                registered.append("incoming_runs")
             if statuses is not None and not statuses.empty:
-                self._register_and_execute(
-                    conn,
-                    statuses,
-                    """
-                    DELETE FROM dataset_update_status
-                    WHERE EXISTS (
-                        SELECT 1
-                        FROM incoming
-                        WHERE incoming.dataset = dataset_update_status.dataset
-                          AND incoming.code = dataset_update_status.code
-                    )
-                    """,
-                    "INSERT INTO dataset_update_status SELECT * FROM incoming",
-                )
+                conn.register("incoming_statuses", statuses)
+                registered.append("incoming_statuses")
             if checkpoints is not None and not checkpoints.empty:
-                self._register_and_execute(
-                    conn,
-                    checkpoints,
-                    """
-                    DELETE FROM pipeline_checkpoints
-                    WHERE EXISTS (
-                        SELECT 1
-                        FROM incoming
-                        WHERE incoming.pipeline = pipeline_checkpoints.pipeline
-                          AND incoming.dataset = pipeline_checkpoints.dataset
-                          AND incoming.code = pipeline_checkpoints.code
-                          AND incoming.start_date = pipeline_checkpoints.start_date
-                          AND incoming.end_date = pipeline_checkpoints.end_date
+                conn.register("incoming_checkpoints", checkpoints)
+                registered.append("incoming_checkpoints")
+
+            conn.execute("BEGIN TRANSACTION")
+            try:
+                if runs is not None and not runs.empty:
+                    conn.execute("INSERT INTO pipeline_runs SELECT * FROM incoming_runs")
+                if statuses is not None and not statuses.empty:
+                    conn.execute(
+                        """
+                        DELETE FROM dataset_update_status
+                        WHERE EXISTS (
+                            SELECT 1
+                            FROM incoming_statuses
+                            WHERE incoming_statuses.dataset = dataset_update_status.dataset
+                              AND incoming_statuses.code = dataset_update_status.code
+                        )
+                        """
                     )
-                    """,
-                    "INSERT INTO pipeline_checkpoints SELECT * FROM incoming",
-                )
+                    conn.execute("INSERT INTO dataset_update_status SELECT * FROM incoming_statuses")
+                if checkpoints is not None and not checkpoints.empty:
+                    conn.execute(
+                        """
+                        DELETE FROM pipeline_checkpoints
+                        WHERE EXISTS (
+                            SELECT 1
+                            FROM incoming_checkpoints
+                            WHERE incoming_checkpoints.pipeline = pipeline_checkpoints.pipeline
+                              AND incoming_checkpoints.dataset = pipeline_checkpoints.dataset
+                              AND incoming_checkpoints.code = pipeline_checkpoints.code
+                              AND incoming_checkpoints.start_date = pipeline_checkpoints.start_date
+                              AND incoming_checkpoints.end_date = pipeline_checkpoints.end_date
+                        )
+                        """
+                    )
+                    conn.execute("INSERT INTO pipeline_checkpoints SELECT * FROM incoming_checkpoints")
+            except Exception:
+                conn.execute("ROLLBACK")
+                raise
+            conn.execute("COMMIT")
+        finally:
+            for table_name in registered:
+                conn.unregister(table_name)
 
     def read_pipeline_runs(self) -> pd.DataFrame:
         with self._connection() as conn:
@@ -287,6 +315,10 @@ def _clean_dataframe_for_schema(df: pd.DataFrame, schema: pa.Schema) -> pd.DataF
         series = df[field.name] if field.name in df.columns else pd.Series(pd.NA, index=df.index, name=field.name)
         cleaned[field.name] = _coerce_series(series, field.type)
     return cleaned.reset_index(drop=True)
+
+
+def _is_empty_frame(df: pd.DataFrame | None) -> bool:
+    return df is None or df.empty
 
 
 def _coerce_series(series: pd.Series, arrow_type: pa.DataType) -> pd.Series:

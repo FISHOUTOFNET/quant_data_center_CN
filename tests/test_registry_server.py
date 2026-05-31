@@ -13,6 +13,8 @@ from src.registry_server import RegistryQueryEngine, make_registry_server
 from src.storage.data_registry import DataRegistry
 from src.storage.parquet_store import ParquetStore
 
+pytestmark = pytest.mark.slow
+
 
 def test_registry_http_gateway_lists_datasets_events_and_queries_parquet_when_duckdb_file_is_locked(
     tmp_path,

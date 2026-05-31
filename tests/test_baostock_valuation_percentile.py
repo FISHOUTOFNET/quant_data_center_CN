@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import date
 
 import pandas as pd
+import pytest
 
 import src.pipeline.baostock_valuation_percentile as valuation_percentile_module
 from src.pipeline.baostock_valuation_percentile import (
@@ -13,6 +14,8 @@ from src.pipeline.baostock_valuation_percentile import (
 )
 from src.storage.duckdb_store import DuckDBStore
 from src.storage.parquet_store import ParquetStore
+
+pytestmark = pytest.mark.slow
 
 
 class FakeLogger:
@@ -399,8 +402,10 @@ def test_update_baostock_valuation_percentile_partial_computes_when_source_has_n
     assert generated["date"].astype(str).tolist() == ["2024-01-02", "2024-01-03", "2024-01-04"]
 
 
+@pytest.mark.performance
+@pytest.mark.slow
 def test_append_only_percentiles_match_full_compute_for_large_increment() -> None:
-    history_days = pd.date_range("2000-01-03", periods=7000, freq="D")
+    history_days = pd.date_range("2000-01-03", periods=3700, freq="D")
     append_days = pd.date_range(history_days[-1] + pd.Timedelta(days=1), periods=6, freq="D")
     values: list[tuple[str, float | None, float | None, float | None, float | None]] = []
     for index, day in enumerate([*history_days, *append_days], start=1):

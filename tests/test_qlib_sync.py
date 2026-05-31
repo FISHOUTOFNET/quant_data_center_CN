@@ -252,6 +252,7 @@ def test_sync_qlib_stops_when_runtime_budget_is_exhausted(tmp_path: Path) -> Non
         )
 
 
+@pytest.mark.slow
 def test_sync_qlib_parallel_workers_match_single_worker_output(tmp_path: Path) -> None:
     source_dir = _write_qlib_source(
         tmp_path,

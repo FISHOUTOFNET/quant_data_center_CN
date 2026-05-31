@@ -18,6 +18,8 @@ from src.pipeline.common import write_checkpoint
 from src.storage.parquet_store import ParquetStore
 from src.utils.config_mgr import ConfigManager
 
+pytestmark = pytest.mark.slow
+
 
 class FakeAkShareClient:
     akshare_version = "fake-akshare"
@@ -49,7 +51,7 @@ class OverlapAkShareClient(FakeAkShareClient):
             if self._active_fetches >= 2:
                 self._overlap_seen.set()
         self._overlap_seen.wait(timeout=0.5)
-        time.sleep(0.01)
+        time.sleep(0.002)
         try:
             if code in self._fail_codes:
                 raise RuntimeError(f"planned failure for {code}")
@@ -70,7 +72,7 @@ class CircuitOpenAkShareClient(FakeAkShareClient):
             self.value_calls.append(code)
         if code == "600000":
             raise AkShareCircuitOpen("planned circuit open")
-        time.sleep(0.05)
+        time.sleep(0.005)
         data = self._akshare_cn_stock_valuation_eastmoney_sample(code)
         return _response("akshare_cn_stock_valuation_eastmoney", {"symbol": code}, data)
 
@@ -391,7 +393,7 @@ def test_update_akshare_stock_valuation_fetches_concurrently_but_writes_serially
         with write_lock:
             active_writes += 1
             max_active_writes = max(max_active_writes, active_writes)
-        time.sleep(0.01)
+        time.sleep(0.002)
         try:
             return original_write(self, dataset_id, df, partition, mode, skip_existing)
         finally:

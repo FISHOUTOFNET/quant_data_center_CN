@@ -229,7 +229,11 @@ def resolve_codes(
     return codes
 
 
-def baostock_cn_stock_basic_codes(store: ParquetStore, mode: str = "all", security_type: str | None = None) -> list[str]:
+def baostock_cn_stock_basic_codes(
+    store: ParquetStore,
+    mode: str = "all",
+    security_type: str | None = None,
+) -> list[str]:
     df = store.read_dataset("baostock_cn_stock_basic")
     if df.empty:
         return []

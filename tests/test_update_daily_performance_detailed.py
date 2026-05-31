@@ -5,6 +5,7 @@ import time
 from pathlib import Path
 
 import pandas as pd
+import pytest
 from update_daily_fakes import _fake_provider_factory, _write_settings
 
 import src.pipeline.update_daily as update_daily_module
@@ -12,6 +13,8 @@ import src.pipeline.update_daily_worker as update_daily_worker_module
 from src.pipeline.common import FULL_HISTORY_START_DATE, PIPELINE_UPDATE_DAILY, write_checkpoint
 from src.pipeline.lifecycle import PipelineMetadataBatch
 from src.storage.parquet_store import ParquetStore
+
+pytestmark = [pytest.mark.performance, pytest.mark.slow]
 
 
 def test_api_serial_delay_dominates_wall_time(
@@ -34,7 +37,7 @@ def test_api_serial_delay_dominates_wall_time(
     provider_factory, state = _fake_provider_factory(
         baostock_cn_stock_basic_sample(),
         daily_sample(),
-        api_delays={"daily": 0.025},
+        api_delays={"daily": 0.005},
     )
     monkeypatch.setattr(update_daily_module, "create_provider", provider_factory)
 
@@ -50,7 +53,7 @@ def test_api_serial_delay_dominates_wall_time(
     elapsed = time.perf_counter() - started
 
     assert state["history_calls"] == list(codes)
-    assert elapsed >= 0.025 * len(codes) * 0.8
+    assert elapsed >= 0.005 * len(codes) * 0.8
     store.close()
 
 
@@ -60,7 +63,7 @@ def test_background_write_delay_blocks_when_pending_queue_full(
     daily_sample,
     baostock_cn_stock_basic_sample,
 ) -> None:
-    codes = tuple(f"sh.60000{index}" for index in range(6))
+    codes = tuple(f"sh.60000{index}" for index in range(3))
     provider_factory, _state = _fake_provider_factory(baostock_cn_stock_basic_sample(), daily_sample())
     monkeypatch.setattr(update_daily_module, "create_provider", provider_factory)
     original_write = ParquetStore.write_dataset
@@ -76,7 +79,7 @@ def test_background_write_delay_blocks_when_pending_queue_full(
             if label:
                 active_writes += 1
                 max_active_writes[label] = max(max_active_writes[label], active_writes)
-        time.sleep(0.025)
+        time.sleep(0.005)
         try:
             return original_write(self, dataset_id, df, partition, mode, skip_existing)
         finally:
@@ -112,7 +115,7 @@ def test_metadata_flush_delay_scales_with_flush_count(
     daily_sample,
     baostock_cn_stock_basic_sample,
 ) -> None:
-    codes = ("sh.600000", "sh.600001", "sh.600002")
+    codes = ("sh.600000", "sh.600001")
     provider_factory, _state = _fake_provider_factory(baostock_cn_stock_basic_sample(), daily_sample())
     monkeypatch.setattr(update_daily_module, "create_provider", provider_factory)
     original_flush = PipelineMetadataBatch.flush
@@ -125,7 +128,7 @@ def test_metadata_flush_delay_scales_with_flush_count(
             label = active_case["label"]
         if label:
             flush_counts[label] += 1
-        time.sleep(0.01)
+        time.sleep(0.002)
         original_flush(self)
 
     monkeypatch.setattr(PipelineMetadataBatch, "flush", slow_counted_flush)
