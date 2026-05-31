@@ -1,0 +1,92 @@
+project:
+  name: quant_data_center
+  timezone: Asia/Shanghai
+
+paths:
+  data_dir: data
+  parquet_dir: data/parquet
+  metadata_dir: data/metadata
+  duckdb_dir: data/duckdb
+  logs_dir: logs
+
+api:
+  provider: baostock
+  baostock:
+    timeout_seconds: 60
+    max_rows_per_result: 200000
+    adjust_flag_map:
+      unadjusted: "3"
+      qfq: "1"
+      hfq: "2"
+  akshare:
+    max_retries: 3
+    call_timeout_seconds: 120
+    workers: 3
+    jitter_seconds: [1, 5]
+    endpoints:
+      stock_value_em:
+        source: eastmoney
+        failure_threshold: 5
+        cooldown_minutes: 30
+      stock_zh_a_gbjg_em:
+        source: eastmoney
+        failure_threshold: 3
+        cooldown_minutes: 30
+      stock_info_sh_delist:
+        source: sse
+        failure_threshold: 3
+        cooldown_minutes: 30
+      stock_info_sz_delist:
+        source: szse
+        failure_threshold: 3
+        cooldown_minutes: 30
+      stock_zh_a_spot_em:
+        source: eastmoney
+        failure_threshold: 3
+        cooldown_minutes: 30
+      stock_zh_a_spot:
+        source: sina
+        failure_threshold: 1
+        cooldown_minutes: 180
+      stock_zh_a_hist:
+        source: eastmoney
+        failure_threshold: 5
+        cooldown_minutes: 30
+
+datasets:
+  daily_bar:
+    names:
+      - baostock_cn_stock_daily_bar_unadjusted
+      - baostock_cn_stock_daily_bar_qfq
+      - baostock_cn_stock_daily_bar_hfq
+    fields: "date,code,open,high,low,close,prev_close,volume,amount,adjust_flag,turnover_rate,trade_status,pct_change,pe_ttm,pb_mrq,ps_ttm,pcf_ncf_ttm,is_st"
+    frequency: d
+  baostock_cn_stock_basic:
+    fields: "code,name,ipo_date,delist_date,security_type,listing_status"
+  baostock_cn_trading_calendar:
+    fields: "calendar_date,is_trading_day"
+  baostock_cn_stock_adjustment_factor:
+    fields: "code,dividend_operate_date,forward_adjust_factor,backward_adjust_factor,adjustment_factor"
+  akshare_cn_stock_valuation_eastmoney:
+    active_only: true
+  akshare_cn_stock_capital_structure_em:
+    active_only: true
+  akshare_cn_stock_daily_bar:
+    default_adjustments: ["unadjusted"]
+    full_start: "1990-01-01"
+  akshare_cn_stock_spot_quote:
+    update_daily_bar_from_spot: true
+
+pipeline:
+  lookback_days: 10
+  max_retries: 3
+  default_code: sh.600000
+  metadata_flush_size: 200
+  background_workers: 4
+  qlib_sync_workers: 4
+
+storage:
+  duckdb_file: data/duckdb/quant.duckdb
+
+logging:
+  file: logs/qdc.log

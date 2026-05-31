@@ -1,0 +1,84 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Local environments
+.env
+.venv/
+venv/
+env/
+
+# Runtime data
+data/
+logs/
+
+# Editors / OS
+.idea/
+.vscode/
+Thumbs.db
+.DS_Store
+
+# ====================
+# 数据库文件
+# ====================
+*.duckdb
+*.db
+
+# ====================
+# 数据文件
+# ====================
+*.csv
+*.parquet
+*.feather
+*.pickle
+*.h5
+*.hdf5
+
+# ====================
+# 凭据和密钥
+# ====================
+*.pem
+*.key
+credentials.*
+secrets.*
+*.token
+
+# ====================
+# 构建和分发
+# ====================
+dist/
+build/
+*.whl
+*.egg
+*.tar.gz
+
+# ====================
+# 测试覆盖率
+# ====================
+htmlcov/
+.coverage
+coverage.xml
+*.cover
+
+# ====================
+# 临时文件
+# ====================
+*.tmp
+*.bak
+*.swp
+*.log
+tmp/
+
+# ====================
+# Jupyter Notebook
+# ====================
+.ipynb_checkpoints/
+
+# ====================
+# AI Agent 配置 (可选)
+# ====================
+.agents/

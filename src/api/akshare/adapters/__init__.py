@@ -1,0 +1,1 @@
+"""AkShare endpoint adapters."""
