@@ -12,6 +12,7 @@ from src.api.akshare.adapters.report_disclosure import ReportDisclosureAdapter
 from src.api.akshare.adapters.spot_quote_eastmoney import SpotQuoteEastmoneyAdapter
 from src.api.akshare.adapters.spot_quote_sina import SpotQuoteSinaAdapter
 from src.api.akshare.adapters.valuation_eastmoney import ValuationEastmoneyAdapter
+from src.api.akshare.adapters.yysj_em import YysjEmAdapter
 from src.api.akshare_client import AkShareEmptyDataError
 
 
@@ -332,3 +333,45 @@ def test_report_disclosure_adapter_treats_akshare_empty_history_error_as_empty()
     assert isinstance(raw, pd.DataFrame)
     assert raw.empty
     assert mapped.empty
+
+
+def test_yysj_em_adapter_maps_fields_and_empty_schema() -> None:
+    adapter = YysjEmAdapter(
+        symbol="沪深A股",
+        period="2025年报",
+        fetched_at=datetime(2026, 1, 2, 9, 0),
+    )
+    raw = pd.DataFrame(
+        [
+            {
+                "股票代码": "000001",
+                "股票简称": "平安银行",
+                "首次预约时间": "2026-03-15",
+                "一次变更日期": "",
+                "二次变更日期": None,
+                "三次变更日期": "2026-04-10",
+                "实际披露时间": "2026-04-20",
+            }
+        ]
+    )
+
+    mapped = adapter.normalize(raw)
+    empty = adapter.normalize(pd.DataFrame())
+
+    assert adapter.endpoint == "stock_yysj_em"
+    assert adapter.params == {"symbol": "沪深A股", "date": "20251231"}
+    assert adapter.call(type("FakeAk", (), {"stock_yysj_em": staticmethod(lambda symbol, date: (symbol, date))})) == (
+        "沪深A股",
+        "20251231",
+    )
+    assert mapped.loc[0, "report_period"] == "2025年报"
+    assert str(mapped.loc[0, "period_end_date"]) == "2025-12-31"
+    assert mapped.loc[0, "symbol"] == "沪深A股"
+    assert mapped.loc[0, "code"] == "000001"
+    assert mapped.loc[0, "name"] == "平安银行"
+    assert str(mapped.loc[0, "first_scheduled_date"]) == "2026-03-15"
+    assert pd.isna(mapped.loc[0, "first_changed_date"])
+    assert str(mapped.loc[0, "third_changed_date"]) == "2026-04-10"
+    assert mapped.loc[0, "source_endpoint"] == "stock_yysj_em"
+    assert list(empty.columns) == list(mapped.columns)
+    assert empty.empty

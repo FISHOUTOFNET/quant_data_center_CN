@@ -17,6 +17,7 @@ from src.storage.schema import (
     AKSHARE_SPOT_QUOTE_SINA_SCHEMA,
     AKSHARE_STOCK_INSTITUTION_HOLDING_SCHEMA,
     AKSHARE_VALUATION_EASTMONEY_SCHEMA,
+    AKSHARE_YYSJ_EM_SCHEMA,
     BAOSTOCK_CN_STOCK_ADJUSTMENT_FACTOR_SCHEMA,
     BAOSTOCK_CN_STOCK_BASIC_SCHEMA,
     BAOSTOCK_CN_TRADING_CALENDAR_SCHEMA,
@@ -277,6 +278,12 @@ def validate_akshare_cn_stock_report_disclosure(
     validate_schema_matches(df, schema)
     validate_akshare_six_digit_codes(df)
     validate_unique_columns(df, ["report_period", "code"])
+
+
+def validate_akshare_cn_stock_yysj_em(df: pd.DataFrame, schema: pa.Schema = AKSHARE_YYSJ_EM_SCHEMA) -> None:
+    validate_schema_matches(df, schema)
+    validate_akshare_six_digit_codes(df)
+    validate_unique_columns(df, ["report_period", "symbol", "code"])
 
 
 def validate_akshare_cn_stock_daily_bar(df: pd.DataFrame, schema: pa.Schema = AKSHARE_DAILY_BAR_SCHEMA) -> None:

@@ -18,6 +18,7 @@ from src.api.akshare.adapters.report_disclosure import ReportDisclosureAdapter
 from src.api.akshare.adapters.spot_quote_eastmoney import SpotQuoteEastmoneyAdapter
 from src.api.akshare.adapters.spot_quote_sina import SpotQuoteSinaAdapter
 from src.api.akshare.adapters.valuation_eastmoney import ValuationEastmoneyAdapter
+from src.api.akshare.adapters.yysj_em import YysjEmAdapter
 from src.api.akshare.errors import (
     AkShareCircuitOpen,
     AkShareEmptyDataError,
@@ -111,6 +112,16 @@ class AkShareClient:
             raise ValueError("stock_report_disclosure requires period")
         adapter = ReportDisclosureAdapter(
             market=market,
+            period=period,
+            fetched_at=self._now(),
+        )
+        return self._fetch_adapter(adapter)
+
+    def fetch_yysj_em(self, symbol: str = "沪深A股", period: str | None = None) -> AkShareResponse:
+        if period is None:
+            raise ValueError("stock_yysj_em requires period")
+        adapter = YysjEmAdapter(
+            symbol=symbol,
             period=period,
             fetched_at=self._now(),
         )

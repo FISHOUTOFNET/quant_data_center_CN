@@ -316,6 +316,7 @@ def _modules_for_target(target: str) -> Iterable[AkShareDatasetModule]:
     from src.pipeline.akshare.modules.report_disclosure import ReportDisclosureModule
     from src.pipeline.akshare.modules.spot_quote import SpotQuoteModule
     from src.pipeline.akshare.modules.valuation_eastmoney import ValuationEastmoneyModule
+    from src.pipeline.akshare.modules.yysj_em import YysjEmModule
 
     registry: dict[str, AkShareDatasetModule] = {
         "valuation": ValuationEastmoneyModule(),
@@ -324,6 +325,7 @@ def _modules_for_target(target: str) -> Iterable[AkShareDatasetModule]:
         "spot_quote": SpotQuoteModule(),
         "delist": DelistModule(),
         "report_disclosure": ReportDisclosureModule(),
+        "yysj_em": YysjEmModule(),
     }
     if target == "all":
         return [
@@ -332,6 +334,7 @@ def _modules_for_target(target: str) -> Iterable[AkShareDatasetModule]:
             registry["delist"],
             registry["spot_quote"],
             registry["report_disclosure"],
+            registry["yysj_em"],
             registry["daily_bar"],
         ]
     try:
@@ -348,13 +351,14 @@ def _validate_request(request: AkShareUpdateRequest) -> None:
         "spot_quote",
         "delist",
         "report_disclosure",
+        "yysj_em",
         "all",
     }:
         raise ValueError(f"Unsupported AkShare update target: {request.target}")
     if request.adjustment is not None and request.target != "daily_bar":
         raise ValueError("--adjustment is only valid for --target daily_bar")
-    if request.period and request.target != "report_disclosure":
-        raise ValueError("--period is only valid for --target report_disclosure")
+    if request.period and request.target not in {"report_disclosure", "yysj_em"}:
+        raise ValueError("--period is only valid for --target report_disclosure or yysj_em")
 
 
 def _call_optional(module: AkShareDatasetModule, name: str, *args: Any) -> Any:

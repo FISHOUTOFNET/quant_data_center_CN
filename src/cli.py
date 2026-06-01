@@ -63,7 +63,7 @@ def akshare() -> None:
 @click.option(
     "--target",
     type=click.Choice(
-        ["valuation", "capital_structure", "daily_bar", "spot_quote", "delist", "report_disclosure", "all"]
+        ["valuation", "capital_structure", "daily_bar", "spot_quote", "delist", "report_disclosure", "yysj_em", "all"]
     ),
     default="valuation",
     show_default=True,

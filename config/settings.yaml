@@ -52,6 +52,10 @@ api:
         source: cninfo
         failure_threshold: 3
         cooldown_minutes: 30
+      stock_yysj_em:
+        source: eastmoney
+        failure_threshold: 3
+        cooldown_minutes: 30
       stock_zh_a_hist:
         source: eastmoney
         failure_threshold: 5
@@ -82,6 +86,8 @@ datasets:
     update_daily_bar_from_spot: true
   akshare_cn_stock_report_disclosure:
     full_start_year: 1990
+  akshare_cn_stock_yysj_em:
+    full_start_year: 2008
 
 pipeline:
   lookback_days: 10

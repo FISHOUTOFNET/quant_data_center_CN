@@ -25,6 +25,7 @@
 - `akshare_cn_stock_daily_bar_unadjusted`
 - `akshare_cn_stock_capital_structure_em`
 - `akshare_cn_stock_report_disclosure`
+- `akshare_cn_stock_yysj_em`
 - `akshare_cn_stock_spot_quote_eastmoney`
 - `akshare_cn_stock_delist_sz`
 - `akshare_cn_stock_institution_holding` (`legacy_unmanaged`)
@@ -39,6 +40,7 @@
 - AkShare 估值：`stock_value_em`
 - AkShare 股本结构：`stock_zh_a_gbjg_em`
 - AkShare 预约披露时间：`stock_report_disclosure`
+- AkShare 预约披露时间-东方财富：`stock_yysj_em`
 - AkShare spot：`stock_zh_a_spot_em`、`stock_zh_a_spot`
 - AkShare 日线：`stock_zh_a_hist`
 - Baostock 日线：`query_history_k_data_plus`

@@ -53,6 +53,7 @@ def test_run_update_daily_bat_orders_daily_and_weekend_updates() -> None:
     )
     valuation = "python -m src.cli akshare update --target valuation --mode full --no-build-duckdb-views"
     report_disclosure = "python -m src.cli akshare update --target report_disclosure --no-build-duckdb-views"
+    yysj_em = "python -m src.cli akshare update --target yysj_em --no-build-duckdb-views"
     hist = "python -m src.cli akshare update --target daily_bar --mode incremental --adjustment all --start %QDC_HIST_START% --no-build-duckdb-views"
     qlib = "python -m src.cli sync-qlib --no-build-duckdb-views --max-runtime-seconds 7200"
     build_views = "python -m src.cli build-duckdb-views"
@@ -76,13 +77,15 @@ def test_run_update_daily_bat_orders_daily_and_weekend_updates() -> None:
     assert text.index(baostock_hfq) < text.index(valuation)
     assert text.index(baostock_basic) < text.index(valuation)
     assert text.index(valuation) < text.index(report_disclosure)
-    assert text.index(report_disclosure) < text.index(hist)
+    assert text.index(report_disclosure) < text.index(yysj_em)
+    assert text.index(yysj_em) < text.index(hist)
     assert text.index(hist) < text.index(qlib)
     assert text.index(qlib) < text.index(build_views)
     assert text.index(hist) < text.index(build_views)
 
     assert text.count(hist) == 1
     assert text.count(report_disclosure) == 1
+    assert text.count(yysj_em) == 1
     assert text.count(qlib) == 1
     assert text.count(baostock_adjustment_factor) == 1
     assert "--target capital_structure" not in text
@@ -91,6 +94,7 @@ def test_run_update_daily_bat_orders_daily_and_weekend_updates() -> None:
     assert 'if "%QDC_WEEKEND_WINDOW%"=="1" (' in text
     assert text.index('if "%QDC_WEEKEND_WINDOW%"=="1" (') < text.index(hist)
     assert text.index('if "%QDC_WEEKEND_WINDOW%"=="1" (') < text.index(report_disclosure)
+    assert text.index('if "%QDC_WEEKEND_WINDOW%"=="1" (') < text.index(yysj_em)
     assert text.index('if "%QDC_WEEKEND_WINDOW%"=="1" (') < text.index(baostock_adjustment_factor)
 
 
