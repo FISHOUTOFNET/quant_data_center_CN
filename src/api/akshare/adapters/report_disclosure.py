@@ -43,7 +43,12 @@ class ReportDisclosureAdapter:
         return {"market": self.market, "period": self.period}
 
     def call(self, ak_module: Any) -> object:
-        return ak_module.stock_report_disclosure(market=self.market, period=self.period)
+        try:
+            return ak_module.stock_report_disclosure(market=self.market, period=self.period)
+        except ValueError as exc:
+            if _is_akshare_empty_history_error(exc):
+                return pd.DataFrame()
+            raise
 
     def normalize(self, source_df: pd.DataFrame) -> pd.DataFrame:
         source_df = standardize_columns(source_df)
@@ -78,3 +83,12 @@ def report_period_end_date(period: str) -> date:
     if not year.isdigit() or suffix not in REPORT_PERIOD_END_DATES:
         raise ValueError(f"Unsupported report disclosure period: {period}")
     return datetime.strptime(f"{year}-{REPORT_PERIOD_END_DATES[suffix]}", "%Y-%m-%d").date()
+
+
+def _is_akshare_empty_history_error(exc: ValueError) -> bool:
+    message = str(exc)
+    return (
+        "Length mismatch" in message
+        and "Expected axis has 0 elements" in message
+        and "new values have 10 elements" in message
+    )

@@ -15,7 +15,7 @@
 - `source` 使用数据源名：`baostock`、`akshare`、`qlib`。
 - `market` 使用市场范围：当前为 `cn`。
 - `asset` 使用资产类型：当前为 `stock`，交易日历可省略 asset，使用 `baostock_cn_trading_calendar`。
-- `subject` 使用业务对象：`daily_bar`、`spot_quote`、`valuation`、`valuation_percentile`、`adjustment_factor`、`capital_structure`、`basic`、`delist`、`calendar_day`、`instrument_membership`、`features_day`。
+- `subject` 使用业务对象：`daily_bar`、`spot_quote`、`valuation`、`valuation_percentile`、`adjustment_factor`、`capital_structure`、`report_disclosure`、`basic`、`delist`、`calendar_day`、`instrument_membership`、`features_day`。
 - `variant` 用于复权口径、交易所或来源：`unadjusted`、`qfq`、`hfq`、`eastmoney`、`sina`、`sh`、`sz`。
 
 示例：
@@ -24,6 +24,7 @@
 - `baostock_cn_stock_valuation_percentile`
 - `akshare_cn_stock_daily_bar_unadjusted`
 - `akshare_cn_stock_capital_structure_em`
+- `akshare_cn_stock_report_disclosure`
 - `akshare_cn_stock_spot_quote_eastmoney`
 - `akshare_cn_stock_delist_sz`
 - `akshare_cn_stock_institution_holding` (`legacy_unmanaged`)
@@ -37,6 +38,7 @@
 
 - AkShare 估值：`stock_value_em`
 - AkShare 股本结构：`stock_zh_a_gbjg_em`
+- AkShare 预约披露时间：`stock_report_disclosure`
 - AkShare spot：`stock_zh_a_spot_em`、`stock_zh_a_spot`
 - AkShare 日线：`stock_zh_a_hist`
 - Baostock 日线：`query_history_k_data_plus`

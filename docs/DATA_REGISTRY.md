@@ -42,6 +42,8 @@ GET http://127.0.0.1:8765/v1/datasets/akshare_cn_stock_daily_bar_unadjusted
 
 The dataset detail combines catalog metadata with current inventory fields such as lifecycle, partition column, row count, date bounds, latest partition, and latest pipeline status.
 
+Datasets that do not partition by stock code use their own catalog partition column. For example, `akshare_cn_stock_report_disclosure` partitions by `report_period` because AkShare fetches it by `market + period` instead of looping `code`.
+
 List partitions:
 
 ```http
@@ -49,6 +51,10 @@ GET http://127.0.0.1:8765/v1/datasets/akshare_cn_stock_daily_bar_unadjusted/part
 ```
 
 Partition rows include partition value, row count, file path, and file modification time.
+
+```http
+GET http://127.0.0.1:8765/v1/datasets/akshare_cn_stock_report_disclosure/partitions
+```
 
 ## Events
 

@@ -312,3 +312,23 @@ def test_report_disclosure_adapter_maps_fields_and_empty_schema() -> None:
     assert mapped.loc[0, "source_endpoint"] == "stock_report_disclosure"
     assert list(empty.columns) == list(mapped.columns)
     assert empty.empty
+
+
+def test_report_disclosure_adapter_treats_akshare_empty_history_error_as_empty() -> None:
+    class EmptyHistoryAkModule:
+        @staticmethod
+        def stock_report_disclosure(*, market: str, period: str) -> pd.DataFrame:
+            raise ValueError("Length mismatch: Expected axis has 0 elements, new values have 10 elements")
+
+    adapter = ReportDisclosureAdapter(
+        market="\u6caa\u6df1\u4eac",
+        period="1990\u4e00\u5b63",
+        fetched_at=datetime(2026, 1, 2, 9, 0),
+    )
+
+    raw = adapter.call(EmptyHistoryAkModule())
+    mapped = adapter.normalize(raw)
+
+    assert isinstance(raw, pd.DataFrame)
+    assert raw.empty
+    assert mapped.empty
