@@ -56,6 +56,9 @@ def test_run_update_daily_bat_orders_daily_and_weekend_updates() -> None:
     yysj_em = "python -m src.cli akshare update --target yysj_em --no-build-duckdb-views"
     hist = "python -m src.cli akshare update --target daily_bar --mode incremental --adjustment all --start %QDC_HIST_START% --no-build-duckdb-views"
     qlib = "python -m src.cli sync-qlib --no-build-duckdb-views --max-runtime-seconds 7200"
+    financial_report = (
+        "python -m src.cli akshare update --target financial_report --mode incremental --no-build-duckdb-views"
+    )
     build_views = "python -m src.cli build-duckdb-views"
 
     assert text.index(calendar) < text.index(spot)
@@ -80,12 +83,14 @@ def test_run_update_daily_bat_orders_daily_and_weekend_updates() -> None:
     assert text.index(report_disclosure) < text.index(yysj_em)
     assert text.index(yysj_em) < text.index(hist)
     assert text.index(hist) < text.index(qlib)
-    assert text.index(qlib) < text.index(build_views)
+    assert text.index(qlib) < text.index(financial_report)
+    assert text.index(financial_report) < text.index(build_views)
     assert text.index(hist) < text.index(build_views)
 
     assert text.count(hist) == 1
     assert text.count(report_disclosure) == 1
     assert text.count(yysj_em) == 1
+    assert text.count(financial_report) == 1
     assert text.count(qlib) == 1
     assert text.count(baostock_adjustment_factor) == 1
     assert "--target capital_structure" not in text
@@ -96,6 +101,7 @@ def test_run_update_daily_bat_orders_daily_and_weekend_updates() -> None:
     assert text.index('if "%QDC_WEEKEND_WINDOW%"=="1" (') < text.index(report_disclosure)
     assert text.index('if "%QDC_WEEKEND_WINDOW%"=="1" (') < text.index(yysj_em)
     assert text.index('if "%QDC_WEEKEND_WINDOW%"=="1" (') < text.index(baostock_adjustment_factor)
+    assert ')\n\ncall :run_step "akshare update financial_report incremental"' in text
 
 
 def test_run_update_daily_bat_logs_each_run_and_preserves_exit_codes() -> None:

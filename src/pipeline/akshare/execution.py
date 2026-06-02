@@ -130,7 +130,9 @@ def update_akshare(request: AkShareUpdateRequest) -> list[dict[str, object]]:
     config = ConfigManager(request.root)
     store = ParquetStore(root=config.root)
     store.ensure_layout()
-    checkpoint_lookup = PipelineCheckpointLookup.from_store(store) if request.resume and not request.force else None
+    checkpoint_lookup = None
+    if request.resume and not request.force and _uses_checkpoint_lookup(request):
+        checkpoint_lookup = PipelineCheckpointLookup.from_store(store)
     owns_client = request.client is None
     client = request.client or (
         request.client_factory(config) if request.client_factory is not None else AkShareClient(config=config)
@@ -313,6 +315,7 @@ def _modules_for_target(target: str) -> Iterable[AkShareDatasetModule]:
     from src.pipeline.akshare.modules.capital_structure_em import CapitalStructureEmModule
     from src.pipeline.akshare.modules.daily_bar import DailyBarModule
     from src.pipeline.akshare.modules.delist import DelistModule
+    from src.pipeline.akshare.modules.financial_report_sina import FinancialReportSinaModule
     from src.pipeline.akshare.modules.report_disclosure import ReportDisclosureModule
     from src.pipeline.akshare.modules.spot_quote import SpotQuoteModule
     from src.pipeline.akshare.modules.valuation_eastmoney import ValuationEastmoneyModule
@@ -326,6 +329,7 @@ def _modules_for_target(target: str) -> Iterable[AkShareDatasetModule]:
         "delist": DelistModule(),
         "report_disclosure": ReportDisclosureModule(),
         "yysj_em": YysjEmModule(),
+        "financial_report": FinancialReportSinaModule(),
     }
     if target == "all":
         return [
@@ -335,6 +339,7 @@ def _modules_for_target(target: str) -> Iterable[AkShareDatasetModule]:
             registry["spot_quote"],
             registry["report_disclosure"],
             registry["yysj_em"],
+            registry["financial_report"],
             registry["daily_bar"],
         ]
     try:
@@ -352,6 +357,7 @@ def _validate_request(request: AkShareUpdateRequest) -> None:
         "delist",
         "report_disclosure",
         "yysj_em",
+        "financial_report",
         "all",
     }:
         raise ValueError(f"Unsupported AkShare update target: {request.target}")
@@ -359,6 +365,10 @@ def _validate_request(request: AkShareUpdateRequest) -> None:
         raise ValueError("--adjustment is only valid for --target daily_bar")
     if request.period and request.target not in {"report_disclosure", "yysj_em"}:
         raise ValueError("--period is only valid for --target report_disclosure or yysj_em")
+
+
+def _uses_checkpoint_lookup(request: AkShareUpdateRequest) -> bool:
+    return not (request.target == "financial_report" and request.mode == "full")
 
 
 def _call_optional(module: AkShareDatasetModule, name: str, *args: Any) -> Any:

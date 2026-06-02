@@ -384,6 +384,41 @@ def test_akshare_cli_accepts_yysj_em_periods(monkeypatch) -> None:
     assert "akshare_cn_stock_yysj_em 沪深A股 status=success rows=1" in result.output
 
 
+def test_akshare_cli_accepts_financial_report_target(monkeypatch) -> None:
+    captured = {}
+
+    def fake_update(request):
+        captured["target"] = request.target
+        captured["mode"] = request.mode
+        return [
+            {
+                "dataset": "akshare_cn_stock_financial_report_sina",
+                "code": "600000",
+                "status": "success",
+                "row_count": 1,
+            }
+        ]
+
+    monkeypatch.setattr("src.cli.run_update_akshare", fake_update)
+
+    result = CliRunner().invoke(
+        cli_module.cli,
+        [
+            "akshare",
+            "update",
+            "--target",
+            "financial_report",
+            "--mode",
+            "incremental",
+            "--no-build-duckdb-views",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert captured == {"target": "financial_report", "mode": "incremental"}
+    assert "akshare_cn_stock_financial_report_sina 600000 status=success rows=1" in result.output
+
+
 def test_akshare_cli_rejects_period_for_non_report_disclosure_target() -> None:
     result = CliRunner().invoke(
         cli_module.cli,

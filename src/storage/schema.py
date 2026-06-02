@@ -228,6 +228,27 @@ AKSHARE_YYSJ_EM_SCHEMA = pa.schema(
     ]
 )
 
+AKSHARE_FINANCIAL_REPORT_SINA_SCHEMA = pa.schema(
+    [
+        pa.field("code", pa.string()),
+        pa.field("source_symbol", pa.string()),
+        pa.field("report_type", pa.string()),
+        pa.field("report_date", pa.date32()),
+        pa.field("period_end_date", pa.date32()),
+        pa.field("item_name", pa.string()),
+        pa.field("item_value", pa.float64()),
+        pa.field("item_value_text", pa.string()),
+        pa.field("data_source", pa.string()),
+        pa.field("is_audit", pa.string()),
+        pa.field("publish_date", pa.date32()),
+        pa.field("currency", pa.string()),
+        pa.field("report_kind", pa.string()),
+        pa.field("source_update_time", pa.timestamp("ms")),
+        pa.field("source_endpoint", pa.string()),
+        pa.field("fetched_at", pa.timestamp("ms")),
+    ]
+)
+
 AKSHARE_DAILY_BAR_SCHEMA = pa.schema(
     [
         pa.field("date", pa.date32()),
@@ -365,6 +386,7 @@ DATASET_SCHEMAS: Mapping[str, pa.Schema] = {
     "akshare_cn_stock_spot_quote_sina": AKSHARE_SPOT_QUOTE_SINA_SCHEMA,
     "akshare_cn_stock_report_disclosure": AKSHARE_REPORT_DISCLOSURE_SCHEMA,
     "akshare_cn_stock_yysj_em": AKSHARE_YYSJ_EM_SCHEMA,
+    "akshare_cn_stock_financial_report_sina": AKSHARE_FINANCIAL_REPORT_SINA_SCHEMA,
     "akshare_cn_stock_daily_bar_unadjusted": AKSHARE_DAILY_BAR_SCHEMA,
     "akshare_cn_stock_daily_bar_qfq": AKSHARE_DAILY_BAR_SCHEMA,
     "akshare_cn_stock_daily_bar_hfq": AKSHARE_DAILY_BAR_SCHEMA,

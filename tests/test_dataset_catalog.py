@@ -6,6 +6,7 @@ from src.storage.dataset_catalog import (
     AKSHARE_CAPITAL_STRUCTURE_EM_DATASET,
     AKSHARE_DELIST_SH_DATASET,
     AKSHARE_DELIST_SZ_DATASET,
+    AKSHARE_FINANCIAL_REPORT_SINA_DATASET,
     AKSHARE_REPORT_DISCLOSURE_DATASET,
     AKSHARE_SPOT_QUOTE_EASTMONEY_DATASET,
     AKSHARE_STOCK_INSTITUTION_HOLDING_DATASET,
@@ -54,6 +55,7 @@ def test_akshare_a_stock_catalog_registers_independent_datasets() -> None:
     assert AKSHARE_SPOT_QUOTE_EASTMONEY_DATASET.name in akshare_a_stock_dataset_names()
     assert AKSHARE_REPORT_DISCLOSURE_DATASET.name in akshare_a_stock_dataset_names()
     assert AKSHARE_YYSJ_EM_DATASET.name in akshare_a_stock_dataset_names()
+    assert AKSHARE_FINANCIAL_REPORT_SINA_DATASET.name in akshare_a_stock_dataset_names()
     assert akshare_daily_bar_dataset_id("unadjusted") == "akshare_cn_stock_daily_bar_unadjusted"
     assert [definition.name for definition in akshare_a_stock_definitions()] == list(akshare_a_stock_dataset_names())
 
@@ -89,6 +91,7 @@ def test_duckdb_views_use_daily_bar_catalog(tmp_path) -> None:
     assert any("v_akshare_cn_stock_spot_quote_eastmoney" in sql for sql in sqls)
     assert any("v_akshare_cn_stock_report_disclosure" in sql for sql in sqls)
     assert any("v_akshare_cn_stock_yysj_em" in sql for sql in sqls)
+    assert any("v_akshare_cn_stock_financial_report_sina" in sql for sql in sqls)
     assert any("v_akshare_cn_stock_daily_bar_unadjusted" in sql for sql in sqls)
     assert any("v_akshare_cn_stock_institution_holding" in sql for sql in sqls)
     assert AKSHARE_STOCK_INSTITUTION_HOLDING_DATASET.lifecycle == "legacy_unmanaged"

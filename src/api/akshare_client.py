@@ -14,6 +14,10 @@ from src.api.akshare.adapters.capital_structure_em import CapitalStructureEmAdap
 from src.api.akshare.adapters.daily_bar import DailyBarAdapter
 from src.api.akshare.adapters.delist_sh import DelistShAdapter
 from src.api.akshare.adapters.delist_sz import DelistSzAdapter
+from src.api.akshare.adapters.financial_report_sina import (
+    REPORT_TYPE_TO_SYMBOL,
+    FinancialReportSinaAdapter,
+)
 from src.api.akshare.adapters.report_disclosure import ReportDisclosureAdapter
 from src.api.akshare.adapters.spot_quote_eastmoney import SpotQuoteEastmoneyAdapter
 from src.api.akshare.adapters.spot_quote_sina import SpotQuoteSinaAdapter
@@ -146,6 +150,24 @@ class AkShareClient:
     def fetch_capital_structure(self, code: str) -> AkShareResponse:
         adapter = CapitalStructureEmAdapter(symbol=code, fetched_at=self._now())
         return self._fetch_adapter(adapter)
+
+    def fetch_financial_report_sina(self, code: str) -> AkShareResponse:
+        frames: list[pd.DataFrame] = []
+        responses: list[AkShareResponse] = []
+        for report_type in REPORT_TYPE_TO_SYMBOL:
+            adapter = FinancialReportSinaAdapter(symbol=code, report_type=report_type, fetched_at=self._now())
+            response = self._fetch_adapter(adapter)
+            responses.append(response)
+            frames.append(response.data)
+        data = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+        params = {"code": normalize_akshare_code(code), "report_types": ",".join(REPORT_TYPE_TO_SYMBOL)}
+        akshare_version = responses[-1].akshare_version if responses else "unknown"
+        return AkShareResponse(
+            endpoint="stock_financial_report_sina",
+            params=params,
+            akshare_version=akshare_version,
+            data=data,
+        )
 
     def _fetch_adapter(self, adapter: Any) -> AkShareResponse:
         return self._runtime.fetch(

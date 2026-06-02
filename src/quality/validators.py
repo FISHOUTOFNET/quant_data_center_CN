@@ -12,6 +12,7 @@ from src.storage.schema import (
     AKSHARE_DAILY_BAR_SCHEMA,
     AKSHARE_DELIST_SH_SCHEMA,
     AKSHARE_DELIST_SZ_SCHEMA,
+    AKSHARE_FINANCIAL_REPORT_SINA_SCHEMA,
     AKSHARE_REPORT_DISCLOSURE_SCHEMA,
     AKSHARE_SPOT_QUOTE_EASTMONEY_SCHEMA,
     AKSHARE_SPOT_QUOTE_SINA_SCHEMA,
@@ -284,6 +285,23 @@ def validate_akshare_cn_stock_yysj_em(df: pd.DataFrame, schema: pa.Schema = AKSH
     validate_schema_matches(df, schema)
     validate_akshare_six_digit_codes(df)
     validate_unique_columns(df, ["report_period", "symbol", "code"])
+
+
+def validate_akshare_cn_stock_financial_report_sina(
+    df: pd.DataFrame, schema: pa.Schema = AKSHARE_FINANCIAL_REPORT_SINA_SCHEMA
+) -> None:
+    validate_schema_matches(df, schema)
+    validate_akshare_six_digit_codes(df)
+    validate_unique_columns(df, ["code", "report_type", "report_date", "item_name"])
+    if df.empty:
+        return
+    dates = pd.to_datetime(df["report_date"], errors="coerce")
+    if dates.isna().any():
+        raise ValidationError("report_date contains null or invalid values")
+    work = df.assign(_report_date=dates)
+    for key, group in work.groupby(["code", "report_type"], dropna=False, sort=False):
+        if not group["_report_date"].is_monotonic_increasing:
+            raise ValidationError(f"report_date is not monotonically increasing for code/report_type={key}")
 
 
 def validate_akshare_cn_stock_daily_bar(df: pd.DataFrame, schema: pa.Schema = AKSHARE_DAILY_BAR_SCHEMA) -> None:

@@ -93,6 +93,8 @@ qdc akshare update --target report_disclosure --mode full
 qdc akshare update --target report_disclosure --period 2025年报 --period 2026一季
 qdc akshare update --target yysj_em
 qdc akshare update --target yysj_em --market 沪深A股 --period 2025年报
+qdc akshare update --target financial_report --mode full
+qdc akshare update --target financial_report --mode incremental
 ```
 
 `akshare_cn_stock_valuation_eastmoney` 默认股票池来自本地 AkShare 清单，不再使用 Baostock `baostock_cn_stock_basic`：
@@ -112,6 +114,10 @@ qdc akshare update --target yysj_em --market 沪深A股 --period 2025年报
 - `yysj_em` partial 同样默认更新最近四个已完成财报期；`--mode full` 从
   `datasets.akshare_cn_stock_yysj_em.full_start_year`（默认 2008）生成历史财报期。
 - `--period` 只适用于 `report_disclosure` 和 `yysj_em`，可重复传入，格式如 `2025年报`、`2026一季`。`--market` 在 `yysj_em` 下表示 `stock_yysj_em` 的 `symbol` 参数。
+- `akshare update --target financial_report` 调用 AkShare `stock_financial_report_sina` 获取新浪三大财报，保存为
+  `akshare_cn_stock_financial_report_sina` 长表并按 `code` 分区。
+- `financial_report` full 使用 active 与 delisted 的并集；incremental 只读取本地 `report_disclosure` / `yysj_em` 披露日历和
+  `data/metadata/akshare_financial_report_pending.parquet`，不主动刷新披露日历。触发日期优先级为实际披露、最新变更、首次预约；18:00 后按次日披露处理。
 
 ### AkShare A 股行情
 
@@ -165,6 +171,7 @@ data/
 │   ├── akshare_cn_stock_capital_structure_em/code=600000/data.parquet
 │   ├── akshare_cn_stock_report_disclosure/report_period=2025年报/data.parquet
 │   ├── akshare_cn_stock_yysj_em/report_period=2025年报/data.parquet
+│   ├── akshare_cn_stock_financial_report_sina/code=600000/data.parquet
 │   ├── akshare_cn_stock_delist_sh/snapshot_date=YYYY-MM-DD/data.parquet
 │   ├── akshare_cn_stock_delist_sz/snapshot_date=YYYY-MM-DD/data.parquet
 │   ├── akshare_cn_stock_spot_quote_eastmoney/trade_date=YYYY-MM-DD/data.parquet
@@ -268,6 +275,7 @@ qdc serve-registry --host 127.0.0.1 --port 8765
 - `api.akshare.jitter_seconds`：请求前随机延迟。
 - `api.akshare.endpoints.<name>.failure_threshold` / `cooldown_minutes`：端点熔断配置。
 - `datasets.akshare_cn_stock_valuation_eastmoney.active_only`：partial 模式是否只取 active AkShare 股票池。
+- `datasets.akshare_cn_stock_financial_report_sina.close_after_time`：财报增量在该时间后按下一自然日披露处理，默认 `18:00`。
 - `datasets.akshare_cn_stock_capital_structure_em.active_only`：partial 模式是否只取 active AkShare 股票池。
 - `datasets.akshare_cn_stock_report_disclosure.full_start_year`：预约披露时间 full 模式的起始年份。
 - `datasets.akshare_cn_stock_yysj_em.full_start_year`：东方财富预约披露时间 full 模式的起始年份。

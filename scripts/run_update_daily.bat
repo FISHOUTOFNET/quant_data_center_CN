@@ -66,6 +66,9 @@ if "%QDC_WEEKEND_WINDOW%"=="1" (
     if errorlevel 1 goto :failed
 )
 
+call :run_step "akshare update financial_report incremental" "python -m src.cli akshare update --target financial_report --mode incremental --no-build-duckdb-views"
+if errorlevel 1 goto :failed
+
 call :run_step "build-duckdb-views" "python -m src.cli build-duckdb-views"
 if errorlevel 1 goto :failed
 

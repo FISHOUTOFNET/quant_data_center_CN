@@ -6,6 +6,7 @@ from src.storage.schema import (
     AKSHARE_DAILY_BAR_SCHEMA,
     AKSHARE_DELIST_SH_SCHEMA,
     AKSHARE_DELIST_SZ_SCHEMA,
+    AKSHARE_FINANCIAL_REPORT_SINA_SCHEMA,
     AKSHARE_SPOT_QUOTE_EASTMONEY_SCHEMA,
     AKSHARE_SPOT_QUOTE_SINA_SCHEMA,
     AKSHARE_VALUATION_EASTMONEY_SCHEMA,
@@ -98,6 +99,8 @@ def test_akshare_a_stock_schema_core_fields() -> None:
     assert AKSHARE_SPOT_QUOTE_SINA_SCHEMA.field("is_fallback").type == pa.bool_()
     assert AKSHARE_YYSJ_EM_SCHEMA.field("period_end_date").type == pa.date32()
     assert AKSHARE_YYSJ_EM_SCHEMA.field("symbol").type == pa.string()
+    assert AKSHARE_FINANCIAL_REPORT_SINA_SCHEMA.field("report_date").type == pa.date32()
+    assert AKSHARE_FINANCIAL_REPORT_SINA_SCHEMA.field("item_value").type == pa.float64()
     assert AKSHARE_DAILY_BAR_SCHEMA.field("volume").type == pa.int64()
     assert AKSHARE_DAILY_BAR_SCHEMA.names == [
         "date",
