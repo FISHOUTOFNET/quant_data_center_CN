@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import subprocess
+import sys
 from datetime import datetime
 
 import pandas as pd
@@ -131,6 +133,47 @@ def test_pipeline_lifecycle_flush_failure_requeues_rows(tmp_path, monkeypatch) -
     lifecycle.flush()
     assert calls == 2
     assert len(store.read_pipeline_runs()) == 1
+
+
+def test_pipeline_lifecycle_releases_duckdb_between_metadata_flushes(tmp_path) -> None:
+    store = ParquetStore(root=tmp_path)
+    store.ensure_layout()
+    lifecycle = PipelineLifecycle(store, flush_size=1)
+    task = LifecycleTaskRef(
+        pipeline="update_test",
+        dataset="baostock_cn_stock_daily_bar_qfq",
+        code="sh.600000",
+        start_date="2024-01-01",
+        end_date="2024-01-31",
+        output_path=tmp_path / "data.parquet",
+    )
+
+    lifecycle.record_success(
+        task,
+        started_at=datetime(2024, 1, 31, 9, 0),
+        ended_at=datetime(2024, 1, 31, 9, 1),
+        row_count=2,
+    )
+
+    duckdb_file = tmp_path / "data" / "duckdb" / "quant.duckdb"
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            (
+                "import duckdb; "
+                f"conn = duckdb.connect({str(duckdb_file)!r}); "
+                "conn.close()"
+            ),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    store.close()
+
+    assert result.returncode == 0, result.stderr
 
 
 def test_pipeline_lifecycle_finish_refreshes_dirty_datasets(tmp_path, monkeypatch, daily_sample) -> None:

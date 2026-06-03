@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from collections.abc import Iterator
 from contextlib import contextmanager, suppress
 from pathlib import Path
@@ -21,6 +22,8 @@ from src.storage.schema import (
 from src.utils import paths
 
 CHECKPOINT_KEY_COLUMNS = ["pipeline", "dataset", "code", "start_date", "end_date"]
+DUCKDB_METADATA_CONNECT_MAX_RETRIES = 5
+DUCKDB_METADATA_CONNECT_RETRY_DELAY = 0.5
 _DB_LOCKS: WeakValueDictionary[Path, RLock] = WeakValueDictionary()
 _DB_LOCKS_GUARD = RLock()
 
@@ -225,17 +228,26 @@ class DuckDBMetadataStore:
     def _connection(self) -> Iterator[duckdb.DuckDBPyConnection]:
         self.duckdb_file.parent.mkdir(parents=True, exist_ok=True)
         with self._lock:
-            if self._conn is not None:
-                try:
-                    self._conn.execute("SELECT 1")
-                except Exception:
-                    with suppress(Exception):
-                        self._conn.close()
-                    self._conn = None
-            if self._conn is None:
-                self._conn = duckdb.connect(str(self.duckdb_file))
-            self._ensure_initialized(self._conn)
-            yield self._conn
+            conn = self._connect()
+            try:
+                self._ensure_initialized(conn)
+                yield conn
+            finally:
+                conn.close()
+
+    def _connect(self) -> duckdb.DuckDBPyConnection:
+        last_error: Exception | None = None
+        for attempt in range(1, DUCKDB_METADATA_CONNECT_MAX_RETRIES + 1):
+            try:
+                return duckdb.connect(str(self.duckdb_file))
+            except duckdb.IOException as exc:
+                last_error = exc
+                if attempt >= DUCKDB_METADATA_CONNECT_MAX_RETRIES:
+                    break
+                time.sleep(DUCKDB_METADATA_CONNECT_RETRY_DELAY)
+        if last_error is not None:
+            raise last_error
+        return duckdb.connect(str(self.duckdb_file))
 
     def _ensure_initialized(self, conn: duckdb.DuckDBPyConnection) -> None:
         if not self._initialized:
