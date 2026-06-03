@@ -58,7 +58,7 @@ api:
         cooldown_minutes: 30
       stock_financial_report_sina:
         source: sina
-        failure_threshold: 3
+        failure_threshold: 50
         cooldown_minutes: 30
       stock_zh_a_hist:
         source: eastmoney
@@ -94,6 +94,7 @@ datasets:
     full_start_year: 2008
   akshare_cn_stock_financial_report_sina:
     close_after_time: "18:00"
+    workers: 1
 
 pipeline:
   lookback_days: 10

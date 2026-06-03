@@ -8,8 +8,9 @@ import pandas as pd
 from src.api.akshare.adapters.financial_report_sina import FinancialReportSinaAdapter
 from src.api.akshare_client import AkShareResponse
 from src.pipeline.akshare import AkShareUpdateRequest, update_akshare
-from src.pipeline.akshare.modules.financial_report_sina import read_financial_report_pending
+from src.pipeline.akshare.modules.financial_report_sina import _resolve_workers, read_financial_report_pending
 from src.storage.parquet_store import ParquetStore
+from src.utils.config_mgr import ConfigManager
 
 
 class FakeFinancialReportClient:
@@ -256,6 +257,21 @@ def test_financial_report_full_force_refetches_existing_partition(tmp_path: Path
 
     assert [item["status"] for item in records] == ["success"]
     assert client.calls == ["600000"]
+
+
+def test_financial_report_sina_default_circuit_threshold_handles_transient_resets() -> None:
+    config = ConfigManager(Path(__file__).resolve().parents[1])
+
+    threshold = config.get("api.akshare.endpoints.stock_financial_report_sina.failure_threshold")
+
+    assert int(threshold) >= 20
+
+
+def test_financial_report_sina_uses_dataset_worker_default() -> None:
+    config = ConfigManager(Path(__file__).resolve().parents[1])
+
+    assert _resolve_workers(config, None) == 1
+    assert _resolve_workers(config, 2) == 2
 
 
 def _write_universe(store: ParquetStore, spot_codes: tuple[str, ...], delisted_codes: tuple[str, ...]) -> None:

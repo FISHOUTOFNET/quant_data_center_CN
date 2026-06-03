@@ -448,7 +448,11 @@ def _normalize_codes(code: tuple[str, ...] | list[str] | str) -> list[str]:
 
 
 def _resolve_workers(config: ConfigManager, workers: int | None) -> int:
-    raw_workers = workers if workers is not None else config.get("api.akshare.workers", 3)
+    raw_workers = (
+        workers
+        if workers is not None
+        else config.get("datasets.akshare_cn_stock_financial_report_sina.workers", config.get("api.akshare.workers", 3))
+    )
     try:
         return max(int(raw_workers), 1)
     except (TypeError, ValueError) as exc:
