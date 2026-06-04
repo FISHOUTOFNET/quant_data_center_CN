@@ -303,6 +303,12 @@ Get-Content logs\qdc.log -Tail 50
 Select-String -Path logs\qdc.log -Pattern "ERROR|WARNING"
 ```
 
+`scripts\run_update_daily.bat` starts by cleaning log files older than 30 days. Preview cleanup manually:
+
+```powershell
+python -m src.tools.log_cleanup --dry-run
+```
+
 查询任务状态：
 
 ```python

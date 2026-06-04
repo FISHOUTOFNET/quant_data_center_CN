@@ -13,6 +13,8 @@ if exist "venv\Scripts\activate.bat" (
     call "venv\Scripts\activate.bat"
 )
 
+call :run_optional_step "cleanup expired logs" "python -m src.tools.log_cleanup --retention-days 30"
+
 for /f "usebackq delims=" %%D in (`powershell -NoProfile -Command "(Get-Date).DayOfWeek.value__"`) do set "QDC_WEEKDAY=%%D"
 set "QDC_WEEKEND_WINDOW=0"
 if "%QDC_WEEKDAY%"=="0" set "QDC_WEEKEND_WINDOW=1"

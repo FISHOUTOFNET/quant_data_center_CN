@@ -111,6 +111,16 @@ def test_run_update_daily_bat_logs_each_run_and_preserves_exit_codes() -> None:
     assert "Get-Date -Format yyyyMMdd_HHmmss" in text
     assert 'set "QDC_RUN_LOG=logs\\run_update_daily_!QDC_RUN_STAMP!.log"' in text
     assert '>> "!QDC_RUN_LOG!" 2>&1' in text
+    cleanup = (
+        'call :run_optional_step "cleanup expired logs" '
+        '"python -m src.tools.log_cleanup --retention-days 30"'
+    )
+    calendar = (
+        'call :run_step "update-baostock-daily calendar" '
+        '"python -m src.cli update-baostock-daily --dataset baostock_cn_trading_calendar --no-build-duckdb-views"'
+    )
+    assert cleanup in text
+    assert text.index(cleanup) < text.index(calendar)
     assert "exit /b !QDC_STEP_EXIT!" in text
     assert "endlocal & exit /b %QDC_EXIT_CODE%" in text
     assert 'call :run_step "build-duckdb-views" "python -m src.cli build-duckdb-views"' in text
