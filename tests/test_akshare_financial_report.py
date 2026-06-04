@@ -4,8 +4,10 @@ from datetime import datetime
 from pathlib import Path
 
 import pandas as pd
+import pytest
 
 from src.api.akshare.adapters.financial_report_sina import FinancialReportSinaAdapter
+from src.api.akshare.adapters.report_disclosure import report_period_end_date
 from src.api.akshare_client import AkShareResponse
 from src.pipeline.akshare import AkShareUpdateRequest, update_akshare
 from src.pipeline.akshare.modules.financial_report_sina import _resolve_workers, read_financial_report_pending
@@ -80,6 +82,30 @@ def test_financial_report_sina_adapter_converts_wide_report_to_long_rows() -> No
     assert mapped.loc[0, "item_name"] == "货币资金"
     assert mapped.loc[0, "item_value"] == 100.0
     assert mapped.loc[0, "publish_date"] == pd.Timestamp("2025-04-02").date()
+
+
+def test_financial_report_sina_normalize_converts_item_columns_once(monkeypatch) -> None:
+    calls: list[list[object]] = []
+
+    def fake_to_numeric(series: pd.Series) -> pd.Series:
+        calls.append(series.tolist())
+        return pd.to_numeric(series, errors="coerce")
+
+    monkeypatch.setattr("src.api.akshare.adapters.financial_report_sina.to_numeric", fake_to_numeric)
+    adapter = FinancialReportSinaAdapter("600000", "balance_sheet", fetched_at=datetime(2025, 4, 2, 20, 0))
+    raw = pd.DataFrame(
+        [
+            {"报告日": "20250331", "货币资金": "100", "应收账款": "200", "数据源": "合并"},
+            {"报告日": "20241231", "货币资金": "110", "应收账款": "-"},
+        ]
+    )
+
+    mapped = adapter.normalize(raw)
+
+    assert calls == [["100", "110"], ["200", "-"]]
+    assert mapped["item_name"].tolist() == ["货币资金", "应收账款", "货币资金", "应收账款"]
+    assert mapped["item_value"].tolist()[:3] == [100, 200, 110]
+    assert pd.isna(mapped["item_value"].iloc[3])
 
 
 def test_financial_report_incremental_uses_local_disclosure_priority_and_pending(tmp_path: Path) -> None:
@@ -204,6 +230,69 @@ def test_financial_report_incremental_clears_pending_when_target_period_arrives(
     assert read_financial_report_pending(tmp_path).empty
 
 
+def test_financial_report_incremental_ignores_stale_historical_disclosures(tmp_path: Path) -> None:
+    _write_settings(tmp_path)
+    store = ParquetStore(root=tmp_path)
+    store.ensure_layout()
+    _write_universe(store, spot_codes=("600000",), delisted_codes=())
+    _write_yysj_disclosure(
+        store,
+        code="600000",
+        report_period="2025\u4e00\u5b63",
+        actual_disclosure_date="2025-04-04",
+    )
+    store.close()
+    client = FakeFinancialReportClient(report_dates={"600000": ["20250331"]})
+
+    records = update_akshare(
+        AkShareUpdateRequest(
+            target="financial_report",
+            mode="incremental",
+            root=tmp_path,
+            build_views=False,
+            client=client,
+            now=lambda: datetime(2026, 6, 3, 18, 30),
+        )
+    )
+
+    assert records == []
+    assert client.calls == []
+
+
+def test_financial_report_incremental_skips_locally_covered_recent_disclosure(tmp_path: Path) -> None:
+    _write_settings(tmp_path)
+    store = ParquetStore(root=tmp_path)
+    store.ensure_layout()
+    _write_universe(store, spot_codes=("600000",), delisted_codes=())
+    _write_yysj_disclosure(
+        store,
+        code="600000",
+        report_period="2026\u4e00\u5b63",
+        actual_disclosure_date="2026-06-03",
+    )
+    store.write_dataset(
+        "akshare_cn_stock_financial_report_sina",
+        FakeFinancialReportClient(report_dates={"600000": ["20260331"]}).fetch_financial_report_sina("600000").data,
+        {"code": "600000"},
+    )
+    store.close()
+    client = FakeFinancialReportClient(report_dates={"600000": ["20260331"]})
+
+    records = update_akshare(
+        AkShareUpdateRequest(
+            target="financial_report",
+            mode="incremental",
+            root=tmp_path,
+            build_views=False,
+            client=client,
+            now=lambda: datetime(2026, 6, 3, 18, 30),
+        )
+    )
+
+    assert records == []
+    assert client.calls == []
+
+
 def test_financial_report_full_resume_skips_existing_partition_without_checkpoint(tmp_path: Path) -> None:
     _write_settings(tmp_path)
     store = ParquetStore(root=tmp_path)
@@ -257,6 +346,24 @@ def test_financial_report_full_force_refetches_existing_partition(tmp_path: Path
 
     assert [item["status"] for item in records] == ["success"]
     assert client.calls == ["600000"]
+
+
+def test_financial_report_update_rejects_existing_lock(tmp_path: Path) -> None:
+    _write_settings(tmp_path)
+    lock_dir = tmp_path / "data" / "metadata" / "locks"
+    lock_dir.mkdir(parents=True)
+    (lock_dir / "akshare_financial_report.lock").write_text("pid=1 target=financial_report mode=full\n")
+
+    with pytest.raises(RuntimeError, match="financial_report update is already running"):
+        update_akshare(
+            AkShareUpdateRequest(
+                target="financial_report",
+                mode="incremental",
+                root=tmp_path,
+                build_views=False,
+                client=FakeFinancialReportClient(),
+            )
+        )
 
 
 def test_financial_report_sina_default_circuit_threshold_handles_transient_resets() -> None:
@@ -330,6 +437,37 @@ def _write_universe(store: ParquetStore, spot_codes: tuple[str, ...], delisted_c
             ),
             {"snapshot_date": "2025-04-01"},
         )
+
+
+def _write_yysj_disclosure(
+    store: ParquetStore,
+    *,
+    code: str,
+    report_period: str,
+    actual_disclosure_date: str,
+) -> None:
+    store.write_dataset(
+        "akshare_cn_stock_yysj_em",
+        pd.DataFrame(
+            [
+                {
+                    "report_period": report_period,
+                    "period_end_date": report_period_end_date(report_period),
+                    "symbol": "A",
+                    "code": code,
+                    "name": f"Stock {code}",
+                    "first_scheduled_date": None,
+                    "first_changed_date": None,
+                    "second_changed_date": None,
+                    "third_changed_date": None,
+                    "actual_disclosure_date": actual_disclosure_date,
+                    "source_endpoint": "stock_yysj_em",
+                    "fetched_at": datetime(2026, 6, 3, 18, 30),
+                }
+            ]
+        ),
+        {"report_period": report_period},
+    )
 
 
 def _write_settings(root: Path) -> None:

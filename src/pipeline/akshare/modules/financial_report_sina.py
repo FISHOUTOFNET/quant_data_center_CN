@@ -24,6 +24,7 @@ PIPELINE_UPDATE_AKSHARE_FINANCIAL_REPORT = "update_akshare_financial_report_sina
 FINANCIAL_REPORT_START_DATE = "1900-01-01"
 FINANCIAL_REPORT_END_DATE = "2100-01-01"
 PENDING_FILE = Path("data/metadata/akshare_financial_report_pending.parquet")
+STATE_FILE = Path("data/metadata/akshare_financial_report_incremental_state.parquet")
 PENDING_COLUMNS = [
     "code",
     "report_period",
@@ -206,6 +207,13 @@ class FinancialReportSinaModule:
             progress.skipped,
         )
 
+    def after_completed(self, request: AkShareUpdateRequest, context: AkShareExecutionContext, progress: Any) -> None:
+        if request.mode == "incremental" and progress.failed == 0:
+            write_financial_report_incremental_state(
+                context.store.root,
+                _effective_disclosure_date(context.config, request),
+            )
+
     def log_circuit_open(self, attempted_tasks: int) -> None:
         logger.warning(
             "AkShare financial report circuit opened; stopping new submissions after {} attempted tasks",
@@ -240,14 +248,17 @@ def _plan_incremental_tasks(
     request: AkShareUpdateRequest,
 ) -> list[FinancialReportTask]:
     effective_date = _effective_disclosure_date(config, request)
-    candidates = _local_disclosure_candidates(store, effective_date)
+    trigger_start = _incremental_trigger_start_date(config, store.root, effective_date)
+    candidates = _local_disclosure_candidates(store, effective_date, trigger_start)
     pending = read_financial_report_pending(store.root)
     if not pending.empty:
-        pending_rows = pending.to_dict("records")
+        pending_rows = _active_pending_rows(config, pending, effective_date)
+        _write_financial_report_pending(store.root, pending_rows)
         candidates = _merge_candidate_rows([*candidates, *pending_rows])
     if request.code:
         requested = set(_normalize_codes(request.code))
         candidates = [row for row in candidates if row["code"] in requested]
+    candidates = _filter_uncovered_candidates(store, candidates)
     by_code: dict[str, list[dict[str, object]]] = {}
     for row in candidates:
         by_code.setdefault(str(row["code"]), []).append(row)
@@ -270,19 +281,17 @@ def _plan_incremental_tasks(
     return tasks
 
 
-def _local_disclosure_candidates(store: ParquetStore, effective_date: date) -> list[dict[str, object]]:
+def _local_disclosure_candidates(
+    store: ParquetStore,
+    effective_date: date,
+    trigger_start: date | None = None,
+) -> list[dict[str, object]]:
     rows: list[dict[str, object]] = []
     for dataset, source in DISCLOSURE_DATASETS:
         for df in _read_all_report_period_partitions(store, dataset):
             if df.empty:
                 continue
-            for _, record in df.iterrows():
-                trigger = _trigger_from_disclosure_row(record)
-                if trigger is None:
-                    continue
-                trigger_date, priority = trigger
-                if trigger_date > effective_date:
-                    continue
+            for record in _disclosure_candidate_records(df, effective_date, trigger_start):
                 code = normalize_akshare_code(record["code"])
                 report_period = str(record["report_period"])
                 rows.append(
@@ -290,14 +299,61 @@ def _local_disclosure_candidates(store: ParquetStore, effective_date: date) -> l
                         "code": code,
                         "report_period": report_period,
                         "period_end_date": report_period_end_date(report_period).isoformat(),
-                        "trigger_date": trigger_date.isoformat(),
-                        "trigger_priority": priority,
+                        "trigger_date": record["trigger_date"].isoformat(),
+                        "trigger_priority": record["trigger_priority"],
                         "trigger_source": source,
                         "status": "pending",
                         "updated_at": datetime.now().isoformat(timespec="milliseconds"),
                     }
                 )
     return _merge_candidate_rows(rows)
+
+
+def _disclosure_candidate_records(
+    df: pd.DataFrame,
+    effective_date: date,
+    trigger_start: date | None,
+) -> list[dict[str, object]]:
+    work = df.copy()
+    trigger_date = _datetime_series(work, "actual_disclosure_date")
+    priority = pd.Series(3, index=work.index, dtype="int64")
+
+    changed = pd.Series(pd.NaT, index=work.index, dtype="datetime64[ns]")
+    for column in ("third_changed_date", "second_changed_date", "first_changed_date"):
+        values = _datetime_series(work, column)
+        changed = changed.fillna(values)
+    changed_mask = trigger_date.isna() & changed.notna()
+    trigger_date = trigger_date.mask(changed_mask, changed)
+    priority = priority.mask(changed_mask, 2)
+
+    scheduled = _datetime_series(work, "first_scheduled_date")
+    scheduled_mask = trigger_date.isna() & scheduled.notna()
+    trigger_date = trigger_date.mask(scheduled_mask, scheduled)
+    priority = priority.mask(scheduled_mask, 1)
+
+    work["_trigger_date"] = trigger_date
+    work["_trigger_priority"] = priority
+    mask = work["_trigger_date"].notna() & (work["_trigger_date"] <= pd.Timestamp(effective_date))
+    if trigger_start is not None:
+        mask &= work["_trigger_date"] >= pd.Timestamp(trigger_start)
+
+    records: list[dict[str, object]] = []
+    for _, record in work.loc[mask, ["code", "report_period", "_trigger_date", "_trigger_priority"]].iterrows():
+        records.append(
+            {
+                "code": record["code"],
+                "report_period": record["report_period"],
+                "trigger_date": record["_trigger_date"].date(),
+                "trigger_priority": int(record["_trigger_priority"]),
+            }
+        )
+    return records
+
+
+def _datetime_series(df: pd.DataFrame, column: str) -> pd.Series:
+    if column not in df.columns:
+        return pd.Series(pd.NaT, index=df.index, dtype="datetime64[ns]")
+    return pd.to_datetime(df[column], errors="coerce")
 
 
 def _read_all_report_period_partitions(store: ParquetStore, dataset: str) -> list[pd.DataFrame]:
@@ -405,6 +461,19 @@ def read_financial_report_pending(root: Path | str | None = None) -> pd.DataFram
     return df[PENDING_COLUMNS].astype("string").reset_index(drop=True)
 
 
+def _active_pending_rows(config: ConfigManager, pending: pd.DataFrame, effective_date: date) -> list[dict[str, object]]:
+    if pending.empty:
+        return []
+    retention_days = int(config.get("datasets.akshare_cn_stock_financial_report_sina.pending_retention_days", 30))
+    oldest_trigger = effective_date - timedelta(days=max(retention_days, 0))
+    work = pending.copy()
+    trigger_dates = pd.to_datetime(work["trigger_date"], errors="coerce")
+    mask = trigger_dates.notna()
+    mask &= trigger_dates.dt.date >= oldest_trigger
+    mask &= trigger_dates.dt.date <= effective_date
+    return work.loc[mask, PENDING_COLUMNS].to_dict("records")
+
+
 def _write_financial_report_pending(root: Path, rows: list[dict[str, object]]) -> None:
     path = root / PENDING_FILE
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -414,6 +483,67 @@ def _write_financial_report_pending(root: Path, rows: list[dict[str, object]]) -
             path.unlink()
         return
     df[PENDING_COLUMNS].astype("string").to_parquet(path, index=False)
+
+
+def _filter_uncovered_candidates(store: ParquetStore, candidates: list[dict[str, object]]) -> list[dict[str, object]]:
+    covered_by_code: dict[str, set[str]] = {}
+    filtered: list[dict[str, object]] = []
+    for row in candidates:
+        code = str(row["code"])
+        covered = covered_by_code.get(code)
+        if covered is None:
+            covered = _covered_financial_report_periods(store, code)
+            covered_by_code[code] = covered
+        if str(row["period_end_date"]) in covered:
+            continue
+        filtered.append(row)
+    return filtered
+
+
+def _covered_financial_report_periods(store: ParquetStore, code: str) -> set[str]:
+    path = store.dataset_path(AKSHARE_FINANCIAL_REPORT_SINA_DATASET.name, {"code": code})
+    if not path.exists():
+        return set()
+    try:
+        df = store.read_dataset(AKSHARE_FINANCIAL_REPORT_SINA_DATASET.name, {"code": code})
+    except FileNotFoundError:
+        return set()
+    return _present_period_end_dates(df)
+
+
+def _incremental_trigger_start_date(config: ConfigManager, root: Path, effective_date: date) -> date:
+    lookback_days = int(config.get("datasets.akshare_cn_stock_financial_report_sina.incremental_lookback_days", 14))
+    lookback_start = effective_date - timedelta(days=max(lookback_days, 0))
+    last_effective = _read_incremental_state(root)
+    if last_effective is None:
+        return lookback_start
+    return min(lookback_start, last_effective)
+
+
+def _read_incremental_state(root: Path) -> date | None:
+    path = root / STATE_FILE
+    if not path.exists():
+        return None
+    df = pd.read_parquet(path)
+    if df.empty or "last_effective_date" not in df.columns:
+        return None
+    values = pd.to_datetime(df["last_effective_date"], errors="coerce").dropna()
+    if values.empty:
+        return None
+    return values.max().date()
+
+
+def write_financial_report_incremental_state(root: Path, effective_date: date) -> None:
+    path = root / STATE_FILE
+    path.parent.mkdir(parents=True, exist_ok=True)
+    pd.DataFrame(
+        [
+            {
+                "last_effective_date": effective_date.isoformat(),
+                "updated_at": datetime.now().isoformat(timespec="milliseconds"),
+            }
+        ]
+    ).to_parquet(path, index=False)
 
 
 def _effective_disclosure_date(config: ConfigManager, request: AkShareUpdateRequest) -> date:

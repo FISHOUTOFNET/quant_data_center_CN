@@ -42,6 +42,7 @@ class FakeAStockClient:
     def __init__(self) -> None:
         self.calls: list[tuple[str, dict[str, object]]] = []
         self.fail_spot_em = False
+        self.fail_spot_sina = False
 
     def fetch_akshare_cn_stock_delist_sh(
         self, symbol: str = "全部", snapshot_date: str | None = None
@@ -98,6 +99,8 @@ class FakeAStockClient:
 
     def fetch_spot_quote_sina(self, trade_date: str | None = None, fallback_reason: str = "") -> AkShareResponse:
         self.calls.append(("stock_zh_a_spot", {"trade_date": trade_date, "fallback_reason": fallback_reason}))
+        if self.fail_spot_sina:
+            raise RuntimeError("planned spot_sina failure")
         data = pd.DataFrame(
             [
                 {
@@ -320,15 +323,39 @@ def test_update_akshare_spot_fallback_writes_sina_and_hist(tmp_path) -> None:
     fallback = store.read_dataset("akshare_cn_stock_spot_quote_sina", {"trade_date": "2024-01-03"})
     hist = store.read_dataset("akshare_cn_stock_daily_bar_unadjusted", {"code": "600000"})
     assert [item["dataset"] for item in records] == [
-        "akshare_cn_stock_spot_quote_eastmoney",
         "akshare_cn_stock_spot_quote_sina",
         "akshare_cn_stock_daily_bar_unadjusted",
+        "akshare_cn_stock_spot_quote_eastmoney",
     ]
-    assert [item["status"] for item in records] == ["failed", "success", "success"]
+    assert [item["status"] for item in records] == ["success", "success", "skipped_fallback"]
+    assert not [item for item in records if item["status"] == "failed"]
     assert fallback.loc[0, "source_endpoint"] == "stock_zh_a_spot"
     assert "planned spot_em failure" in fallback.loc[0, "fallback_reason"]
     assert hist.loc[0, "source_endpoint"] == "stock_zh_a_spot"
     assert hist.loc[0, "quality_status"] == "spot_quote_close"
+
+
+def test_update_akshare_spot_reports_failure_only_when_all_sources_fail(tmp_path) -> None:
+    _write_settings(tmp_path)
+    client = FakeAStockClient()
+    client.fail_spot_em = True
+    client.fail_spot_sina = True
+
+    records = update_akshare_spot(
+        end="2024-01-03",
+        root=tmp_path,
+        build_views=False,
+        client=client,
+        now=lambda: datetime(2024, 1, 3, 18, 0),
+    )
+
+    assert [item["dataset"] for item in records] == [
+        "akshare_cn_stock_spot_quote_sina",
+        "akshare_cn_stock_spot_quote_eastmoney",
+    ]
+    assert [item["status"] for item in records] == ["failed", "failed"]
+    assert len([item for item in records if item["status"] == "failed"]) == 2
+    assert [call[0] for call in client.calls] == ["stock_zh_a_spot_em", "stock_zh_a_spot"]
 
 
 def test_update_akshare_spot_rejects_realtime_window_before_fetch(tmp_path) -> None:

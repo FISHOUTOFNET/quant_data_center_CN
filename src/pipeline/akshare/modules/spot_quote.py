@@ -95,24 +95,34 @@ class SpotQuoteModule:
             return []
         records: list[dict[str, object]] = []
         if result.error is not None:
-            rows = context.lifecycle.record_failure(
-                _task_ref(task.dataset, "*", task.trade_date, task.trade_date, task.output_path),
-                started_at=result.started_at,
-                ended_at=result.ended_at,
-                error_stack=result.error_stack,
-            )
-            records.append(rows.run_row)
             logger.info("AkShare spot fallback started trade_date={} reason={}", task.trade_date, str(result.error))
-            records.extend(
-                _run_sina_fallback(
-                    context.store,
-                    context.client,
-                    task.trade_date,
-                    str(result.error),
-                    context,
-                    task.update_daily_bar_from_spot,
+            fallback_records = _run_sina_fallback(
+                context.store,
+                context.client,
+                task.trade_date,
+                str(result.error),
+                context,
+                task.update_daily_bar_from_spot,
+            )
+            records.extend(fallback_records)
+            fallback_succeeded = any(str(row.get("status")) == "success" for row in fallback_records)
+            rows = (
+                context.lifecycle.record_skipped(
+                    _task_ref(task.dataset, "*", task.trade_date, task.trade_date, task.output_path),
+                    status="skipped_fallback",
+                    started_at=result.started_at,
+                    ended_at=result.ended_at,
+                    reason=result.error_stack or str(result.error),
+                )
+                if fallback_succeeded
+                else context.lifecycle.record_failure(
+                    _task_ref(task.dataset, "*", task.trade_date, task.trade_date, task.output_path),
+                    started_at=result.started_at,
+                    ended_at=result.ended_at,
+                    error_stack=result.error_stack,
                 )
             )
+            records.append(rows.run_row)
             return records
 
         try:

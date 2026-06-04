@@ -28,8 +28,7 @@ if "%QDC_WEEKEND_WINDOW%"=="1" (
     if errorlevel 1 goto :failed
 )
 
-call :run_step "akshare update spot_quote" "python -m src.cli akshare update --target spot_quote --no-build-duckdb-views"
-if errorlevel 1 goto :failed
+call :run_optional_step "akshare update spot_quote" "python -m src.cli akshare update --target spot_quote --no-build-duckdb-views"
 
 call :run_step "update-baostock-daily unadjusted" "python -m src.cli update-baostock-daily --dataset baostock_cn_stock_daily_bar_unadjusted --no-build-duckdb-views"
 if errorlevel 1 goto :failed
@@ -93,6 +92,23 @@ if not "!QDC_STEP_EXIT!"=="0" (
     echo [%date% %time%] !QDC_STEP_NAME! failed with error code !QDC_STEP_EXIT!
     echo [%date% %time%] !QDC_STEP_NAME! failed with error code !QDC_STEP_EXIT! >> "!QDC_RUN_LOG!"
     exit /b !QDC_STEP_EXIT!
+)
+echo [%date% %time%] Completed !QDC_STEP_NAME!
+echo [%date% %time%] Completed !QDC_STEP_NAME! >> "!QDC_RUN_LOG!"
+exit /b 0
+
+:run_optional_step
+set "QDC_STEP_NAME=%~1"
+set "QDC_STEP_COMMAND=%~2"
+echo [%date% %time%] Starting !QDC_STEP_NAME!...
+echo [%date% %time%] Starting !QDC_STEP_NAME!... >> "!QDC_RUN_LOG!"
+echo [%date% %time%] Command: !QDC_STEP_COMMAND! >> "!QDC_RUN_LOG!"
+!QDC_STEP_COMMAND! >> "!QDC_RUN_LOG!" 2>&1
+set "QDC_STEP_EXIT=!errorlevel!"
+if not "!QDC_STEP_EXIT!"=="0" (
+    echo [%date% %time%] !QDC_STEP_NAME! completed with warnings; continuing after error code !QDC_STEP_EXIT!
+    echo [%date% %time%] !QDC_STEP_NAME! completed with warnings; continuing after error code !QDC_STEP_EXIT! >> "!QDC_RUN_LOG!"
+    exit /b 0
 )
 echo [%date% %time%] Completed !QDC_STEP_NAME!
 echo [%date% %time%] Completed !QDC_STEP_NAME! >> "!QDC_RUN_LOG!"

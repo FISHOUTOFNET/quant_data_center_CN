@@ -115,3 +115,19 @@ def test_run_update_daily_bat_logs_each_run_and_preserves_exit_codes() -> None:
     assert "endlocal & exit /b %QDC_EXIT_CODE%" in text
     assert 'call :run_step "build-duckdb-views" "python -m src.cli build-duckdb-views"' in text
     assert text.index('call :run_step "build-duckdb-views"') < text.index("All updates completed")
+
+
+def test_run_update_daily_bat_treats_spot_quote_as_non_blocking() -> None:
+    text = _script_text()
+
+    spot = 'call :run_optional_step "akshare update spot_quote" "python -m src.cli akshare update --target spot_quote --no-build-duckdb-views"'
+    baostock_unadjusted = (
+        'call :run_step "update-baostock-daily unadjusted" '
+        '"python -m src.cli update-baostock-daily --dataset baostock_cn_stock_daily_bar_unadjusted --no-build-duckdb-views"'
+    )
+
+    assert spot in text
+    assert ":run_optional_step" in text
+    assert "completed with warnings; continuing" in text
+    assert text.index(spot) < text.index(baostock_unadjusted)
+    assert 'call :run_step "akshare update spot_quote"' not in text

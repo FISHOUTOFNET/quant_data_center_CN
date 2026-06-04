@@ -65,7 +65,8 @@ class FinancialReportSinaAdapter:
 
         rows: list[dict[str, object]] = []
         item_columns = [column for column in source_df.columns if column not in METADATA_COLUMNS]
-        for _, source_row in source_df.iterrows():
+        numeric_item_columns = {column: to_numeric(source_df[column]) for column in item_columns}
+        for row_index, (_, source_row) in enumerate(source_df.iterrows()):
             report_date = _parse_report_date(source_row.get("报告日"))
             metadata = {
                 "code": self.stock_code,
@@ -84,7 +85,7 @@ class FinancialReportSinaAdapter:
             }
             for item_name in item_columns:
                 item_value = source_row.get(item_name)
-                numeric_value = pd.NA if pd.isna(item_value) else to_numeric(pd.Series([item_value])).iloc[0]
+                numeric_value = pd.NA if pd.isna(item_value) else numeric_item_columns[item_name].iat[row_index]
                 rows.append(
                     {
                         **metadata,

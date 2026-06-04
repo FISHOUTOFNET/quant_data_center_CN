@@ -133,8 +133,9 @@ qdc akshare update --target daily_bar --mode incremental --adjustment unadjusted
 重要规则：
 
 - `akshare update --target spot_quote` 只允许在北京时间 `[18:00, 次日 08:00)` 访问 `stock_zh_a_spot_em` / `stock_zh_a_spot` 并写入 daily bar。窗口外会在请求接口前中断，避免交易时间实时数据污染日线。
-- `akshare_cn_stock_spot_quote_eastmoney` 成功时，先保存 spot 快照，再转换为 `akshare_cn_stock_daily_bar_unadjusted` 的 `spot_quote_close` 行；写 daily bar 时会排除本地 delisted。
-- `akshare_cn_stock_spot_quote_eastmoney` 失败时，使用 `stock_zh_a_spot` fallback，保存 Sina 快照，并转换为同一 daily-bar 格式写入 `akshare_cn_stock_daily_bar_unadjusted`。
+- `stock_zh_a_spot_em` 是 spot quote 的首选来源之一，不是单点成功条件；成功时先保存 `akshare_cn_stock_spot_quote_eastmoney` 快照，再转换为 `akshare_cn_stock_daily_bar_unadjusted` 的 `spot_quote_close` 行；写 daily bar 时会排除本地 delisted。
+- `stock_zh_a_spot_em` 失败时，使用 `stock_zh_a_spot` fallback。fallback 成功时保存 `akshare_cn_stock_spot_quote_sina` 快照，并转换为同一 daily-bar 格式写入 `akshare_cn_stock_daily_bar_unadjusted`；此时 CLI 返回成功，Eastmoney 子源记录为 `skipped_fallback`。
+- 只有 `stock_zh_a_spot_em` 和 `stock_zh_a_spot` 都失败时，`akshare update --target spot_quote` 才返回失败。`scripts/run_update_daily.bat` 将 `spot_quote` 作为非阻塞预更新步骤；即使该目标全部失败，也会记录 warning 并继续后续每日更新。
 - `akshare update --target daily_bar` 通过源接口 `stock_zh_a_hist` 获取历史日线；full 默认使用 AkShare 全量池，incremental 默认使用 active 池并排除 delisted。
 - `akshare update --target delist` 默认同时更新上交所 `akshare_cn_stock_delist_sh` 和深交所 `akshare_cn_stock_delist_sz`；`--end` 可固定快照日期。
 

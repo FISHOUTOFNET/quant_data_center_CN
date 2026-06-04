@@ -146,8 +146,13 @@ def akshare_update(
         records = run_update_akshare(request)
     except ValueError as exc:
         raise click.BadParameter(str(exc)) from exc
+    except RuntimeError as exc:
+        raise click.ClickException(str(exc)) from exc
     for item in records:
         click.echo(f"{item['dataset']} {item['code']} status={item['status']} rows={item['row_count']}")
+    failed = [item for item in records if str(item.get("status")) == "failed"]
+    if failed:
+        raise click.ClickException(f"AkShare update completed with {len(failed)} failed task(s)")
 
 
 @cli.command("update-baostock-daily")

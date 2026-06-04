@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import traceback
 from collections.abc import Callable, Iterable
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
@@ -130,29 +131,36 @@ def update_akshare(request: AkShareUpdateRequest) -> list[dict[str, object]]:
     config = ConfigManager(request.root)
     store = ParquetStore(root=config.root)
     store.ensure_layout()
-    checkpoint_lookup = None
-    if request.resume and not request.force and _uses_checkpoint_lookup(request):
-        checkpoint_lookup = PipelineCheckpointLookup.from_store(store)
-    owns_client = request.client is None
-    client = request.client or (
-        request.client_factory(config) if request.client_factory is not None else AkShareClient(config=config)
-    )
-    lifecycle = PipelineLifecycle(
-        store,
-        flush_size=int(config.get("pipeline.metadata_flush_size", 200)),
-        count_by="run",
-    )
-    context = AkShareExecutionContext(
-        config=config,
-        store=store,
-        client=client,
-        checkpoint_lookup=checkpoint_lookup,
-        lifecycle=lifecycle,
-    )
+    try:
+        lock_path = _acquire_update_lock(config.root, request)
+    except Exception:
+        store.close()
+        raise
+    owns_client = False
+    client = None
     records: list[dict[str, object]] = []
     progress_success = 0
 
     try:
+        checkpoint_lookup = None
+        if request.resume and not request.force and _uses_checkpoint_lookup(request):
+            checkpoint_lookup = PipelineCheckpointLookup.from_store(store)
+        owns_client = request.client is None
+        client = request.client or (
+            request.client_factory(config) if request.client_factory is not None else AkShareClient(config=config)
+        )
+        lifecycle = PipelineLifecycle(
+            store,
+            flush_size=int(config.get("pipeline.metadata_flush_size", 200)),
+            count_by="run",
+        )
+        context = AkShareExecutionContext(
+            config=config,
+            store=store,
+            client=client,
+            checkpoint_lookup=checkpoint_lookup,
+            lifecycle=lifecycle,
+        )
         for module in _modules_for_target(request.target):
             module_records, module_success = _run_module(module, request, context)
             records.extend(module_records)
@@ -160,10 +168,11 @@ def update_akshare(request: AkShareUpdateRequest) -> list[dict[str, object]]:
         lifecycle.finish()
     finally:
         store.close()
-        if owns_client:
+        if owns_client and client is not None:
             close = getattr(client, "close", None)
             if close is not None:
                 close()
+        _release_update_lock(lock_path)
 
     if request.build_views:
         DuckDBStore(root=config.root).build_views(cleanup_tmp_files=progress_success > 0)
@@ -206,6 +215,7 @@ def _run_module(
         _run_concurrent_fetches(module, selected_tasks, context, policy, records, progress)
 
     _call_optional(module, "log_completed", progress)
+    _call_optional(module, "after_completed", request, context, progress)
     return records, progress.success
 
 
@@ -369,6 +379,31 @@ def _validate_request(request: AkShareUpdateRequest) -> None:
 
 def _uses_checkpoint_lookup(request: AkShareUpdateRequest) -> bool:
     return not (request.target == "financial_report" and request.mode == "full")
+
+
+def _acquire_update_lock(root: Path, request: AkShareUpdateRequest) -> Path | None:
+    if request.target not in {"financial_report", "all"}:
+        return None
+    lock_dir = root / "data" / "metadata" / "locks"
+    lock_dir.mkdir(parents=True, exist_ok=True)
+    lock_path = lock_dir / "akshare_financial_report.lock"
+    try:
+        fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+    except FileExistsError as exc:
+        owner = lock_path.read_text(encoding="utf-8", errors="replace").strip()
+        raise RuntimeError(f"AkShare financial_report update is already running: {owner}") from exc
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        handle.write(f"pid={os.getpid()} target={request.target} mode={request.mode}\n")
+    return lock_path
+
+
+def _release_update_lock(lock_path: Path | None) -> None:
+    if lock_path is None:
+        return
+    try:
+        lock_path.unlink()
+    except FileNotFoundError:
+        return
 
 
 def _call_optional(module: AkShareDatasetModule, name: str, *args: Any) -> Any:

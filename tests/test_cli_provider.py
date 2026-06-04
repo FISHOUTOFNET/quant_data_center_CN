@@ -419,6 +419,34 @@ def test_akshare_cli_accepts_financial_report_target(monkeypatch) -> None:
     assert "akshare_cn_stock_financial_report_sina 600000 status=success rows=1" in result.output
 
 
+def test_akshare_cli_exits_nonzero_when_update_records_failures(monkeypatch) -> None:
+    def fake_update(request):
+        return [
+            {
+                "dataset": "akshare_cn_stock_spot_quote_eastmoney",
+                "code": "*",
+                "status": "failed",
+                "row_count": 0,
+            }
+        ]
+
+    monkeypatch.setattr("src.cli.run_update_akshare", fake_update)
+
+    result = CliRunner().invoke(
+        cli_module.cli,
+        [
+            "akshare",
+            "update",
+            "--target",
+            "spot_quote",
+            "--no-build-duckdb-views",
+        ],
+    )
+
+    assert result.exit_code != 0
+    assert "akshare_cn_stock_spot_quote_eastmoney * status=failed rows=0" in result.output
+
+
 def test_akshare_cli_rejects_period_for_non_report_disclosure_target() -> None:
     result = CliRunner().invoke(
         cli_module.cli,
