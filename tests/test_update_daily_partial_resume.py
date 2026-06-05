@@ -6,8 +6,8 @@ import pandas as pd
 import pytest
 from update_daily_fakes import _fake_provider_factory, _write_settings
 
-import src.pipeline.update_daily as update_daily_module
-from src.pipeline.adjustments import BAOSTOCK_CN_STOCK_ADJUSTMENT_FACTOR_DATASET
+import src.sources.baostock.update_daily as update_daily_module
+from src.sources.baostock.adjustments import BAOSTOCK_CN_STOCK_ADJUSTMENT_FACTOR_DATASET
 from src.pipeline.common import PIPELINE_UPDATE_DAILY, write_checkpoint
 from src.storage.parquet_store import ParquetStore
 
@@ -148,7 +148,8 @@ def test_update_daily_prefilter_skips_code_when_requested_targets_are_checkpoint
         build_views=False,
     )
 
-    assert records == []
+    assert {item["status"] for item in records} == {"skipped_checkpoint"}
+    assert {item["dataset"] for item in records} == {"baostock_cn_stock_daily_bar_qfq"}
     assert state["baostock_cn_stock_adjustment_factor_calls"] == []
     assert state["history_calls"] == []
 
