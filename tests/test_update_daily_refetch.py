@@ -6,7 +6,7 @@ import pandas as pd
 import pytest
 from update_daily_fakes import _fake_provider_factory, _provider_factory_for, _write_settings
 
-import src.pipeline.update_daily as update_daily_module
+import src.sources.baostock.update_daily as update_daily_module
 from src.pipeline.common import PIPELINE_UPDATE_DAILY, write_checkpoint
 from src.storage.parquet_store import ParquetStore
 

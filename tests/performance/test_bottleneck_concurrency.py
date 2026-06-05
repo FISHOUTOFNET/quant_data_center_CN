@@ -4,7 +4,7 @@ from pathlib import Path
 
 import yaml
 
-from src.pipeline.update_daily import update_daily
+from src.sources.baostock.update_daily import update_daily
 
 
 def setup_test_environment(root: Path) -> dict[str, object]:

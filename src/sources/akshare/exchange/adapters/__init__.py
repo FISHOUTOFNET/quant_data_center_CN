@@ -1,0 +1,1 @@
+"""Exchange-backed AkShare adapters."""

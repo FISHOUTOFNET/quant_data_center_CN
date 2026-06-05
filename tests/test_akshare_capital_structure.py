@@ -4,9 +4,9 @@ from datetime import datetime
 
 import pandas as pd
 
-from src.api.akshare_client import AkShareResponse
-from src.pipeline.akshare import AkShareUpdateRequest, update_akshare
-from src.pipeline.akshare.modules.capital_structure_em import plan_capital_structure_tasks
+from src.sources.akshare.client import AkShareResponse
+from src.sources.akshare.pipeline import AkShareUpdateRequest, update_akshare
+from src.sources.akshare.eastmoney.modules.capital_structure_em import plan_capital_structure_tasks
 from src.storage.parquet_store import ParquetStore
 from src.utils.config_mgr import ConfigManager
 

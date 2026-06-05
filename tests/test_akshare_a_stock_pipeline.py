@@ -6,11 +6,11 @@ from datetime import datetime
 import pandas as pd
 import pytest
 
-import src.pipeline.akshare.modules.daily_bar as update_akshare_daily_bar_module
-import src.pipeline.akshare.modules.delist as update_akshare_delist_module
-import src.pipeline.akshare.modules.spot_quote as update_akshare_spot_module
-from src.api.akshare_client import AkShareCircuitOpen, AkShareResponse
-from src.pipeline.akshare import AkShareUpdateRequest, update_akshare
+import src.sources.akshare.eastmoney.modules.daily_bar as update_akshare_daily_bar_module
+import src.sources.akshare.exchange.modules.delist as update_akshare_delist_module
+import src.sources.akshare.pipeline.spot_quote as update_akshare_spot_module
+from src.sources.akshare.client import AkShareCircuitOpen, AkShareResponse
+from src.sources.akshare.pipeline import AkShareUpdateRequest, update_akshare
 from src.storage.parquet_store import ParquetStore
 
 pytestmark = pytest.mark.slow

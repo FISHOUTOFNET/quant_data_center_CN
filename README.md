@@ -328,11 +328,18 @@ print(df)
 
 ```text
 src/
-├── api/                    # Baostock provider 与 AkShare client
-│   └── akshare/            # AkShare adapters、normalization、symbols
-├── pipeline/               # update-baostock-daily、Baostock 派生数据、AkShare 管道、Qlib 同步、repair-baostock-daily
-│   └── akshare/            # AkShare 执行内核与 Dataset Modules
-│       └── modules/        # valuation、capital_structure、report_disclosure、yysj_em、daily_bar、spot_quote、delist
+├── sources/                # 按数据来源组织的采集程序
+│   ├── baostock/           # Baostock client、provider、daily update、repair、派生数据
+│   ├── akshare/            # AkShare client、runtime、执行内核与按上游来源拆分的 modules/adapters
+│   │   ├── eastmoney/      # 东方财富/东财接口：valuation、capital_structure、daily_bar、spot_quote_em、yysj_em
+│   │   ├── sina/           # 新浪接口：spot_quote fallback、financial_report
+│   │   ├── cninfo/         # 巨潮资讯接口：report_disclosure
+│   │   ├── exchange/       # 交易所接口：上交所/深交所 delist
+│   │   ├── core/           # AkShare runtime、models、errors、normalization、symbols
+│   │   └── pipeline/       # AkShare 跨子源执行内核、universe、pending、spot_quote orchestration
+│   ├── qlib/               # Qlib 同步
+│   └── common/             # 跨来源 provider 协议等共享接口
+├── pipeline/               # 通用 pipeline checkpoint/lifecycle/registry 基础设施
 ├── quality/                # 写入前验证
 ├── storage/                # Schema、Dataset catalog、ParquetStore、DuckDBStore、DataRegistry
 ├── tools/                  # 辅助工具（API 审计等）

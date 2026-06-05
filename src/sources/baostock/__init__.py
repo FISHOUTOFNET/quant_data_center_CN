@@ -1,0 +1,1 @@
+"""Baostock source ingestion."""

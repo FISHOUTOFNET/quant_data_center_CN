@@ -10,8 +10,8 @@ import duckdb
 import pandas as pd
 import pytest
 
-import src.pipeline.qlib_sync as qlib_sync_module
-from src.pipeline.qlib_sync import (
+import src.sources.qlib.sync as qlib_sync_module
+from src.sources.qlib.sync import (
     QlibRemoteAsset,
     QlibSyncTimeoutError,
     is_qlib_update_day,

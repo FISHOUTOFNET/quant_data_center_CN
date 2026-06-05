@@ -5,8 +5,8 @@ from datetime import date
 import pandas as pd
 import pytest
 
-import src.pipeline.baostock_valuation_percentile as valuation_percentile_module
-from src.pipeline.baostock_valuation_percentile import (
+import src.sources.baostock.valuation_percentile as valuation_percentile_module
+from src.sources.baostock.valuation_percentile import (
     BAOSTOCK_VALUATION_PERCENTILE_DATASET,
     PIPELINE_UPDATE_BAOSTOCK_VALUATION_PERCENTILE,
     compute_valuation_percentiles,

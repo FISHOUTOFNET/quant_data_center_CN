@@ -1,0 +1,1 @@
+"""Eastmoney-backed AkShare adapters."""

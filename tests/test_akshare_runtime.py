@@ -6,8 +6,8 @@ from datetime import datetime
 import pandas as pd
 import pytest
 
-from src.api.akshare.runtime import AkShareRuntime
-from src.api.akshare_client import AkShareCircuitOpen, AkShareNetworkError
+from src.sources.akshare.core.runtime import AkShareRuntime
+from src.sources.akshare.client import AkShareCircuitOpen, AkShareNetworkError
 
 
 class FakeConfig:
@@ -82,7 +82,7 @@ def test_akshare_runtime_endpoint_timeout_override_opens_circuit() -> None:
 
 
 def test_akshare_runtime_close_shuts_down_timeout_executor(monkeypatch) -> None:
-    from src.api.akshare import runtime as runtime_module
+    from src.sources.akshare.core import runtime as runtime_module
 
     created = []
     original_executor = runtime_module.ThreadPoolExecutor

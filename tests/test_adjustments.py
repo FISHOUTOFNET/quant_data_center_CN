@@ -5,7 +5,7 @@ from datetime import date
 import pandas as pd
 import pytest
 
-from src.pipeline.adjustments import calculate_adjusted_daily_bar
+from src.sources.baostock.adjustments import calculate_adjusted_daily_bar
 
 
 def test_calculate_forward_adjusted_daily_bar_matches_baostock_example() -> None:

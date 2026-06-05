@@ -3,7 +3,7 @@ from __future__ import annotations
 import pandas as pd
 import pytest
 
-import src.pipeline.repair_tool as repair_module
+import src.sources.baostock.repair_tool as repair_module
 
 pytestmark = pytest.mark.slow
 

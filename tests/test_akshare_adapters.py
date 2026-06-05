@@ -5,15 +5,15 @@ from datetime import datetime
 import pandas as pd
 import pytest
 
-from src.api.akshare.adapters.capital_structure_em import CapitalStructureEmAdapter
-from src.api.akshare.adapters.daily_bar import DailyBarAdapter
-from src.api.akshare.adapters.delist_sh import DelistShAdapter
-from src.api.akshare.adapters.report_disclosure import ReportDisclosureAdapter
-from src.api.akshare.adapters.spot_quote_eastmoney import SpotQuoteEastmoneyAdapter
-from src.api.akshare.adapters.spot_quote_sina import SpotQuoteSinaAdapter
-from src.api.akshare.adapters.valuation_eastmoney import ValuationEastmoneyAdapter
-from src.api.akshare.adapters.yysj_em import YysjEmAdapter
-from src.api.akshare_client import AkShareEmptyDataError
+from src.sources.akshare.eastmoney.adapters.capital_structure_em import CapitalStructureEmAdapter
+from src.sources.akshare.eastmoney.adapters.daily_bar import DailyBarAdapter
+from src.sources.akshare.exchange.adapters.delist_sh import DelistShAdapter
+from src.sources.akshare.cninfo.adapters.report_disclosure import ReportDisclosureAdapter
+from src.sources.akshare.eastmoney.adapters.spot_quote_eastmoney import SpotQuoteEastmoneyAdapter
+from src.sources.akshare.sina.adapters.spot_quote_sina import SpotQuoteSinaAdapter
+from src.sources.akshare.eastmoney.adapters.valuation_eastmoney import ValuationEastmoneyAdapter
+from src.sources.akshare.eastmoney.adapters.yysj_em import YysjEmAdapter
+from src.sources.akshare.client import AkShareEmptyDataError
 
 
 class _FakeResponse:
@@ -112,7 +112,7 @@ def test_capital_structure_em_adapter_fetches_all_eastmoney_pages(monkeypatch) -
         ]
         return _FakeResponse({"success": True, "result": {"pages": 2, "count": 2, "data": rows}})
 
-    monkeypatch.setattr("src.api.akshare.adapters.capital_structure_em.requests.get", fake_get)
+    monkeypatch.setattr("src.sources.akshare.eastmoney.adapters.capital_structure_em.requests.get", fake_get)
     adapter = CapitalStructureEmAdapter(symbol="600000", fetched_at=pd.Timestamp("2024-01-03 12:00:00"))
 
     raw = adapter.call(type("FakeAk", (), {"__version__": "fake"})())

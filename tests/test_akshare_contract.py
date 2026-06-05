@@ -4,7 +4,7 @@ import os
 
 import pytest
 
-from src.api.akshare_client import AkShareClient
+from src.sources.akshare.client import AkShareClient
 
 pytestmark = pytest.mark.skipif(
     os.getenv("RUN_AKSHARE_CONTRACT") != "1",

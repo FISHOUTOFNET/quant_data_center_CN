@@ -8,7 +8,7 @@ def test_concurrency_test_injects_background_worker_override(tmp_path, monkeypat
     observed_workers = []
 
     def fake_update_daily(**kwargs):
-        import src.pipeline.update_daily as update_daily_module
+        import src.sources.baostock.update_daily as update_daily_module
 
         resolved_config = update_daily_module.ConfigManager(kwargs["root"])
         observed_workers.append(resolved_config.get("pipeline.background_workers"))

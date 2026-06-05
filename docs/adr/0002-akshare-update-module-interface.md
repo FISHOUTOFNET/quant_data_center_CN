@@ -29,6 +29,7 @@ qdc akshare update --target valuation|daily_bar|spot_quote|delist|all
 - 执行内核只拥有 store/client/lifecycle 创建、并发 fetch 调度、progress 计数和收尾。
 - 每类 AkShare Dataset Module 拥有自己的 planning、prefilter、fetch、write 和 result record。
 - 新增 AkShare Dataset 时通过注册 Dataset Module 接入，不在执行内核增加 Dataset 分支。
+- 源码按 AkShare 文档确认的上游来源放入 `src/sources/akshare/eastmoney/`、`sina/`、`cninfo/` 或 `exchange/`；跨子源调度保留在 `src/sources/akshare/pipeline/`。
 
 ## Consequences
 

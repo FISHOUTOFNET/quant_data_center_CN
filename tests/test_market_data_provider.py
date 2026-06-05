@@ -3,8 +3,8 @@ from __future__ import annotations
 import pandas as pd
 import pytest
 
-from src.api.baostock_provider import BaostockProvider
-from src.api.market_data import DailyBarRequest, create_provider
+from src.sources.baostock.provider import BaostockProvider
+from src.sources.common.market_data import DailyBarRequest, create_provider
 from src.utils.config_mgr import ConfigError, ConfigManager
 
 

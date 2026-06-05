@@ -4,8 +4,8 @@ from datetime import datetime
 
 import pandas as pd
 
-import src.pipeline.akshare.modules.daily_bar as daily_bar_module
-from src.pipeline.akshare.modules.daily_bar import DailyBarTask, plan_daily_bar_tasks, prefilter_daily_bar_tasks
+import src.sources.akshare.eastmoney.modules.daily_bar as daily_bar_module
+from src.sources.akshare.eastmoney.modules.daily_bar import DailyBarTask, plan_daily_bar_tasks, prefilter_daily_bar_tasks
 from src.storage.duckdb_store import DuckDBStore
 from src.storage.parquet_store import ParquetStore
 from src.utils.config_mgr import ConfigManager

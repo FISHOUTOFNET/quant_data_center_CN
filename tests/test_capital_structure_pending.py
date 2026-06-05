@@ -6,13 +6,13 @@ from pathlib import Path
 
 import pandas as pd
 
-from src.pipeline.akshare.capital_structure_pending import (
+from src.sources.akshare.pipeline.capital_structure_pending import (
     drain_capital_structure_pending,
     enqueue_capital_structure_pending,
     read_capital_structure_pending,
 )
 from src.pipeline.lifecycle import PipelineMetadataBatch
-from src.pipeline.update_daily_worker import _DailyUpdateBackgroundWorker
+from src.sources.baostock.update_daily_worker import _DailyUpdateBackgroundWorker
 from src.storage.parquet_store import ParquetStore
 from src.utils.config_mgr import ConfigManager
 
@@ -118,7 +118,7 @@ def test_adjustment_factor_change_enqueues_capital_structure_update(tmp_path, mo
     store.write_dataset("baostock_cn_stock_adjustment_factor", _factor_frame(1.0), {"code": "sh.600000"})
     enqueued = []
     monkeypatch.setattr(
-        "src.pipeline.update_daily_worker.enqueue_capital_structure_pending",
+        "src.sources.baostock.update_daily_worker.enqueue_capital_structure_pending",
         lambda root, code, trigger_dataset, trigger_reason: enqueued.append(
             (root, code, trigger_dataset, trigger_reason)
         ),
@@ -144,7 +144,7 @@ def test_unchanged_adjustment_factor_does_not_enqueue_capital_structure_update(t
     store.write_dataset("baostock_cn_stock_adjustment_factor", _factor_frame(1.0), {"code": "sh.600000"})
     enqueued = []
     monkeypatch.setattr(
-        "src.pipeline.update_daily_worker.enqueue_capital_structure_pending",
+        "src.sources.baostock.update_daily_worker.enqueue_capital_structure_pending",
         lambda root, code, trigger_dataset, trigger_reason: enqueued.append(code),
     )
     worker = _worker(tmp_path, store)
@@ -168,7 +168,7 @@ def test_adjustment_factor_enqueue_failure_does_not_fail_baostock_update(tmp_pat
     def fail_enqueue(*args, **kwargs):
         raise RuntimeError("queue unavailable")
 
-    monkeypatch.setattr("src.pipeline.update_daily_worker.enqueue_capital_structure_pending", fail_enqueue)
+    monkeypatch.setattr("src.sources.baostock.update_daily_worker.enqueue_capital_structure_pending", fail_enqueue)
     worker = _worker(tmp_path, store)
 
     result = worker.process_baostock_cn_stock_adjustment_factor_success(
@@ -182,7 +182,7 @@ def test_adjustment_factor_enqueue_failure_does_not_fail_baostock_update(tmp_pat
 
 
 def test_update_daily_drains_capital_structure_pending_after_adjustment_factor_target(monkeypatch) -> None:
-    import src.pipeline.update_daily as update_daily_module
+    import src.sources.baostock.update_daily as update_daily_module
 
     drained = []
     monkeypatch.setattr(
@@ -208,7 +208,7 @@ def test_update_daily_drains_capital_structure_pending_after_adjustment_factor_t
 
 
 def test_update_daily_does_not_drain_capital_structure_pending_after_adjustment_factor_failure(monkeypatch) -> None:
-    import src.pipeline.update_daily as update_daily_module
+    import src.sources.baostock.update_daily as update_daily_module
 
     drained = []
     monkeypatch.setattr(

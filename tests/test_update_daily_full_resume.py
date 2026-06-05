@@ -6,9 +6,9 @@ import pandas as pd
 import pytest
 from update_daily_fakes import _fake_provider_factory, _provider_factory_for, _write_settings
 
-import src.pipeline.update_daily as update_daily_module
-import src.pipeline.update_daily_worker as update_daily_worker_module
-from src.pipeline.adjustments import BAOSTOCK_CN_STOCK_ADJUSTMENT_FACTOR_DATASET
+import src.sources.baostock.update_daily as update_daily_module
+import src.sources.baostock.update_daily_worker as update_daily_worker_module
+from src.sources.baostock.adjustments import BAOSTOCK_CN_STOCK_ADJUSTMENT_FACTOR_DATASET
 from src.storage.parquet_store import ParquetStore
 
 pytestmark = pytest.mark.slow

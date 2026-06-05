@@ -8,8 +8,8 @@ import pandas as pd
 import pytest
 from update_daily_fakes import _fake_provider_factory, _write_settings
 
-import src.pipeline.update_daily as update_daily_module
-import src.pipeline.update_daily_worker as update_daily_worker_module
+import src.sources.baostock.update_daily as update_daily_module
+import src.sources.baostock.update_daily_worker as update_daily_worker_module
 from src.pipeline.common import FULL_HISTORY_START_DATE, PIPELINE_UPDATE_DAILY, write_checkpoint
 from src.pipeline.lifecycle import PipelineMetadataBatch
 from src.storage.parquet_store import ParquetStore

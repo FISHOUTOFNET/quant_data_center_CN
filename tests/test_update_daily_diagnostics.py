@@ -3,8 +3,8 @@ from __future__ import annotations
 import pytest
 from update_daily_fakes import _fake_provider_factory, _write_settings
 
-import src.pipeline.services as services_module
-import src.pipeline.update_daily as update_daily_module
+import src.sources.baostock.services as services_module
+import src.sources.baostock.update_daily as update_daily_module
 import src.storage.parquet_store as parquet_store_module
 from src.storage.data_registry import DataRegistry
 

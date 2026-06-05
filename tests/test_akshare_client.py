@@ -6,8 +6,8 @@ from datetime import datetime
 import pandas as pd
 import pytest
 
-from src.api.akshare import runtime as akshare_runtime_module
-from src.api.akshare_client import (
+from src.sources.akshare.core import runtime as akshare_runtime_module
+from src.sources.akshare.client import (
     AkShareCircuitOpen,
     AkShareClient,
     AkShareNetworkError,

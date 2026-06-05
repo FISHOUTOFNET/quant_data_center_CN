@@ -7,10 +7,10 @@ from datetime import datetime
 import pandas as pd
 import pytest
 
-import src.pipeline.akshare.modules.valuation_eastmoney as valuation_module
-from src.api.akshare_client import AkShareCircuitOpen, AkShareResponse
-from src.pipeline.akshare import AkShareUpdateRequest, update_akshare
-from src.pipeline.akshare.modules.valuation_eastmoney import (
+import src.sources.akshare.eastmoney.modules.valuation_eastmoney as valuation_module
+from src.sources.akshare.client import AkShareCircuitOpen, AkShareResponse
+from src.sources.akshare.pipeline import AkShareUpdateRequest, update_akshare
+from src.sources.akshare.eastmoney.modules.valuation_eastmoney import (
     AdaptiveConcurrencyController,
     plan_valuation_tasks,
 )

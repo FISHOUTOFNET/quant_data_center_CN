@@ -3,8 +3,8 @@ from __future__ import annotations
 import pandas as pd
 import pytest
 
-from src.api import baostock_client
-from src.api.baostock_client import BaostockClient, BaostockConnectionError, BaostockError, BaostockTimeoutError
+from src.sources.baostock import client as baostock_client
+from src.sources.baostock.client import BaostockClient, BaostockConnectionError, BaostockError, BaostockTimeoutError
 
 
 def test_query_trade_dates_passes_optional_range_to_baostock(monkeypatch) -> None:

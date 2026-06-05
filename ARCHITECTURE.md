@@ -238,9 +238,10 @@ AkShare pipeline 只保存规范化后的 Parquet 数据和统一运行元数据
 
 新增 AkShare Dataset：
 
-1. 在 `src/pipeline/akshare/modules/` 下创建新的 Module 类，实现 `AkShareDatasetModule` 协议（`plan`、`prefilter`、`fetch`、`record_result`、`record_skip`、`progress_row`、`concurrency`）。
-2. 在 `execution._modules_for_target` 注册新 target。
-3. 在 CLI `akshare update --target` 的 Choice 列表中添加新 target。
+1. 先按 AkShare 文档确认端点上游来源，并在对应目录下创建 Adapter 和 Module：`src/sources/akshare/eastmoney/`、`src/sources/akshare/sina/`、`src/sources/akshare/cninfo/` 或 `src/sources/akshare/exchange/`。
+2. Module 类实现 `AkShareDatasetModule` 协议（`plan`、`prefilter`、`fetch`、`record_result`、`record_skip`、`progress_row`、`concurrency`）。
+3. 在 `src/sources/akshare/pipeline/execution.py` 的 `_modules_for_target` 注册新 target。
+4. 在 CLI `akshare update --target` 的 Choice 列表中添加新 target。
 
 AkShare Module 架构的详细决策见 `docs/adr/0002-akshare-update-module-interface.md`。
 
@@ -250,8 +251,8 @@ AkShare Module 架构的详细决策见 `docs/adr/0002-akshare-update-module-int
 2. 在 `validators.py` 添加验证。
 3. 在 `dataset_catalog.py` 注册 dataset 和 view，并声明 `partition_column`、`sort_columns`、`unique_columns`、`default_write_mode`；需要固定业务列时声明 `fixed_column_values`，需要清理历史分区形态时声明 `legacy_partition_prefixes`。
 4. 在 pipeline 中只调用统一存储接口：`write_dataset(dataset_id, df, partition)`、`read_dataset(dataset_id, partition)`、`read_latest_dataset(dataset_id)`、`dataset_path(dataset_id, partition)`。
-5. 如果是 AkShare 数据集，在 `AkShareClient` 添加 endpoint normalizer，并在 `src/pipeline/akshare/modules/` 下创建 Module 类；只有按股票代码循环的 target 才使用 `akshare_universe.py` 获取默认股票池。
-6. 如果是 Qlib 数据集，在 `qlib_sync.py` 中添加同步逻辑。
+5. 如果是 AkShare 数据集，在 `src/sources/akshare/client.py` 添加 endpoint normalizer，并在对应上游来源目录下创建 Module；只有按股票代码循环的 target 才使用 `src/sources/akshare/pipeline/universe.py` 获取默认股票池。
+6. 如果是 Qlib 数据集，在 `src/sources/qlib/sync.py` 中添加同步逻辑。
 7. 在 pipeline 中处理任务和 metadata，写入后刷新 registry；排序、去重、merge/upsert 规则不要散落在 pipeline 中。
 
 ## 验证

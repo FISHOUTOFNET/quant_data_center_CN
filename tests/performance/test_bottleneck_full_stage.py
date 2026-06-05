@@ -6,7 +6,7 @@ import shutil
 import time
 from pathlib import Path
 
-from src.pipeline.update_daily import update_daily
+from src.sources.baostock.update_daily import update_daily
 
 DATASET_PARTITIONED_DIRS = {
     "baostock_cn_stock_daily_bar_unadjusted",
