@@ -22,6 +22,7 @@ class DailyStep:
     name: str
     command: tuple[str, ...]
     optional: bool = False
+    timeout_seconds: int | None = None
 
     @property
     def command_text(self) -> str:
@@ -29,6 +30,7 @@ class DailyStep:
 
 
 CommandRunner = Callable[[DailyStep, Path], int]
+TIMEOUT_EXIT_CODE = 124
 
 
 def daily_steps(today: date | None = None) -> list[DailyStep]:
@@ -60,6 +62,7 @@ def daily_steps(today: date | None = None) -> list[DailyStep]:
                 "akshare update spot_quote",
                 _cli("akshare", "update", "--target", "spot_quote", "--no-build-duckdb-views"),
                 True,
+                900,
             ),
             DailyStep(
                 "baostock-unadjusted",
@@ -213,37 +216,56 @@ def run_daily_update(
                 start_seen = True
             else:
                 _record_step(step_state, step, "skipped", 0, resolved_log, now)
+                _emit(resolved_log, now, f"Skipped {step.id} before start-at {start_at}", console=True)
                 continue
 
         current_status = str(step_state.get(step.id, {}).get("status", "pending"))
         if start_at is None and current_status == "success":
+            _emit(resolved_log, now, f"Skipped {step.id}; already successful", console=True)
             continue
 
         _record_step(step_state, step, "running", None, resolved_log, now)
         _write_state(resolved_state_file, state)
-        _append_log(resolved_log, f"[{_timestamp(now)}] Starting {step.name}...\n")
-        _append_log(resolved_log, f"[{_timestamp(now)}] Command: {step.command_text}\n")
+        _emit(resolved_log, now, f"Running {step.id} ({step.name})... log={resolved_log}", console=True)
+        _emit(resolved_log, now, f"Command: {step.command_text}", console=False)
 
         exit_code = int(runner(step, resolved_log))
         if exit_code != 0:
+            timed_out = exit_code == TIMEOUT_EXIT_CODE and step.timeout_seconds is not None
             if step.optional:
-                _append_log(
-                    resolved_log,
-                    f"[{_timestamp(now)}] {step.name} completed with warnings; continuing after error code {exit_code}\n",
+                status = "skipped_timeout" if timed_out else "skipped"
+                reason = (
+                    f"{step.name} timed out after {step.timeout_seconds} seconds; continuing"
+                    if timed_out
+                    else f"{step.name} completed with warnings; continuing after error code {exit_code}"
                 )
-                _record_step(step_state, step, "skipped", exit_code, resolved_log, now)
+                _emit(
+                    resolved_log,
+                    now,
+                    reason,
+                    console=True,
+                )
+                _record_step(step_state, step, status, exit_code, resolved_log, now)
                 _write_state(resolved_state_file, state)
                 continue
-            _append_log(resolved_log, f"[{_timestamp(now)}] {step.name} failed with error code {exit_code}\n")
+            if timed_out:
+                _emit(
+                    resolved_log,
+                    now,
+                    f"{step.name} timed out after {step.timeout_seconds} seconds; stopping",
+                    console=True,
+                )
+            else:
+                _emit(resolved_log, now, f"{step.name} failed with error code {exit_code}", console=True)
             _record_step(step_state, step, "failed", exit_code, resolved_log, now)
             _write_state(resolved_state_file, state)
             return exit_code
 
-        _append_log(resolved_log, f"[{_timestamp(now)}] Completed {step.name}\n")
+        _emit(resolved_log, now, f"Completed {step.id} ({step.name})", console=True)
         _record_step(step_state, step, "success", 0, resolved_log, now)
         _write_state(resolved_state_file, state)
 
-    _append_log(resolved_log, f"[{_timestamp(now)}] All updates completed successfully\n")
+    _emit(resolved_log, now, "All updates completed successfully", console=True)
     return 0
 
 
@@ -262,7 +284,18 @@ def _default_run_log(root: Path, now: Callable[[], datetime] | None) -> Path:
 
 def _run_subprocess(step: DailyStep, log_path: Path, root: Path) -> int:
     with log_path.open("a", encoding="utf-8") as log:
-        completed = subprocess.run(step.command, cwd=root, stdout=log, stderr=subprocess.STDOUT, text=True, check=False)
+        try:
+            completed = subprocess.run(
+                step.command,
+                cwd=root,
+                stdout=log,
+                stderr=subprocess.STDOUT,
+                text=True,
+                check=False,
+                timeout=step.timeout_seconds,
+            )
+        except subprocess.TimeoutExpired:
+            return TIMEOUT_EXIT_CODE
     return int(completed.returncode)
 
 
@@ -309,5 +342,21 @@ def _append_log(path: Path, text: str) -> None:
         handle.write(text)
 
 
+def _emit(
+    log_path: Path,
+    now: Callable[[], datetime] | None,
+    message: str,
+    *,
+    console: bool,
+) -> None:
+    _append_log(log_path, f"[{_timestamp(now)}] {message}\n")
+    if console:
+        print(f"[{_time_of_day(now)}] {message}", flush=True)
+
+
 def _timestamp(now: Callable[[], datetime] | None) -> str:
     return (now or datetime.now)().strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _time_of_day(now: Callable[[], datetime] | None) -> str:
+    return (now or datetime.now)().strftime("%H:%M:%S")

@@ -335,6 +335,29 @@ def test_update_akshare_spot_fallback_writes_sina_and_hist(tmp_path) -> None:
     assert hist.loc[0, "quality_status"] == "spot_quote_close"
 
 
+def test_update_akshare_spot_fallback_logs_local_write_progress(tmp_path, monkeypatch) -> None:
+    _write_settings(tmp_path)
+    logger = FakeLogger()
+    monkeypatch.setattr(update_akshare_spot_module, "logger", logger)
+    client = FakeAStockClient()
+    client.fail_spot_em = True
+
+    records = update_akshare_spot(
+        end="2024-01-03",
+        root=tmp_path,
+        build_views=False,
+        client=client,
+        now=lambda: datetime(2024, 1, 3, 18, 0),
+    )
+
+    assert [item["status"] for item in records] == ["success", "success", "skipped_fallback"]
+    messages = [entry[1] for entry in logger.entries]
+    assert "AkShare spot fallback parquet write completed dataset={} rows={} path={}" in messages
+    assert "AkShare spot daily-bar upsert started dataset={} rows={}" in messages
+    assert "AkShare spot daily-bar upsert completed dataset={} rows={} path={}" in messages
+    assert "AkShare spot fallback lifecycle recorded trade_date={} records={}" in messages
+
+
 def test_update_akshare_spot_reports_failure_only_when_all_sources_fail(tmp_path) -> None:
     _write_settings(tmp_path)
     client = FakeAStockClient()

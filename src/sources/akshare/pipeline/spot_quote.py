@@ -266,8 +266,10 @@ def spot_sina_to_daily_bar_unadjusted(df: pd.DataFrame) -> pd.DataFrame:
 def _write_spot_daily_bar_rows(store: ParquetStore, daily_bar_rows: pd.DataFrame) -> Path:
     dataset = akshare_daily_bar_dataset_id("unadjusted")
     dataset_dir = store.parquet_dir / dataset
+    logger.info("AkShare spot daily-bar upsert started dataset={} rows={}", dataset, len(daily_bar_rows))
     if daily_bar_rows.empty:
         dataset_dir.mkdir(parents=True, exist_ok=True)
+        logger.info("AkShare spot daily-bar upsert completed dataset={} rows={} path={}", dataset, 0, dataset_dir)
         return dataset_dir
     result = store.write_dataset(dataset, daily_bar_rows, mode="upsert", skip_existing=True)
     if result.skipped_partitions > 0:
@@ -276,6 +278,12 @@ def _write_spot_daily_bar_rows(store: ParquetStore, daily_bar_rows: pd.DataFrame
             result.updated_partitions,
             result.skipped_partitions,
         )
+    logger.info(
+        "AkShare spot daily-bar upsert completed dataset={} rows={} path={}",
+        dataset,
+        len(daily_bar_rows),
+        dataset_dir,
+    )
     return dataset_dir
 
 
@@ -294,6 +302,12 @@ def _run_sina_fallback(
     try:
         response = client.fetch_spot_quote_sina(trade_date=trade_date, fallback_reason=fallback_reason)
         output_path = store.write_dataset(dataset, response.data, {"trade_date": trade_date}).primary_path
+        logger.info(
+            "AkShare spot fallback parquet write completed dataset={} rows={} path={}",
+            dataset,
+            len(response.data),
+            output_path,
+        )
         daily_bar_rows = spot_sina_to_daily_bar_unadjusted(response.data)
         daily_bar_output_path = (
             _write_spot_daily_bar_rows(store, daily_bar_rows)
@@ -319,6 +333,7 @@ def _run_sina_fallback(
                 output_path=daily_bar_output_path,
             )
             records.append(daily_bar_rows_result.run_row)
+        logger.info("AkShare spot fallback lifecycle recorded trade_date={} records={}", trade_date, len(records))
     except Exception as exc:
         rows = context.lifecycle.record_failure(
             _task_ref(dataset, "*", trade_date, trade_date, output_path),

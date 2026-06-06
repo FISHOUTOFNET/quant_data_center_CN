@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sys
 from datetime import date, datetime
 from pathlib import Path
 
@@ -151,3 +152,83 @@ def test_orchestrator_rejects_corrupt_state_file(tmp_path: Path) -> None:
             today=date(2026, 6, 5),
             command_runner=lambda step, log_path: 0,
         )
+
+
+def test_orchestrator_prints_step_progress_to_console(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    state_file = tmp_path / "state.json"
+    log_file = tmp_path / "run.log"
+
+    assert run_update_daily.run_daily_update(
+        root=tmp_path,
+        state_file=state_file,
+        run_log=log_file,
+        today=date(2026, 6, 8),
+        now=lambda: datetime(2026, 6, 8, 9, 0),
+        command_runner=lambda step, log_path: 0,
+    ) == 0
+
+    output = capsys.readouterr().out
+    assert "Running cleanup" in output
+    assert "Completed cleanup" in output
+    assert str(log_file) in output
+
+
+def test_orchestrator_optional_step_timeout_is_skipped_and_continues(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    state_file = tmp_path / "state.json"
+    log_file = tmp_path / "run.log"
+
+    timeout_step = run_update_daily.DailyStep(
+        "optional-timeout",
+        "optional timeout",
+        (sys.executable, "-c", "import time; time.sleep(5)"),
+        optional=True,
+        timeout_seconds=1,
+    )
+    next_step = run_update_daily.DailyStep(
+        "after-timeout",
+        "after timeout",
+        (sys.executable, "-c", "print('after')"),
+    )
+
+    monkeypatch.setattr(run_update_daily, "daily_steps", lambda today=None: [timeout_step, next_step])
+    assert run_update_daily.run_daily_update(
+        root=tmp_path,
+        state_file=state_file,
+        run_log=log_file,
+        today=date(2026, 6, 8),
+    ) == 0
+
+    states = _state(state_file)["runs"]["2026-06-08"]["steps"]
+    assert states["optional-timeout"]["status"] == "skipped_timeout"
+    assert states["after-timeout"]["status"] == "success"
+
+
+def test_orchestrator_required_step_timeout_fails_and_stops(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    state_file = tmp_path / "state.json"
+    log_file = tmp_path / "run.log"
+
+    timeout_step = run_update_daily.DailyStep(
+        "required-timeout",
+        "required timeout",
+        (sys.executable, "-c", "import time; time.sleep(5)"),
+        timeout_seconds=1,
+    )
+    next_step = run_update_daily.DailyStep(
+        "after-timeout",
+        "after timeout",
+        (sys.executable, "-c", "print('after')"),
+    )
+
+    monkeypatch.setattr(run_update_daily, "daily_steps", lambda today=None: [timeout_step, next_step])
+    assert run_update_daily.run_daily_update(
+        root=tmp_path,
+        state_file=state_file,
+        run_log=log_file,
+        today=date(2026, 6, 8),
+    ) != 0
+
+    states = _state(state_file)["runs"]["2026-06-08"]["steps"]
+    assert states["required-timeout"]["status"] == "failed"
+    assert "after-timeout" not in states
