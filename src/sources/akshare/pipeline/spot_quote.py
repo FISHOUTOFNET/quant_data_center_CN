@@ -11,15 +11,6 @@ from zoneinfo import ZoneInfo
 
 import pandas as pd
 
-from src.sources.akshare.core.normalization import date_iso
-from src.sources.akshare.pipeline.execution import (
-    AkShareExecutionContext,
-    AkShareUpdateRequest,
-    ConcurrencyPolicy,
-    FetchResult,
-)
-from src.sources.akshare.pipeline.common import PIPELINE_UPDATE_AKSHARE_SPOT, error_stack
-from src.sources.akshare.pipeline.universe import normalize_akshare_code_list
 from src.pipeline.common import (
     default_candidate_date,
     is_trading_day,
@@ -27,6 +18,15 @@ from src.pipeline.common import (
     should_skip_checkpoint,
 )
 from src.pipeline.lifecycle import LifecycleTaskRef
+from src.sources.akshare.core.normalization import date_iso
+from src.sources.akshare.pipeline.common import PIPELINE_UPDATE_AKSHARE_SPOT, error_stack
+from src.sources.akshare.pipeline.execution import (
+    AkShareExecutionContext,
+    AkShareUpdateRequest,
+    ConcurrencyPolicy,
+    FetchResult,
+)
+from src.sources.akshare.pipeline.universe import normalize_akshare_code_list
 from src.storage.dataset_catalog import (
     AKSHARE_SPOT_QUOTE_EASTMONEY_DATASET,
     AKSHARE_SPOT_QUOTE_SINA_DATASET,

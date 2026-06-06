@@ -7,16 +7,16 @@ from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
+from src.pipeline.common import should_skip_checkpoint
+from src.pipeline.lifecycle import LifecycleTaskRef
 from src.sources.akshare.cninfo.adapters.report_disclosure import report_period_end_date
+from src.sources.akshare.pipeline.common import error_stack
 from src.sources.akshare.pipeline.execution import (
     AkShareExecutionContext,
     AkShareUpdateRequest,
     ConcurrencyPolicy,
     FetchResult,
 )
-from src.sources.akshare.pipeline.common import error_stack
-from src.pipeline.common import should_skip_checkpoint
-from src.pipeline.lifecycle import LifecycleTaskRef
 from src.storage.dataset_catalog import AKSHARE_YYSJ_EM_DATASET
 from src.utils.logging import logger
 
@@ -207,7 +207,7 @@ def _resolve_periods(request: AkShareUpdateRequest, today: date, full_start_year
     if explicit_periods:
         return explicit_periods
     if request.mode == "full":
-        start_year = int(full_start_year)
+        start_year = int(str(full_start_year))
         return _periods_between(start_year, today)
     if request.mode != "partial":
         raise ValueError(f"Unsupported AkShare yysj_em update mode: {request.mode}")

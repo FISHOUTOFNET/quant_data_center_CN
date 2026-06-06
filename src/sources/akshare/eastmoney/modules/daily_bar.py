@@ -10,18 +10,18 @@ from typing import Any
 
 import pandas as pd
 
-from src.sources.akshare.core.normalization import date_iso
+from src.pipeline.common import PipelineCheckpointLookup, default_candidate_date, latest_trading_day_on_or_before
+from src.pipeline.lifecycle import LifecycleTaskRef
 from src.sources.akshare.client import AkShareCircuitOpen
+from src.sources.akshare.core.normalization import date_iso
+from src.sources.akshare.pipeline.common import PIPELINE_UPDATE_AKSHARE_DAILY_BAR, error_stack
 from src.sources.akshare.pipeline.execution import (
     AkShareExecutionContext,
     AkShareUpdateRequest,
     ConcurrencyPolicy,
     FetchResult,
 )
-from src.sources.akshare.pipeline.common import PIPELINE_UPDATE_AKSHARE_DAILY_BAR, error_stack
 from src.sources.akshare.pipeline.universe import resolve_akshare_universe_codes
-from src.pipeline.common import PipelineCheckpointLookup, default_candidate_date, latest_trading_day_on_or_before
-from src.pipeline.lifecycle import LifecycleTaskRef
 from src.storage.dataset_catalog import (
     akshare_daily_bar_adjustments,
     akshare_daily_bar_dataset_id,

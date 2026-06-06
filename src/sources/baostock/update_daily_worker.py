@@ -10,13 +10,6 @@ from threading import Lock
 
 import pandas as pd
 
-from src.sources.baostock.adjustments import (
-    BAOSTOCK_CN_STOCK_ADJUSTMENT_FACTOR_DATASET,
-    UNADJUSTED_DAILY_DATASET,
-    calculate_adjusted_daily_bar,
-    is_adjusted_daily_dataset,
-)
-from src.sources.akshare.pipeline.capital_structure_pending import enqueue_capital_structure_pending
 from src.pipeline.common import (
     FULL_HISTORY_START_DATE,
     PIPELINE_UPDATE_DAILY,
@@ -24,6 +17,13 @@ from src.pipeline.common import (
     merge_daily_frames,
 )
 from src.pipeline.lifecycle import LifecycleTaskRef, PipelineMetadataBatch, failure_rows, success_rows
+from src.sources.akshare.pipeline.capital_structure_pending import enqueue_capital_structure_pending
+from src.sources.baostock.adjustments import (
+    BAOSTOCK_CN_STOCK_ADJUSTMENT_FACTOR_DATASET,
+    UNADJUSTED_DAILY_DATASET,
+    calculate_adjusted_daily_bar,
+    is_adjusted_daily_dataset,
+)
 from src.sources.baostock.update_daily_frames import (
     _baostock_cn_stock_adjustment_factor_frames_differ,
     _has_data_in_range,

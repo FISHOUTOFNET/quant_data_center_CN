@@ -5,21 +5,21 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pandas as pd
 
-from src.sources.akshare.cninfo.adapters.report_disclosure import report_period_end_date
+from src.pipeline.lifecycle import LifecycleTaskRef
 from src.sources.akshare.client import AkShareResponse, normalize_akshare_code
+from src.sources.akshare.cninfo.adapters.report_disclosure import report_period_end_date
+from src.sources.akshare.pipeline.common import error_stack
 from src.sources.akshare.pipeline.execution import (
     AkShareExecutionContext,
     AkShareUpdateRequest,
     ConcurrencyPolicy,
     FetchResult,
 )
-from src.sources.akshare.pipeline.common import error_stack
 from src.sources.akshare.pipeline.universe import resolve_akshare_universe_codes
-from src.pipeline.lifecycle import LifecycleTaskRef
 from src.storage.dataset_catalog import AKSHARE_FINANCIAL_REPORT_SINA_DATASET
 from src.storage.parquet_store import ParquetStore
 from src.utils.config_mgr import ConfigManager
@@ -303,12 +303,13 @@ def _local_disclosure_candidates(
             for record in _disclosure_candidate_records(df, effective_date, trigger_start):
                 code = normalize_akshare_code(record["code"])
                 report_period = str(record["report_period"])
+                trigger_date = cast(date, record["trigger_date"])
                 rows.append(
                     {
                         "code": code,
                         "report_period": report_period,
                         "period_end_date": report_period_end_date(report_period).isoformat(),
-                        "trigger_date": record["trigger_date"].isoformat(),
+                        "trigger_date": trigger_date.isoformat(),
                         "trigger_priority": record["trigger_priority"],
                         "trigger_source": source,
                         "status": "pending",
@@ -403,7 +404,7 @@ def _merge_candidate_rows(rows: list[dict[str, object]]) -> list[dict[str, objec
 
 
 def _candidate_sort_key(row: dict[str, object]) -> tuple[int, str]:
-    return int(row.get("trigger_priority") or 0), str(row.get("trigger_date") or "")
+    return int(str(row.get("trigger_priority") or 0)), str(row.get("trigger_date") or "")
 
 
 def _write_task_data(
@@ -444,7 +445,7 @@ def _present_period_end_dates(df: pd.DataFrame) -> set[str]:
 
 def _update_pending_after_success(root: Path, task: FinancialReportTask, missing_periods: set[str]) -> None:
     existing = read_financial_report_pending(root)
-    existing_rows = existing.to_dict("records") if not existing.empty else []
+    existing_rows = cast(list[dict[str, object]], existing.to_dict("records")) if not existing.empty else []
     task_keys = {(task.code, period) for period in task.target_periods}
     remaining = [
         row
@@ -573,9 +574,10 @@ def _close_after_time(config: ConfigManager) -> time:
 
 
 def _date_or_none(value: object) -> date | None:
-    if pd.isna(value) or str(value).strip() == "":
+    text = str(value).strip()
+    if pd.isna(text) or text == "":
         return None
-    parsed = pd.to_datetime(value, errors="coerce")
+    parsed = pd.to_datetime(text, errors="coerce")
     if pd.isna(parsed):
         return None
     return parsed.date()

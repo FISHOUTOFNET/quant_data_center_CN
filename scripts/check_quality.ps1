@@ -16,4 +16,4 @@ function Invoke-QualityStep {
 Invoke-QualityStep { python -m ruff format --check . }
 Invoke-QualityStep { python -m ruff check . }
 Invoke-QualityStep { python -m pyright }
-Invoke-QualityStep { python -m pytest --cov=src --cov-report=term-missing }
+Invoke-QualityStep { python -m pytest -m "not performance" --cov=src --cov-report=term-missing }

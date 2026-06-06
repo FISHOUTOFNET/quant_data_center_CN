@@ -553,7 +553,7 @@ def _coerce_date(value: object) -> date | None:
         return value.date()
     if isinstance(value, date):
         return value
-    converted = pd.to_datetime(value, errors="coerce")
+    converted = pd.to_datetime(str(value), errors="coerce")
     if pd.isna(converted):
         return None
     return converted.date()

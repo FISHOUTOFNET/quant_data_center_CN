@@ -9,8 +9,8 @@ from typing import Any
 
 import pandas as pd
 
-from src.sources.akshare.client import AkShareResponse
 from src.pipeline.lifecycle import LifecycleTaskRef, failure_rows, success_rows
+from src.sources.akshare.client import AkShareResponse
 from src.storage.parquet_store import ParquetStore
 
 PIPELINE_UPDATE_AKSHARE_DELIST = "update_akshare_delist"

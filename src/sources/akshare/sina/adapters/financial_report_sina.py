@@ -115,9 +115,9 @@ def _sina_source_symbol(code: str) -> str:
 
 
 def _parse_report_date(value: object) -> object:
-    if pd.isna(value):
-        return None
     text = str(value).strip()
+    if pd.isna(text):
+        return None
     if len(text) == 8 and text.isdigit():
         return datetime.strptime(text, "%Y%m%d").date()
     parsed = pd.to_datetime(text, errors="coerce")
@@ -127,24 +127,27 @@ def _parse_report_date(value: object) -> object:
 
 
 def _date_or_none(value: object) -> object:
-    if pd.isna(value) or str(value).strip() == "":
+    text = str(value).strip()
+    if pd.isna(text) or text == "":
         return None
-    parsed = pd.to_datetime(value, errors="coerce")
+    parsed = pd.to_datetime(text, errors="coerce")
     if pd.isna(parsed):
         return None
     return parsed.date()
 
 
 def _timestamp_or_none(value: object) -> object:
-    if pd.isna(value) or str(value).strip() == "":
+    text = str(value).strip()
+    if pd.isna(text) or text == "":
         return None
-    parsed = pd.to_datetime(value, errors="coerce")
+    parsed = pd.to_datetime(text, errors="coerce")
     if pd.isna(parsed):
         return None
     return parsed.floor("ms")
 
 
 def _string_value(value: object) -> str:
-    if pd.isna(value):
+    text = str(value).strip()
+    if pd.isna(text):
         return ""
-    return str(value).strip()
+    return text

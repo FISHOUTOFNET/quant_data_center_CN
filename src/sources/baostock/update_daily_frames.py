@@ -4,13 +4,13 @@ from __future__ import annotations
 
 import pandas as pd
 
-from src.sources.common.market_data import MarketDataProvider
 from src.sources.baostock.adjustments import (
     UNADJUSTED_DAILY_DATASET,
     calculate_adjusted_daily_bar,
     is_adjusted_daily_dataset,
 )
 from src.sources.baostock.services import fetch_daily_bars, log_api_fetch
+from src.sources.common.market_data import MarketDataProvider
 from src.storage.parquet_store import ParquetStore
 from src.storage.schema import BAOSTOCK_CN_STOCK_ADJUSTMENT_FACTOR_SCHEMA
 from src.utils.config_mgr import ConfigManager

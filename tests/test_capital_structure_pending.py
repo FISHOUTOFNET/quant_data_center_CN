@@ -6,12 +6,12 @@ from pathlib import Path
 
 import pandas as pd
 
+from src.pipeline.lifecycle import PipelineMetadataBatch
 from src.sources.akshare.pipeline.capital_structure_pending import (
     drain_capital_structure_pending,
     enqueue_capital_structure_pending,
     read_capital_structure_pending,
 )
-from src.pipeline.lifecycle import PipelineMetadataBatch
 from src.sources.baostock.update_daily_worker import _DailyUpdateBackgroundWorker
 from src.storage.parquet_store import ParquetStore
 from src.utils.config_mgr import ConfigManager

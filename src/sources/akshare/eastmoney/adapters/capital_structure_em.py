@@ -13,7 +13,7 @@ from src.sources.akshare.core.normalization import select_required_columns, stan
 from src.sources.akshare.core.symbols import normalize_akshare_code
 from src.storage.schema import AKSHARE_CAPITAL_STRUCTURE_EM_SCHEMA, field_names
 
-CAPITAL_STRUCTURE_FIELD_ALIASES = {
+CAPITAL_STRUCTURE_FIELD_ALIASES: dict[str, tuple[str, ...]] = {
     "change_date": ("变更日期", "change_date"),
     "total_shares": ("总股本", "total_shares"),
     "restricted_shares": ("流通受限股份", "restricted_shares"),

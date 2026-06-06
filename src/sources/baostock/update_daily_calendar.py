@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import pandas as pd
 
-from src.sources.common.market_data import MarketDataProvider
 from src.pipeline.common import (
     FULL_HISTORY_START_DATE,
     PIPELINE_UPDATE_DAILY,
@@ -19,6 +18,7 @@ from src.pipeline.common import (
 from src.pipeline.lifecycle import LifecycleTaskRef, skipped_rows, success_rows
 from src.sources.baostock.services import log_api_fetch
 from src.sources.baostock.update_daily_metadata import _persist_lifecycle_rows
+from src.sources.common.market_data import MarketDataProvider
 from src.storage.parquet_store import ParquetStore
 
 

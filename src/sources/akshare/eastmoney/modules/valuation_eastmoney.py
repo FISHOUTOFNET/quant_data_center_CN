@@ -11,6 +11,8 @@ from typing import Any, cast
 
 import pandas as pd
 
+from src.pipeline.common import PipelineCheckpointLookup
+from src.pipeline.lifecycle import LifecycleTaskRef
 from src.sources.akshare.client import (
     AkShareEmptyDataError,
     AkShareNetworkError,
@@ -28,8 +30,6 @@ from src.sources.akshare.pipeline.universe import (
     latest_active_akshare_valuation_codes,
     resolve_akshare_valuation_universe_codes,
 )
-from src.pipeline.common import PipelineCheckpointLookup
-from src.pipeline.lifecycle import LifecycleTaskRef
 from src.storage.dataset_catalog import AKSHARE_VALUATION_EASTMONEY_DATASET
 from src.storage.parquet_store import ParquetStore
 from src.utils.config_mgr import ConfigManager

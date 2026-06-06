@@ -6,13 +6,13 @@ from datetime import datetime
 import pandas as pd
 import pytest
 
-from src.sources.akshare.core import runtime as akshare_runtime_module
 from src.sources.akshare.client import (
     AkShareCircuitOpen,
     AkShareClient,
     AkShareNetworkError,
     normalize_akshare_code,
 )
+from src.sources.akshare.core import runtime as akshare_runtime_module
 
 
 class _FakeResponse:
@@ -241,14 +241,14 @@ def test_akshare_timeout_failures_open_circuit() -> None:
 
         def stock_value_em(self, symbol: str) -> pd.DataFrame:
             calls["count"] += 1
-            time.sleep(0.05)
+            time.sleep(0.2)
             return _stock_valuation_raw()
 
     client = AkShareClient(
         config=FakeConfig(
             {
                 "api.akshare.max_retries": 1,
-                "api.akshare.call_timeout_seconds": 0.01,
+                "api.akshare.call_timeout_seconds": 0.001,
                 "api.akshare.endpoints.stock_value_em.failure_threshold": 2,
                 "api.akshare.endpoints.stock_value_em.cooldown_minutes": 30,
             }

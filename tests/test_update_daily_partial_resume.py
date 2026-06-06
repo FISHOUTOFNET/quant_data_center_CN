@@ -7,8 +7,8 @@ import pytest
 from update_daily_fakes import _fake_provider_factory, _write_settings
 
 import src.sources.baostock.update_daily as update_daily_module
-from src.sources.baostock.adjustments import BAOSTOCK_CN_STOCK_ADJUSTMENT_FACTOR_DATASET
 from src.pipeline.common import PIPELINE_UPDATE_DAILY, write_checkpoint
+from src.sources.baostock.adjustments import BAOSTOCK_CN_STOCK_ADJUSTMENT_FACTOR_DATASET
 from src.storage.parquet_store import ParquetStore
 
 pytestmark = pytest.mark.slow

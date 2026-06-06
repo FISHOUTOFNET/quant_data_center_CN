@@ -7,16 +7,16 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from src.pipeline.common import should_skip_checkpoint
+from src.pipeline.lifecycle import LifecycleTaskRef
 from src.sources.akshare.core.normalization import date_iso
+from src.sources.akshare.pipeline.common import PIPELINE_UPDATE_AKSHARE_DELIST, error_stack
 from src.sources.akshare.pipeline.execution import (
     AkShareExecutionContext,
     AkShareUpdateRequest,
     ConcurrencyPolicy,
     FetchResult,
 )
-from src.sources.akshare.pipeline.common import PIPELINE_UPDATE_AKSHARE_DELIST, error_stack
-from src.pipeline.common import should_skip_checkpoint
-from src.pipeline.lifecycle import LifecycleTaskRef
 from src.storage.dataset_catalog import AKSHARE_DELIST_SH_DATASET, AKSHARE_DELIST_SZ_DATASET
 from src.utils.logging import logger
 

@@ -4,8 +4,6 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from src.sources.common.market_data import MarketDataProvider
-from src.sources.baostock.adjustments import BAOSTOCK_CN_STOCK_ADJUSTMENT_FACTOR_DATASET
 from src.pipeline.common import (
     DAILY_BAR_DATASETS,
     FULL_HISTORY_START_DATE,
@@ -16,11 +14,13 @@ from src.pipeline.common import (
     should_skip_checkpoint,
 )
 from src.pipeline.lifecycle import LifecycleTaskRef, skipped_rows, success_rows
+from src.sources.baostock.adjustments import BAOSTOCK_CN_STOCK_ADJUSTMENT_FACTOR_DATASET
 from src.sources.baostock.services import fetch_baostock_cn_stock_basic, log_api_fetch
 from src.sources.baostock.update_daily_metadata import (
     _persist_lifecycle_rows,
 )
 from src.sources.baostock.update_daily_types import DailyTargetPlan
+from src.sources.common.market_data import MarketDataProvider
 from src.storage.parquet_store import ParquetStore
 from src.utils.logging import logger
 

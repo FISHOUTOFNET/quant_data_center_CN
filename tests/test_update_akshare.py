@@ -8,13 +8,13 @@ import pandas as pd
 import pytest
 
 import src.sources.akshare.eastmoney.modules.valuation_eastmoney as valuation_module
+from src.pipeline.common import write_checkpoint
 from src.sources.akshare.client import AkShareCircuitOpen, AkShareResponse
-from src.sources.akshare.pipeline import AkShareUpdateRequest, update_akshare
 from src.sources.akshare.eastmoney.modules.valuation_eastmoney import (
     AdaptiveConcurrencyController,
     plan_valuation_tasks,
 )
-from src.pipeline.common import write_checkpoint
+from src.sources.akshare.pipeline import AkShareUpdateRequest, update_akshare
 from src.storage.parquet_store import ParquetStore
 from src.utils.config_mgr import ConfigManager
 

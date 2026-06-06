@@ -13,6 +13,7 @@ from concurrent.futures import TimeoutError as FutureTimeoutError
 from dataclasses import dataclass
 from datetime import date, datetime
 from pathlib import Path
+from typing import Any, cast
 from urllib.request import Request, urlopen
 
 import pandas as pd
@@ -533,7 +534,11 @@ def _as_dataframe(value: object) -> pd.DataFrame:
         return pd.DataFrame()
     if isinstance(value, pd.DataFrame):
         return value.copy()
-    return pd.DataFrame(value)
+    if isinstance(value, dict):
+        return pd.DataFrame(value)
+    if isinstance(value, Sequence):
+        return pd.DataFrame(value)
+    return pd.DataFrame(cast(Any, value))
 
 
 def _parse_date_values(values: pd.Series) -> list[pd.Timestamp]:

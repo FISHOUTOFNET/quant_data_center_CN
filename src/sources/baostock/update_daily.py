@@ -10,9 +10,6 @@ from pathlib import Path
 
 import pandas as pd
 
-from src.sources.common.market_data import create_provider
-from src.sources.baostock.adjustments import BAOSTOCK_CN_STOCK_ADJUSTMENT_FACTOR_DATASET, UNADJUSTED_DAILY_DATASET
-from src.sources.akshare.pipeline.capital_structure_pending import drain_capital_structure_pending
 from src.pipeline.common import (
     FULL_HISTORY_START_DATE,
     PIPELINE_UPDATE_DAILY,
@@ -26,6 +23,8 @@ from src.pipeline.common import (
     trading_range_bounds,
 )
 from src.pipeline.lifecycle import LifecycleTaskRef, PipelineMetadataBatch, refresh_dirty_registry, skipped_rows
+from src.sources.akshare.pipeline.capital_structure_pending import drain_capital_structure_pending
+from src.sources.baostock.adjustments import BAOSTOCK_CN_STOCK_ADJUSTMENT_FACTOR_DATASET, UNADJUSTED_DAILY_DATASET
 from src.sources.baostock.services import fetch_baostock_cn_stock_adjustment_factor, fetch_daily_bars, log_api_fetch
 from src.sources.baostock.update_daily_calendar import (
     _prepare_full_baostock_cn_trading_calendar,
@@ -44,6 +43,7 @@ from src.sources.baostock.update_daily_targets import (
 )
 from src.sources.baostock.update_daily_types import ApiFetchRequest, BackgroundTaskResult, DailyTargetPlan
 from src.sources.baostock.update_daily_worker import _DailyUpdateBackgroundWorker
+from src.sources.common.market_data import create_provider
 from src.storage.duckdb_store import DuckDBStore
 from src.storage.parquet_store import ParquetStore
 from src.utils.config_mgr import ConfigManager

@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import pandas as pd
 
-from src.sources.common.market_data import DailyBarRequest, MarketDataProvider
 from src.pipeline.common import FULL_HISTORY_START_DATE, baostock_cn_trading_calendar_covers_range
+from src.sources.common.market_data import DailyBarRequest, MarketDataProvider
 from src.storage.parquet_store import ParquetStore
 from src.utils.config_mgr import ConfigManager
 from src.utils.logging import logger

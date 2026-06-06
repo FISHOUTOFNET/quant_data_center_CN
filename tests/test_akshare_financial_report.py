@@ -6,10 +6,10 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
-from src.sources.akshare.sina.adapters.financial_report_sina import FinancialReportSinaAdapter
-from src.sources.akshare.cninfo.adapters.report_disclosure import report_period_end_date
 from src.sources.akshare.client import AkShareResponse
+from src.sources.akshare.cninfo.adapters.report_disclosure import report_period_end_date
 from src.sources.akshare.pipeline import AkShareUpdateRequest, update_akshare
+from src.sources.akshare.sina.adapters.financial_report_sina import FinancialReportSinaAdapter
 from src.sources.akshare.sina.modules.financial_report_sina import _resolve_workers, read_financial_report_pending
 from src.storage.parquet_store import ParquetStore
 from src.utils.config_mgr import ConfigManager

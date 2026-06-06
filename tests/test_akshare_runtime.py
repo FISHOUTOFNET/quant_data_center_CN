@@ -6,8 +6,8 @@ from datetime import datetime
 import pandas as pd
 import pytest
 
-from src.sources.akshare.core.runtime import AkShareRuntime
 from src.sources.akshare.client import AkShareCircuitOpen, AkShareNetworkError
+from src.sources.akshare.core.runtime import AkShareRuntime
 
 
 class FakeConfig:
