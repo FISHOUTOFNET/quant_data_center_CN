@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 from collections.abc import Callable
@@ -306,6 +307,7 @@ def _default_run_log(root: Path, now: Callable[[], datetime] | None) -> Path:
 
 
 def _run_subprocess(step: DailyStep, log_path: Path, root: Path) -> int:
+    env = {**os.environ, "QDC_DISABLE_FILE_LOG": "1"}
     with log_path.open("a", encoding="utf-8") as log:
         try:
             completed = subprocess.run(
@@ -313,6 +315,7 @@ def _run_subprocess(step: DailyStep, log_path: Path, root: Path) -> int:
                 cwd=root,
                 stdout=log,
                 stderr=subprocess.STDOUT,
+                env=env,
                 text=True,
                 check=False,
                 timeout=step.timeout_seconds,

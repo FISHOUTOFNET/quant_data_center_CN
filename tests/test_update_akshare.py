@@ -77,6 +77,17 @@ class CircuitOpenAkShareClient(FakeAkShareClient):
         return _response("akshare_cn_stock_valuation_eastmoney", {"symbol": code}, data)
 
 
+class RejectingInvalidAkShareClient(FakeAkShareClient):
+    def __init__(self, akshare_cn_stock_valuation_eastmoney_sample, invalid_codes: set[str]) -> None:
+        super().__init__(akshare_cn_stock_valuation_eastmoney_sample)
+        self._invalid_codes = invalid_codes
+
+    def fetch_stock_valuation(self, code: str) -> AkShareResponse:
+        if code in self._invalid_codes:
+            raise RuntimeError(f"invalid code should have been filtered: {code}")
+        return super().fetch_stock_valuation(code)
+
+
 class ProgressLogger:
     def __init__(self) -> None:
         self.entries: list[tuple[str, str, tuple[object, ...]]] = []
@@ -320,6 +331,71 @@ def test_stock_valuation_task_pool_uses_akshare_universe_and_filters_delisted_in
     assert [task.code for task in full] == ["600000", "000001"]
 
 
+def test_stock_valuation_task_pool_filters_unsupported_spot_quote_rows(
+    tmp_path,
+    baostock_cn_stock_basic_sample,
+) -> None:
+    _write_settings(tmp_path)
+    store = ParquetStore(root=tmp_path)
+    store.ensure_layout()
+    store.write_dataset("baostock_cn_stock_basic", baostock_cn_stock_basic_sample())
+    _write_akshare_universe(
+        store,
+        spot_rows=[
+            _spot_quote_row("600000", "浦发银行", 8.3),
+            _spot_quote_row("600849", "上药转换", None),
+            _spot_quote_row("810013", "万通定转", 100.0),
+            _spot_quote_row("832317", "观典防务", None),
+            _spot_quote_row("920680", "广道退", 0.86),
+        ],
+        delisted_codes=("000001",),
+    )
+    config = ConfigManager(tmp_path)
+
+    partial = plan_valuation_tasks(config=config, store=store, mode="partial")
+    full = plan_valuation_tasks(config=config, store=store, mode="full")
+
+    assert [task.code for task in partial] == ["600000"]
+    assert [task.code for task in full] == ["600000", "000001"]
+
+
+def test_update_akshare_stock_valuation_full_skips_unsupported_spot_quote_rows(
+    tmp_path,
+    baostock_cn_stock_basic_sample,
+    akshare_cn_stock_valuation_eastmoney_sample,
+) -> None:
+    _write_settings(tmp_path)
+    store = ParquetStore(root=tmp_path)
+    store.ensure_layout()
+    store.write_dataset("baostock_cn_stock_basic", baostock_cn_stock_basic_sample())
+    invalid_codes = {"600849", "810013", "832317", "920680"}
+    _write_akshare_universe(
+        store,
+        spot_rows=[
+            _spot_quote_row("600000", "浦发银行", 8.3),
+            _spot_quote_row("600849", "上药转换", None),
+            _spot_quote_row("810013", "万通定转", 100.0),
+            _spot_quote_row("832317", "观典防务", None),
+            _spot_quote_row("920680", "广道退", 0.86),
+        ],
+        delisted_codes=("000001",),
+    )
+    client = RejectingInvalidAkShareClient(akshare_cn_stock_valuation_eastmoney_sample, invalid_codes)
+
+    records = update_akshare(
+        _request(
+            mode="full",
+            root=tmp_path,
+            build_views=False,
+            workers=1,
+            client=client,
+        )
+    )
+
+    assert client.value_calls == ["600000", "000001"]
+    assert [item["status"] for item in records] == ["success", "success"]
+
+
 def test_update_akshare_accepts_repeated_six_digit_code_option(
     tmp_path,
     baostock_cn_stock_basic_sample,
@@ -519,38 +595,12 @@ def _write_akshare_universe(
     store: ParquetStore,
     spot_codes: tuple[str, ...] = ("600000",),
     delisted_codes: tuple[str, ...] = ("000001",),
+    spot_rows: list[dict[str, object]] | None = None,
 ) -> None:
     fetched_at = datetime(2024, 1, 3, 18, 0)
     store.write_dataset(
         "akshare_cn_stock_spot_quote_eastmoney",
-        pd.DataFrame(
-            [
-                {
-                    "trade_date": "2024-01-03",
-                    "code": code,
-                    "source_symbol": code,
-                    "name": f"Stock {code}",
-                    "last_price": 8.3,
-                    "price_change": 0.1,
-                    "pct_change": 1.2,
-                    "open": 8.2,
-                    "high": 8.4,
-                    "low": 8.1,
-                    "prev_close": 8.2,
-                    "volume": 120000.0,
-                    "amount": 9960.0,
-                    "turnover_rate": 0.12,
-                    "amplitude": 3.0,
-                    "pe_dynamic": 5.1,
-                    "pb": 0.71,
-                    "total_market_cap": 101000000.0,
-                    "float_market_cap": 81000000.0,
-                    "source_endpoint": "stock_zh_a_spot_em",
-                    "fetched_at": fetched_at,
-                }
-                for code in spot_codes
-            ]
-        ),
+        pd.DataFrame(spot_rows or [_spot_quote_row(code, f"Stock {code}", 8.3) for code in spot_codes]),
         {"trade_date": "2024-01-03"},
     )
     if delisted_codes:
@@ -575,6 +625,33 @@ def _write_akshare_universe(
             ),
             {"snapshot_date": "2024-01-03"},
         )
+
+
+def _spot_quote_row(code: str, name: str, last_price: float | None) -> dict[str, object]:
+    fetched_at = datetime(2024, 1, 3, 18, 0)
+    return {
+        "trade_date": "2024-01-03",
+        "code": code,
+        "source_symbol": code,
+        "name": name,
+        "last_price": last_price,
+        "price_change": 0.1 if last_price is not None else None,
+        "pct_change": 1.2 if last_price is not None else None,
+        "open": 8.2 if last_price is not None else None,
+        "high": 8.4 if last_price is not None else None,
+        "low": 8.1 if last_price is not None else None,
+        "prev_close": 8.2,
+        "volume": 120000.0 if last_price is not None else None,
+        "amount": 9960.0 if last_price is not None else None,
+        "turnover_rate": 0.12,
+        "amplitude": 3.0 if last_price is not None else None,
+        "pe_dynamic": 5.1 if last_price is not None else None,
+        "pb": 0.71 if last_price is not None else None,
+        "total_market_cap": 101000000.0 if last_price is not None else None,
+        "float_market_cap": 81000000.0 if last_price is not None else None,
+        "source_endpoint": "stock_zh_a_spot_em",
+        "fetched_at": fetched_at,
+    }
 
 
 def _write_settings(root) -> None:

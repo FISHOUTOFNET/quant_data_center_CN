@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 import sys
 from datetime import date, datetime
 from pathlib import Path
@@ -222,6 +223,30 @@ def test_weekend_akshare_valuation_failure_does_not_block_independent_later_step
     assert states["sync-qlib"]["status"] == "success"
     assert states["financial-report"]["status"] == "success"
     assert states["build-duckdb-views"]["status"] == "success"
+
+
+def test_run_subprocess_disables_child_file_logging(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+    log_file = tmp_path / "run.log"
+    step = run_update_daily.DailyStep("sample", "sample step", (sys.executable, "-c", "print('sample')"))
+
+    def fake_run(*args, **kwargs):
+        captured["args"] = args
+        captured["kwargs"] = kwargs
+        kwargs["stdout"].write("captured child output\n")
+        return subprocess.CompletedProcess(args[0], 0)
+
+    monkeypatch.setattr(run_update_daily.subprocess, "run", fake_run)
+
+    assert run_update_daily._run_subprocess(step, log_file, tmp_path) == 0
+
+    env = captured["kwargs"]["env"]
+    assert env["QDC_DISABLE_FILE_LOG"] == "1"
+    assert captured["kwargs"]["stderr"] == subprocess.STDOUT
+    assert log_file.read_text(encoding="utf-8") == "captured child output\n"
 
 
 def test_orchestrator_rejects_corrupt_state_file(tmp_path: Path) -> None:

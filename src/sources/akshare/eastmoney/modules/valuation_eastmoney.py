@@ -24,7 +24,10 @@ from src.sources.akshare.pipeline.execution import (
     ConcurrencyPolicy,
     FetchResult,
 )
-from src.sources.akshare.pipeline.universe import latest_active_akshare_codes, resolve_akshare_universe_codes
+from src.sources.akshare.pipeline.universe import (
+    latest_active_akshare_valuation_codes,
+    resolve_akshare_valuation_universe_codes,
+)
 from src.pipeline.common import PipelineCheckpointLookup
 from src.pipeline.lifecycle import LifecycleTaskRef
 from src.storage.dataset_catalog import AKSHARE_VALUATION_EASTMONEY_DATASET
@@ -57,7 +60,7 @@ def plan_valuation_tasks(
     if mode not in {"partial", "full"}:
         raise ValueError(f"Unsupported AkShare valuation update mode: {mode}")
 
-    active_codes = latest_active_akshare_codes(store)
+    active_codes = latest_active_akshare_valuation_codes(store)
     tasks = _valuation_tasks(config, store, mode, code, include_inactive, active_codes)
     if max_tasks is not None:
         tasks = tasks[: max(int(max_tasks), 0)]
@@ -78,7 +81,7 @@ def _valuation_tasks(
         codes = [normalize_akshare_code(item) for item in code]
     else:
         active_only = bool(config.get("datasets.akshare_cn_stock_valuation_eastmoney.active_only", True))
-        codes = resolve_akshare_universe_codes(
+        codes = resolve_akshare_valuation_universe_codes(
             store,
             include_delisted=mode == "full" or include_inactive or not active_only,
             context="akshare_cn_stock_valuation_eastmoney",

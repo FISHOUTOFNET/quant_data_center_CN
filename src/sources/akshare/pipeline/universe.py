@@ -52,9 +52,48 @@ def resolve_akshare_universe_codes(
     return resolved
 
 
+def resolve_akshare_valuation_universe_codes(
+    store: ParquetStore,
+    include_delisted: bool = False,
+    context: str = "AkShare valuation",
+) -> list[str]:
+    """Resolve stock codes suitable for AkShare Eastmoney valuation history."""
+
+    spot_df = store.read_latest_dataset("akshare_cn_stock_spot_quote_eastmoney")
+    sh_delisted_codes = _latest_dataset_codes(store.read_latest_dataset("akshare_cn_stock_delist_sh"))
+    sz_delisted_codes = _latest_dataset_codes(store.read_latest_dataset("akshare_cn_stock_delist_sz"))
+    delisted_codes = list(dict.fromkeys([*sh_delisted_codes, *sz_delisted_codes]))
+    if spot_df.empty and not delisted_codes:
+        raise ValueError(
+            f"No local AkShare stock universe found for {context}; "
+            "run akshare update --target spot_quote and/or akshare update --target delist first"
+        )
+
+    active_spot_codes = _latest_valuation_active_codes(spot_df, set(delisted_codes))
+    codes = [*active_spot_codes, *delisted_codes] if include_delisted else active_spot_codes
+
+    resolved = list(dict.fromkeys(codes))
+    if not resolved:
+        raise ValueError(f"No active AkShare stock codes found for {context}")
+    return resolved
+
+
 def latest_active_akshare_codes(store: ParquetStore) -> set[str]:
     try:
         return set(resolve_akshare_universe_codes(store, include_delisted=False, context="active AkShare pool"))
+    except ValueError:
+        return set()
+
+
+def latest_active_akshare_valuation_codes(store: ParquetStore) -> set[str]:
+    try:
+        return set(
+            resolve_akshare_valuation_universe_codes(
+                store,
+                include_delisted=False,
+                context="active AkShare valuation pool",
+            )
+        )
     except ValueError:
         return set()
 
@@ -63,3 +102,20 @@ def _latest_dataset_codes(df: pd.DataFrame) -> list[str]:
     if df.empty or "code" not in df.columns:
         return []
     return normalize_akshare_code_list(df["code"].dropna().astype(str).tolist())
+
+
+def _latest_valuation_active_codes(df: pd.DataFrame, delisted: set[str]) -> list[str]:
+    if df.empty or "code" not in df.columns:
+        return []
+
+    working = df[df["code"].notna()].copy()
+    working["code"] = working["code"].map(normalize_akshare_code)
+    working = working[working["code"].notna() & (working["code"] != "")]
+    working = working[~working["code"].isin(delisted)]
+    if "last_price" in working.columns:
+        working = working[working["last_price"].notna()]
+    if "name" in working.columns:
+        names = working["name"].fillna("").astype(str)
+        unsupported_name = names.str.contains("定转|转换", regex=True) | names.str.endswith("退")
+        working = working[~unsupported_name]
+    return list(dict.fromkeys(working["code"].tolist()))
