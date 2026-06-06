@@ -23,6 +23,7 @@ class DailyStep:
     command: tuple[str, ...]
     optional: bool = False
     timeout_seconds: int | None = None
+    depends_on: tuple[str, ...] = ()
 
     @property
     def command_text(self) -> str:
@@ -83,6 +84,7 @@ def daily_steps(today: date | None = None) -> list[DailyStep]:
                 "baostock-valuation-percentile",
                 "update-baostock-valuation-percentile",
                 _cli("update-baostock-valuation-percentile", "--no-build-duckdb-views"),
+                depends_on=("baostock-unadjusted",),
             ),
         ]
     )
@@ -109,6 +111,7 @@ def daily_steps(today: date | None = None) -> list[DailyStep]:
                         "baostock_cn_stock_daily_bar_qfq",
                         "--no-build-duckdb-views",
                     ),
+                    depends_on=("baostock-unadjusted", "baostock-adjustment-factor"),
                 ),
                 DailyStep(
                     "baostock-hfq",
@@ -119,6 +122,7 @@ def daily_steps(today: date | None = None) -> list[DailyStep]:
                         "baostock_cn_stock_daily_bar_hfq",
                         "--no-build-duckdb-views",
                     ),
+                    depends_on=("baostock-unadjusted", "baostock-adjustment-factor"),
                 ),
                 DailyStep(
                     "akshare-valuation-full",
@@ -210,6 +214,7 @@ def run_daily_update(
     resolved_log.parent.mkdir(parents=True, exist_ok=True)
 
     start_seen = start_at is None
+    failed_exit_code: int | None = None
     for step in steps:
         if not start_seen:
             if step.id == start_at:
@@ -222,6 +227,18 @@ def run_daily_update(
         current_status = str(step_state.get(step.id, {}).get("status", "pending"))
         if start_at is None and current_status == "success":
             _emit(resolved_log, now, f"Skipped {step.id}; already successful", console=True)
+            continue
+
+        blocked_by = _blocked_dependencies(step, step_state)
+        if blocked_by:
+            _record_step(step_state, step, "blocked", 1, resolved_log, now, blocked_by=blocked_by)
+            _write_state(resolved_state_file, state)
+            _emit(
+                resolved_log,
+                now,
+                f"Blocked {step.id}; dependency failed: {', '.join(blocked_by)}",
+                console=True,
+            )
             continue
 
         _record_step(step_state, step, "running", None, resolved_log, now)
@@ -259,14 +276,20 @@ def run_daily_update(
                 _emit(resolved_log, now, f"{step.name} failed with error code {exit_code}", console=True)
             _record_step(step_state, step, "failed", exit_code, resolved_log, now)
             _write_state(resolved_state_file, state)
-            return exit_code
+            if failed_exit_code is None:
+                failed_exit_code = exit_code
+            continue
 
         _emit(resolved_log, now, f"Completed {step.id} ({step.name})", console=True)
         _record_step(step_state, step, "success", 0, resolved_log, now)
         _write_state(resolved_state_file, state)
 
-    _emit(resolved_log, now, "All updates completed successfully", console=True)
-    return 0
+    final_exit_code = _final_exit_code(steps, step_state, failed_exit_code)
+    if final_exit_code == 0:
+        _emit(resolved_log, now, "All updates completed successfully", console=True)
+    else:
+        _emit(resolved_log, now, f"Daily update completed with failures; exit code {final_exit_code}", console=True)
+    return final_exit_code
 
 
 def _cli(*args: str) -> tuple[str, ...]:
@@ -323,10 +346,12 @@ def _record_step(
     exit_code: int | None,
     log_path: Path,
     now: Callable[[], datetime] | None,
+    *,
+    blocked_by: tuple[str, ...] | list[str] | None = None,
 ) -> None:
     previous = step_state.get(step.id, {})
     started_at = previous.get("started_at") if status != "running" else _timestamp(now)
-    step_state[step.id] = {
+    row = {
         "status": status,
         "command": step.command_text,
         "started_at": started_at,
@@ -334,6 +359,32 @@ def _record_step(
         "exit_code": exit_code,
         "log_path": str(log_path),
     }
+    if blocked_by is not None:
+        row["blocked_by"] = list(blocked_by)
+    step_state[step.id] = row
+
+
+def _blocked_dependencies(step: DailyStep, step_state: dict[str, Any]) -> tuple[str, ...]:
+    blocked: list[str] = []
+    for dependency in step.depends_on:
+        dependency_status = str(step_state.get(dependency, {}).get("status", "pending"))
+        if dependency_status in {"failed", "blocked"}:
+            blocked.append(dependency)
+    return tuple(blocked)
+
+
+def _final_exit_code(steps: list[DailyStep], step_state: dict[str, Any], failed_exit_code: int | None) -> int:
+    if failed_exit_code is not None:
+        return failed_exit_code
+    for step in steps:
+        current = step_state.get(step.id, {})
+        if str(current.get("status")) == "failed":
+            raw_exit_code = current.get("exit_code")
+            return int(raw_exit_code) if raw_exit_code is not None else 1
+    for step in steps:
+        if str(step_state.get(step.id, {}).get("status")) == "blocked":
+            return 1
+    return 0
 
 
 def _append_log(path: Path, text: str) -> None:

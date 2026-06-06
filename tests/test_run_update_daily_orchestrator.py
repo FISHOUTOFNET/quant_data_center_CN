@@ -52,26 +52,75 @@ def test_orchestrator_resumes_after_successful_steps(tmp_path: Path) -> None:
     assert states["baostock-qfq"]["status"] == "success"
 
 
-def test_orchestrator_retries_from_failed_step(tmp_path: Path) -> None:
+def test_orchestrator_continues_independent_steps_and_blocks_dependents(tmp_path: Path) -> None:
     state_file = tmp_path / "state.json"
     log_file = tmp_path / "run.log"
     calls: list[str] = []
 
+    independent = run_update_daily.DailyStep("independent", "independent", (sys.executable, "-c", "print('ok')"))
+    failing = run_update_daily.DailyStep("source", "source", (sys.executable, "-c", "raise SystemExit(7)"))
+    dependent = run_update_daily.DailyStep(
+        "dependent",
+        "dependent",
+        (sys.executable, "-c", "print('blocked')"),
+        depends_on=("source",),
+    )
+
     def failing_runner(step: run_update_daily.DailyStep, log_path: Path) -> int:
         del log_path
         calls.append(step.id)
-        return 7 if step.id == "baostock-unadjusted" else 0
+        return 7 if step.id == "source" else 0
 
+    original_steps = run_update_daily.daily_steps
+    run_update_daily.daily_steps = lambda today=None: [independent, failing, dependent]
+    try:
+        result = run_update_daily.run_daily_update(
+            root=tmp_path,
+            state_file=state_file,
+            run_log=log_file,
+            today=date(2026, 6, 5),
+            now=lambda: datetime(2026, 6, 5, 18, 0),
+            command_runner=failing_runner,
+        )
+    finally:
+        run_update_daily.daily_steps = original_steps
+
+    assert result == 7
+    assert calls == ["independent", "source"]
+    states = _state(state_file)["runs"]["2026-06-05"]["steps"]
+    assert states["independent"]["status"] == "success"
+    assert states["source"]["status"] == "failed"
+    assert states["dependent"]["status"] == "blocked"
+    assert states["dependent"]["blocked_by"] == ["source"]
+
+
+def test_orchestrator_retries_failed_and_unblocks_dependents(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    state_file = tmp_path / "state.json"
+    log_file = tmp_path / "run.log"
+    calls: list[str] = []
+    steps = [
+        run_update_daily.DailyStep("source", "source", (sys.executable, "-c", "print('source')")),
+        run_update_daily.DailyStep(
+            "dependent",
+            "dependent",
+            (sys.executable, "-c", "print('dependent')"),
+            depends_on=("source",),
+        ),
+    ]
+
+    monkeypatch.setattr(run_update_daily, "daily_steps", lambda today=None: steps)
     assert run_update_daily.run_daily_update(
         root=tmp_path,
         state_file=state_file,
         run_log=log_file,
         today=date(2026, 6, 5),
         now=lambda: datetime(2026, 6, 5, 18, 0),
-        command_runner=failing_runner,
+        command_runner=lambda step, log_path: calls.append(step.id) or (7 if step.id == "source" else 0),
     ) == 7
-    assert calls[-1] == "baostock-unadjusted"
-    assert _state(state_file)["runs"]["2026-06-05"]["steps"]["baostock-unadjusted"]["status"] == "failed"
+    assert calls == ["source"]
+    states = _state(state_file)["runs"]["2026-06-05"]["steps"]
+    assert states["source"]["status"] == "failed"
+    assert states["dependent"]["status"] == "blocked"
 
     calls.clear()
     assert run_update_daily.run_daily_update(
@@ -82,7 +131,10 @@ def test_orchestrator_retries_from_failed_step(tmp_path: Path) -> None:
         now=lambda: datetime(2026, 6, 5, 19, 0),
         command_runner=lambda step, log_path: calls.append(step.id) or 0,
     ) == 0
-    assert calls[0] == "baostock-unadjusted"
+    assert calls == ["source", "dependent"]
+    states = _state(state_file)["runs"]["2026-06-05"]["steps"]
+    assert states["source"]["status"] == "success"
+    assert states["dependent"]["status"] == "success"
 
 
 def test_orchestrator_force_and_start_at_control_resume(tmp_path: Path) -> None:
@@ -139,6 +191,37 @@ def test_orchestrator_weekend_window_filters_heavy_steps(tmp_path: Path) -> None
     assert "baostock-qfq" not in monday
     assert "akshare-valuation-full" not in monday
     assert "financial-report" in monday
+
+
+def test_weekend_akshare_valuation_failure_does_not_block_independent_later_steps(tmp_path: Path) -> None:
+    state_file = tmp_path / "state.json"
+    log_file = tmp_path / "run.log"
+    calls: list[str] = []
+
+    assert run_update_daily.run_daily_update(
+        root=tmp_path,
+        state_file=state_file,
+        run_log=log_file,
+        today=date(2026, 6, 6),
+        now=lambda: datetime(2026, 6, 6, 1, 0),
+        command_runner=lambda step, log_path: calls.append(step.id) or (7 if step.id == "akshare-valuation-full" else 0),
+    ) == 7
+
+    assert "akshare-valuation-full" in calls
+    assert "akshare-report-disclosure" in calls
+    assert "akshare-yysj-em" in calls
+    assert "akshare-daily-bar" in calls
+    assert "sync-qlib" in calls
+    assert "financial-report" in calls
+    assert calls[-1] == "build-duckdb-views"
+    states = _state(state_file)["runs"]["2026-06-06"]["steps"]
+    assert states["akshare-valuation-full"]["status"] == "failed"
+    assert states["akshare-report-disclosure"]["status"] == "success"
+    assert states["akshare-yysj-em"]["status"] == "success"
+    assert states["akshare-daily-bar"]["status"] == "success"
+    assert states["sync-qlib"]["status"] == "success"
+    assert states["financial-report"]["status"] == "success"
+    assert states["build-duckdb-views"]["status"] == "success"
 
 
 def test_orchestrator_rejects_corrupt_state_file(tmp_path: Path) -> None:
@@ -205,7 +288,9 @@ def test_orchestrator_optional_step_timeout_is_skipped_and_continues(
     assert states["after-timeout"]["status"] == "success"
 
 
-def test_orchestrator_required_step_timeout_fails_and_stops(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_orchestrator_required_step_timeout_fails_and_continues_independent_steps(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     state_file = tmp_path / "state.json"
     log_file = tmp_path / "run.log"
 
@@ -231,4 +316,4 @@ def test_orchestrator_required_step_timeout_fails_and_stops(tmp_path: Path, monk
 
     states = _state(state_file)["runs"]["2026-06-08"]["steps"]
     assert states["required-timeout"]["status"] == "failed"
-    assert "after-timeout" not in states
+    assert states["after-timeout"]["status"] == "success"

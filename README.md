@@ -309,6 +309,13 @@ Select-String -Path logs\qdc.log -Pattern "ERROR|WARNING"
 python -m src.tools.log_cleanup --dry-run
 ```
 
+`scripts\run_update_daily.bat` delegates scheduling to `python -m src.cli run-update-daily`.
+The orchestrator is dependency-aware: a failed non-optional step is recorded and
+independent later steps continue, while steps that explicitly depend on the
+failed step are recorded as `blocked`. The final process exit code remains
+non-zero when any required step failed or was blocked, so Windows Task Scheduler
+and external monitors can still alert on partial failures.
+
 查询任务状态：
 
 ```python
