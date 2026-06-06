@@ -17,6 +17,7 @@ from src.sources.baostock.update_daily import update_daily as run_update_daily
 from src.sources.baostock.valuation_percentile import (
     update_baostock_valuation_percentile as run_update_baostock_valuation_percentile,
 )
+from src.sources.derived.update import build_derived_datasets as run_build_derived
 from src.sources.qlib import sync as qlib_sync_module
 from src.storage.duckdb_store import DuckDBStore
 from src.tools.run_update_daily import StateFileError, run_daily_update
@@ -345,6 +346,45 @@ def repair(code: str, start: str, end: str, dataset: str, provider: str | None, 
             f"{item['dataset']} {item['code']} replacement_rows={item['replacement_rows']} "
             f"total_rows={item['total_rows']} path={item['path']}"
         )
+
+
+@cli.command("build-derived")
+@click.option(
+    "--target",
+    multiple=True,
+    type=click.Choice(["security_master", "daily_bar", "valuation", "all"]),
+    default=("all",),
+)
+@click.option("--build-duckdb-views/--no-build-duckdb-views", "build_views", default=True, show_default=True)
+def build_derived(target: tuple[str, ...], build_views: bool) -> None:
+    """Build canonical and curated derived datasets."""
+
+    try:
+        records = run_build_derived(targets=target, build_views=build_views)
+    except ValueError as exc:
+        raise click.BadParameter(str(exc)) from exc
+    _echo_derived_records(records)
+
+
+@cli.command("build-security-master")
+@click.option("--build-duckdb-views/--no-build-duckdb-views", "build_views", default=True, show_default=True)
+def build_security_master(build_views: bool) -> None:
+    """Build cn_security_master."""
+
+    records = run_build_derived(targets=("security_master",), build_views=build_views)
+    _echo_derived_records(records)
+
+
+def _echo_derived_records(records: list[dict[str, object]]) -> None:
+    for item in records:
+        fields = [
+            f"{item.get('dataset')} status={item.get('status')}",
+            f"rows={item.get('rows', 0)}",
+        ]
+        for key in ("active", "delisted", "partitions"):
+            if key in item:
+                fields.append(f"{key}={item[key]}")
+        click.echo(" ".join(fields))
 
 
 @cli.command("build-duckdb-views")

@@ -44,6 +44,8 @@ The dataset detail combines catalog metadata with current inventory fields such 
 
 Datasets that do not partition by stock code use their own catalog partition column. For example, `akshare_cn_stock_report_disclosure`, `akshare_cn_stock_yysj_em`, and `akshare_cn_stock_yjyg_em` partition by `report_period` because AkShare fetches them by report period parameters instead of looping `code`.
 
+Derived local datasets are also discoverable through the same catalog and inventory files. `cn_security_master` is unpartitioned, while `cn_stock_daily_bar` and `cn_stock_valuation` partition by canonical `security_id`, for example `security_id=SH.600000`. The registry partition endpoint scans those `partition_column=value/data.parquet` directories like any other partitioned dataset.
+
 `akshare_cn_stock_yjyg_em` uses endpoint `stock_yjyg_em` and CLI target `yjyg_em`. Full mode starts at `20030630` by default and extends to the end of the current rolling forecast window; partial and incremental update the consecutive forecast periods beginning with the previous report period. The table is long-form, so a stock/report-period pair may have multiple `forecast_indicator` rows.
 
 List partitions:
@@ -64,6 +66,14 @@ GET http://127.0.0.1:8765/v1/datasets/akshare_cn_stock_yysj_em/partitions
 
 ```http
 GET http://127.0.0.1:8765/v1/datasets/akshare_cn_stock_yjyg_em/partitions
+```
+
+```http
+GET http://127.0.0.1:8765/v1/datasets/cn_stock_daily_bar/partitions
+```
+
+```http
+GET http://127.0.0.1:8765/v1/datasets/cn_stock_valuation/partitions
 ```
 
 ## Events

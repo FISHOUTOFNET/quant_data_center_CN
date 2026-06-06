@@ -24,6 +24,9 @@ from src.storage.schema import (
     BAOSTOCK_CN_STOCK_BASIC_SCHEMA,
     BAOSTOCK_CN_TRADING_CALENDAR_SCHEMA,
     BAOSTOCK_VALUATION_PERCENTILE_SCHEMA,
+    CN_SECURITY_MASTER_SCHEMA,
+    CN_STOCK_DAILY_BAR_SCHEMA,
+    CN_STOCK_VALUATION_SCHEMA,
     DAILY_BAR_SCHEMA,
     QLIB_CN_CALENDAR_DAY_SCHEMA,
     QLIB_CN_INSTRUMENT_MEMBERSHIP_SCHEMA,
@@ -38,6 +41,9 @@ class ValidationError(ValueError):
 
 
 AKSHARE_CODE_RE = re.compile(r"^\d{6}$")
+CANONICAL_SECURITY_ID_RE = re.compile(r"^(SH|SZ|BJ)\.\d{6}$")
+CANONICAL_EXCHANGES = {"SH", "SZ", "BJ"}
+ADJUSTMENTS = {"unadjusted", "qfq", "hfq"}
 
 
 def validate_schema_matches(df: pd.DataFrame, schema: pa.Schema) -> None:
@@ -129,6 +135,161 @@ def validate_non_negative(df: pd.DataFrame, column: str) -> None:
     if invalid.any():
         sample = df.loc[invalid, ["code", "date", column]].head(5).to_dict("records")
         logger.warning("{} validation warning (negative values): {}", column, sample)
+
+
+def _blank_mask(series: pd.Series) -> pd.Series:
+    values = series.astype("string").str.strip()
+    return (values.isna() | (values == "")).fillna(True)
+
+
+def validate_non_empty_columns(df: pd.DataFrame, columns: list[str]) -> None:
+    if df.empty:
+        return
+    for column in columns:
+        invalid = _blank_mask(df[column])
+        if invalid.any():
+            sample = df.loc[invalid, columns].head(5).to_dict("records")
+            raise ValidationError(f"{column} must be non-empty: {sample}")
+
+
+def validate_canonical_security_id_columns(df: pd.DataFrame) -> None:
+    if df.empty:
+        return
+    security_ids = df["security_id"].astype("string").str.strip()
+    codes = df["code"].astype("string").str.strip()
+    exchanges = df["exchange"].astype("string").str.strip()
+
+    invalid_security_id = security_ids.isna() | ~security_ids.map(
+        lambda value: bool(CANONICAL_SECURITY_ID_RE.fullmatch(str(value)))
+    )
+    if invalid_security_id.any():
+        sample = df.loc[invalid_security_id, ["security_id"]].head(5).to_dict("records")
+        raise ValidationError(f"security_id must look like SH.600000/SZ.000001/BJ.430000: {sample}")
+
+    invalid_code = codes.isna() | ~codes.map(lambda value: bool(AKSHARE_CODE_RE.fullmatch(str(value))))
+    if invalid_code.any():
+        sample = df.loc[invalid_code, ["security_id", "code"]].head(5).to_dict("records")
+        raise ValidationError(f"code must be 6 digits: {sample}")
+
+    invalid_exchange = exchanges.isna() | ~exchanges.isin(CANONICAL_EXCHANGES)
+    if invalid_exchange.any():
+        sample = df.loc[invalid_exchange, ["security_id", "exchange"]].head(5).to_dict("records")
+        raise ValidationError(f"exchange must be one of SH, SZ, BJ: {sample}")
+
+    expected_ids = exchanges + "." + codes
+    mismatch = security_ids != expected_ids
+    if mismatch.any():
+        sample = df.loc[mismatch, ["security_id", "exchange", "code"]].head(5).to_dict("records")
+        raise ValidationError(f"security_id must equal exchange + '.' + code: {sample}")
+
+
+def validate_date_monotonic_by_group(
+    df: pd.DataFrame,
+    group_columns: list[str],
+    date_column: str = "date",
+) -> None:
+    if df.empty:
+        return
+    dates = pd.to_datetime(df[date_column], errors="coerce")
+    if dates.isna().any():
+        raise ValidationError(f"{date_column} contains null or invalid values")
+    work = df.assign(_date=dates)
+    for key, group in work.groupby(group_columns, dropna=False, sort=False):
+        if not group["_date"].is_monotonic_increasing:
+            raise ValidationError(f"{date_column} is not monotonically increasing for {group_columns}={key}")
+
+
+def validate_cn_security_master(
+    df: pd.DataFrame,
+    schema: pa.Schema = CN_SECURITY_MASTER_SCHEMA,
+) -> None:
+    validate_schema_matches(df, schema)
+    validate_unique_columns(df, ["security_id"])
+    validate_non_empty_columns(df, ["security_id", "code", "exchange", "updated_at"])
+    validate_canonical_security_id_columns(df)
+    if df.empty:
+        return
+
+    codes = df["code"].astype("string").str.strip()
+    exchanges = df["exchange"].astype("string").str.strip()
+
+    akshare_codes = df["akshare_code"].astype("string").str.strip()
+    has_akshare = ~_blank_mask(df["akshare_code"])
+    akshare_invalid = has_akshare & (akshare_codes != codes)
+    if akshare_invalid.any():
+        sample = df.loc[akshare_invalid, ["security_id", "akshare_code", "code"]].head(5).to_dict("records")
+        raise ValidationError(f"akshare_code must equal code when present: {sample}")
+
+    baostock_codes = df["baostock_code"].astype("string").str.strip()
+    has_baostock = ~_blank_mask(df["baostock_code"])
+    expected_baostock = exchanges.str.lower() + "." + codes
+    baostock_invalid = has_baostock & (
+        ((exchanges == "BJ") & (baostock_codes != "")) | ((exchanges != "BJ") & (baostock_codes != expected_baostock))
+    )
+    if baostock_invalid.any():
+        sample = df.loc[baostock_invalid, ["security_id", "baostock_code"]].head(5).to_dict("records")
+        raise ValidationError(f"baostock_code does not match canonical code mapping: {sample}")
+
+    qlib_symbols = df["qlib_symbol"].astype("string").str.strip()
+    has_qlib = ~_blank_mask(df["qlib_symbol"])
+    expected_qlib = exchanges.str.lower() + codes
+    qlib_invalid = has_qlib & (qlib_symbols != expected_qlib)
+    if qlib_invalid.any():
+        sample = df.loc[qlib_invalid, ["security_id", "qlib_symbol"]].head(5).to_dict("records")
+        raise ValidationError(f"qlib_symbol does not match canonical code mapping: {sample}")
+
+    active = df["is_active"].fillna(False).astype("boolean")
+    listing_status = df["listing_status"].astype("string").str.strip().str.lower()
+    active_invalid = active & (listing_status.fillna("") != "active")
+    if active_invalid.any():
+        sample = df.loc[active_invalid, ["security_id", "is_active", "listing_status"]].head(5).to_dict("records")
+        raise ValidationError(f"is_active=True requires listing_status='active': {sample}")
+
+
+def validate_cn_stock_daily_bar(
+    df: pd.DataFrame,
+    schema: pa.Schema = CN_STOCK_DAILY_BAR_SCHEMA,
+) -> None:
+    validate_schema_matches(df, schema)
+    validate_unique_columns(df, ["date", "security_id", "adjustment"])
+    validate_non_empty_columns(
+        df,
+        ["date", "security_id", "code", "exchange", "adjustment", "source_dataset", "updated_at"],
+    )
+    validate_canonical_security_id_columns(df)
+    if df.empty:
+        return
+    adjustments = df["adjustment"].astype("string").str.strip()
+    invalid_adjustment = ~adjustments.isin(ADJUSTMENTS)
+    if invalid_adjustment.any():
+        sample = df.loc[invalid_adjustment, ["security_id", "date", "adjustment"]].head(5).to_dict("records")
+        raise ValidationError(f"adjustment must be one of {sorted(ADJUSTMENTS)}: {sample}")
+    validate_date_monotonic_by_group(df, ["security_id", "adjustment"])
+    validate_ohlc(df)
+    validate_non_negative(df, "volume")
+    validate_non_negative(df, "amount")
+
+
+def validate_cn_stock_valuation(
+    df: pd.DataFrame,
+    schema: pa.Schema = CN_STOCK_VALUATION_SCHEMA,
+) -> None:
+    validate_schema_matches(df, schema)
+    validate_unique_columns(df, ["date", "security_id"])
+    validate_non_empty_columns(df, ["date", "security_id", "code", "exchange", "source_dataset", "updated_at"])
+    validate_canonical_security_id_columns(df)
+    if df.empty:
+        return
+    for column in ["total_market_cap", "float_market_cap", "total_shares", "float_shares"]:
+        validate_non_negative(df, column)
+    percentile_columns = [column for column in df.columns if "percentile" in column]
+    for column in percentile_columns:
+        values = pd.to_numeric(df[column], errors="coerce")
+        invalid = values.notna() & ~values.between(0.0, 100.0, inclusive="both")
+        if invalid.any():
+            sample = df.loc[invalid, ["security_id", "date", column]].head(5).to_dict("records")
+            raise ValidationError(f"{column} percentile out of range 0..100: {sample}")
+    validate_date_monotonic_by_group(df, ["security_id"])
 
 
 def validate_daily_bar(df: pd.DataFrame, schema: pa.Schema = DAILY_BAR_SCHEMA) -> None:

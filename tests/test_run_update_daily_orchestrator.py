@@ -235,6 +235,25 @@ def test_daily_steps_include_yjyg_em_before_build_views_on_weekday() -> None:
     assert by_id["akshare-yjyg-em"].timeout_seconds == 900
 
 
+def test_daily_steps_build_security_master_before_views_on_weekday() -> None:
+    steps = run_update_daily.daily_steps(date(2026, 6, 8))
+    by_id = {step.id: step for step in steps}
+
+    assert "build-security-master" in by_id
+    assert steps.index(by_id["financial-report"]) < steps.index(by_id["build-security-master"])
+    assert steps.index(by_id["build-security-master"]) < steps.index(by_id["build-duckdb-views"])
+    assert by_id["build-security-master"].depends_on == ("baostock-basic",)
+    assert by_id["build-security-master"].command[1:] == (
+        "-m",
+        "src.cli",
+        "build-derived",
+        "--target",
+        "security_master",
+        "--no-build-duckdb-views",
+    )
+    assert not any("--target all" in step.command_text for step in steps)
+
+
 def test_run_daily_update_records_yjyg_em_step_on_weekday(tmp_path: Path) -> None:
     state_file = tmp_path / "state.json"
     log_file = tmp_path / "run.log"

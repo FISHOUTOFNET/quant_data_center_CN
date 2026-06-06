@@ -341,6 +341,96 @@ QLIB_CN_STOCK_FEATURES_DAY_SCHEMA = pa.schema(
     ]
 )
 
+CN_SECURITY_MASTER_SCHEMA = pa.schema(
+    [
+        pa.field("security_id", pa.string()),
+        pa.field("code", pa.string()),
+        pa.field("exchange", pa.string()),
+        pa.field("name", pa.string()),
+        pa.field("security_type", pa.string()),
+        pa.field("board", pa.string()),
+        pa.field("baostock_code", pa.string()),
+        pa.field("akshare_code", pa.string()),
+        pa.field("qlib_symbol", pa.string()),
+        pa.field("ipo_date", pa.date32()),
+        pa.field("delist_date", pa.date32()),
+        pa.field("listing_status", pa.string()),
+        pa.field("is_active", pa.bool_()),
+        pa.field("source_priority", pa.string()),
+        pa.field("latest_source_date", pa.date32()),
+        pa.field("updated_at", pa.timestamp("ms")),
+    ]
+)
+
+CN_STOCK_DAILY_BAR_SCHEMA = pa.schema(
+    [
+        pa.field("date", pa.date32()),
+        pa.field("security_id", pa.string()),
+        pa.field("code", pa.string()),
+        pa.field("exchange", pa.string()),
+        pa.field("name", pa.string()),
+        pa.field("adjustment", pa.string()),
+        pa.field("open", pa.float64()),
+        pa.field("high", pa.float64()),
+        pa.field("low", pa.float64()),
+        pa.field("close", pa.float64()),
+        pa.field("prev_close", pa.float64()),
+        pa.field("volume", pa.float64()),
+        pa.field("amount", pa.float64()),
+        pa.field("turnover_rate", pa.float64()),
+        pa.field("pct_change", pa.float64()),
+        pa.field("trade_status", pa.string()),
+        pa.field("is_st", pa.string()),
+        pa.field("is_active", pa.bool_()),
+        pa.field("source_dataset", pa.string()),
+        pa.field("source_endpoint", pa.string()),
+        pa.field("quality_status", pa.string()),
+        pa.field("updated_at", pa.timestamp("ms")),
+    ]
+)
+
+CN_STOCK_VALUATION_SCHEMA = pa.schema(
+    [
+        pa.field("date", pa.date32()),
+        pa.field("security_id", pa.string()),
+        pa.field("code", pa.string()),
+        pa.field("exchange", pa.string()),
+        pa.field("name", pa.string()),
+        pa.field("close", pa.float64()),
+        pa.field("total_market_cap", pa.float64()),
+        pa.field("float_market_cap", pa.float64()),
+        pa.field("total_shares", pa.float64()),
+        pa.field("float_shares", pa.float64()),
+        pa.field("pe_ttm", pa.float64()),
+        pa.field("pe_static", pa.float64()),
+        pa.field("pb", pa.float64()),
+        pa.field("ps", pa.float64()),
+        pa.field("pcf", pa.float64()),
+        pa.field("pe_ttm_percentile_1y", pa.float64()),
+        pa.field("pe_ttm_percentile_3y", pa.float64()),
+        pa.field("pe_ttm_percentile_5y", pa.float64()),
+        pa.field("pe_ttm_percentile_10y", pa.float64()),
+        pa.field("pe_ttm_percentile_all_history", pa.float64()),
+        pa.field("pb_percentile_1y", pa.float64()),
+        pa.field("pb_percentile_3y", pa.float64()),
+        pa.field("pb_percentile_5y", pa.float64()),
+        pa.field("pb_percentile_10y", pa.float64()),
+        pa.field("pb_percentile_all_history", pa.float64()),
+        pa.field("ps_percentile_1y", pa.float64()),
+        pa.field("ps_percentile_3y", pa.float64()),
+        pa.field("ps_percentile_5y", pa.float64()),
+        pa.field("ps_percentile_10y", pa.float64()),
+        pa.field("ps_percentile_all_history", pa.float64()),
+        pa.field("pcf_percentile_1y", pa.float64()),
+        pa.field("pcf_percentile_3y", pa.float64()),
+        pa.field("pcf_percentile_5y", pa.float64()),
+        pa.field("pcf_percentile_10y", pa.float64()),
+        pa.field("pcf_percentile_all_history", pa.float64()),
+        pa.field("source_dataset", pa.string()),
+        pa.field("updated_at", pa.timestamp("ms")),
+    ]
+)
+
 PIPELINE_RUNS_SCHEMA = pa.schema(
     [
         pa.field("task_id", pa.string()),
@@ -414,6 +504,9 @@ DATASET_SCHEMAS: Mapping[str, pa.Schema] = {
     "qlib_cn_calendar_day": QLIB_CN_CALENDAR_DAY_SCHEMA,
     "qlib_cn_instrument_membership": QLIB_CN_INSTRUMENT_MEMBERSHIP_SCHEMA,
     "qlib_cn_stock_features_day": QLIB_CN_STOCK_FEATURES_DAY_SCHEMA,
+    "cn_security_master": CN_SECURITY_MASTER_SCHEMA,
+    "cn_stock_daily_bar": CN_STOCK_DAILY_BAR_SCHEMA,
+    "cn_stock_valuation": CN_STOCK_VALUATION_SCHEMA,
     **METADATA_SCHEMAS,
 }
 

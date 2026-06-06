@@ -26,6 +26,9 @@ from src.quality.validators import (
     validate_baostock_cn_stock_basic,
     validate_baostock_cn_stock_valuation_percentile,
     validate_baostock_cn_trading_calendar,
+    validate_cn_security_master,
+    validate_cn_stock_daily_bar,
+    validate_cn_stock_valuation,
     validate_daily_bar,
     validate_qlib_cn_calendar_day,
     validate_qlib_cn_instrument_membership,
@@ -48,6 +51,9 @@ from src.storage.schema import (
     BAOSTOCK_CN_STOCK_BASIC_SCHEMA,
     BAOSTOCK_CN_TRADING_CALENDAR_SCHEMA,
     BAOSTOCK_VALUATION_PERCENTILE_SCHEMA,
+    CN_SECURITY_MASTER_SCHEMA,
+    CN_STOCK_DAILY_BAR_SCHEMA,
+    CN_STOCK_VALUATION_SCHEMA,
     DAILY_BAR_SCHEMA,
     QLIB_CN_CALENDAR_DAY_SCHEMA,
     QLIB_CN_INSTRUMENT_MEMBERSHIP_SCHEMA,
@@ -407,6 +413,52 @@ QLIB_CN_STOCK_FEATURES_DAY_DATASET = DatasetDefinition(
     unique_columns=("qlib_symbol", "date"),
 )
 
+CN_SECURITY_MASTER_DATASET = DatasetDefinition(
+    id="cn_security_master",
+    logical_name="cn_security_master",
+    source="derived",
+    endpoint=None,
+    code_format="canonical_security_id",
+    schema=CN_SECURITY_MASTER_SCHEMA,
+    validator=validate_cn_security_master,
+    view_name="v_cn_security_master",
+    sort_columns=("exchange", "code"),
+    unique_columns=("security_id",),
+    default_write_mode="replace",
+)
+
+CN_STOCK_DAILY_BAR_DATASET = DatasetDefinition(
+    id="cn_stock_daily_bar",
+    logical_name="cn_stock_daily_bar",
+    source="derived",
+    endpoint=None,
+    code_format="canonical_security_id",
+    schema=CN_STOCK_DAILY_BAR_SCHEMA,
+    validator=validate_cn_stock_daily_bar,
+    view_name="v_cn_stock_daily_bar",
+    partitioned_by_code=True,
+    partition_column="security_id",
+    sort_columns=("security_id", "adjustment", "date"),
+    unique_columns=("date", "security_id", "adjustment"),
+    default_write_mode="upsert",
+)
+
+CN_STOCK_VALUATION_DATASET = DatasetDefinition(
+    id="cn_stock_valuation",
+    logical_name="cn_stock_valuation",
+    source="derived",
+    endpoint=None,
+    code_format="canonical_security_id",
+    schema=CN_STOCK_VALUATION_SCHEMA,
+    validator=validate_cn_stock_valuation,
+    view_name="v_cn_stock_valuation",
+    partitioned_by_code=True,
+    partition_column="security_id",
+    sort_columns=("security_id", "date"),
+    unique_columns=("date", "security_id"),
+    default_write_mode="upsert",
+)
+
 AKSHARE_DATASET_NAMES = (AKSHARE_VALUATION_EASTMONEY_DATASET.id, AKSHARE_CAPITAL_STRUCTURE_EM_DATASET.id)
 AKSHARE_A_STOCK_DATASET_NAMES = (
     AKSHARE_CAPITAL_STRUCTURE_EM_DATASET.id,
@@ -445,6 +497,9 @@ DATASET_CATALOG = {
         QLIB_CN_CALENDAR_DAY_DATASET,
         QLIB_CN_INSTRUMENT_MEMBERSHIP_DATASET,
         QLIB_CN_STOCK_FEATURES_DAY_DATASET,
+        CN_SECURITY_MASTER_DATASET,
+        CN_STOCK_DAILY_BAR_DATASET,
+        CN_STOCK_VALUATION_DATASET,
     )
 }
 
@@ -515,6 +570,14 @@ def qlib_definitions() -> tuple[DatasetDefinition, ...]:
         QLIB_CN_CALENDAR_DAY_DATASET,
         QLIB_CN_INSTRUMENT_MEMBERSHIP_DATASET,
         QLIB_CN_STOCK_FEATURES_DAY_DATASET,
+    )
+
+
+def derived_definitions() -> tuple[DatasetDefinition, ...]:
+    return (
+        CN_SECURITY_MASTER_DATASET,
+        CN_STOCK_DAILY_BAR_DATASET,
+        CN_STOCK_VALUATION_DATASET,
     )
 
 

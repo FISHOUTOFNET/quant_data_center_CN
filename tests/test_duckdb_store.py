@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 
 import duckdb
 import pandas as pd
@@ -94,3 +94,108 @@ def test_duckdb_views_can_be_created_and_queried(
     assert value_result == (2,)
     assert spot_result == (1,)
     assert old_view_count == (0,)
+
+
+def test_duckdb_views_include_derived_datasets(tmp_path) -> None:
+    store = ParquetStore(root=tmp_path)
+    store.ensure_layout()
+    store.write_dataset("cn_security_master", _master())
+    store.write_dataset("cn_stock_daily_bar", _cn_daily_bar(), {"security_id": "SH.600000"}, mode="replace")
+    store.write_dataset("cn_stock_valuation", _cn_valuation(), {"security_id": "SH.600000"}, mode="replace")
+
+    duck_store = DuckDBStore(root=tmp_path)
+    sqls = duck_store.build_views()
+
+    assert any("v_cn_security_master" in sql for sql in sqls)
+    assert any("v_cn_stock_daily_bar" in sql for sql in sqls)
+    assert any("v_cn_stock_valuation" in sql for sql in sqls)
+    with duckdb.connect(str(tmp_path / "data" / "duckdb" / "quant.duckdb")) as conn:
+        assert conn.execute("select count(*) from v_cn_security_master").fetchone() == (1,)
+        assert conn.execute("select count(*) from v_cn_stock_daily_bar where security_id='SH.600000'").fetchone() == (
+            1,
+        )
+        assert conn.execute("select count(*) from v_cn_stock_valuation where security_id='SH.600000'").fetchone() == (
+            1,
+        )
+
+
+def _master() -> pd.DataFrame:
+    return pd.DataFrame(
+        [
+            {
+                "security_id": "SH.600000",
+                "code": "600000",
+                "exchange": "SH",
+                "name": "PF Bank",
+                "security_type": "1",
+                "board": "main",
+                "baostock_code": "sh.600000",
+                "akshare_code": "600000",
+                "qlib_symbol": "sh600000",
+                "ipo_date": date(1999, 11, 10),
+                "delist_date": None,
+                "listing_status": "active",
+                "is_active": True,
+                "source_priority": "mixed",
+                "latest_source_date": date(2024, 1, 5),
+                "updated_at": datetime(2024, 1, 5, 12, 0),
+            }
+        ]
+    )
+
+
+def _cn_daily_bar() -> pd.DataFrame:
+    return pd.DataFrame(
+        [
+            {
+                "date": date(2024, 1, 2),
+                "security_id": "SH.600000",
+                "code": "600000",
+                "exchange": "SH",
+                "name": "PF Bank",
+                "adjustment": "unadjusted",
+                "open": 8.1,
+                "high": 8.3,
+                "low": 8.0,
+                "close": 8.2,
+                "prev_close": 8.0,
+                "volume": 1000.0,
+                "amount": 8200.0,
+                "turnover_rate": 0.1,
+                "pct_change": 2.5,
+                "trade_status": "1",
+                "is_st": "0",
+                "is_active": True,
+                "source_dataset": "baostock_cn_stock_daily_bar_unadjusted",
+                "source_endpoint": "query_history_k_data_plus",
+                "quality_status": "daily_bar_confirmed",
+                "updated_at": datetime(2024, 1, 5, 12, 0),
+            }
+        ]
+    )
+
+
+def _cn_valuation() -> pd.DataFrame:
+    return pd.DataFrame(
+        [
+            {
+                "date": date(2024, 1, 2),
+                "security_id": "SH.600000",
+                "code": "600000",
+                "exchange": "SH",
+                "name": "PF Bank",
+                "close": 8.2,
+                "total_market_cap": 100000000.0,
+                "float_market_cap": 80000000.0,
+                "total_shares": 12000000.0,
+                "float_shares": 10000000.0,
+                "pe_ttm": 5.0,
+                "pe_static": 5.5,
+                "pb": 0.7,
+                "ps": 1.2,
+                "pcf": 3.0,
+                "source_dataset": "akshare_cn_stock_valuation_eastmoney",
+                "updated_at": datetime(2024, 1, 5, 12, 0),
+            }
+        ]
+    )

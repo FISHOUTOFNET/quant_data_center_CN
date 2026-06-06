@@ -57,6 +57,38 @@ pre-commit run --all-files
 
 ## 常用命令
 
+### Derived local layer
+
+```powershell
+qdc build-derived
+qdc build-derived --target security_master
+qdc build-derived --target daily_bar
+qdc build-derived --target valuation
+qdc build-security-master
+```
+
+The source layer remains unchanged: `baostock_*`, `akshare_*`, and `qlib_*` datasets keep their original schemas and code formats for traceability, repair, and audit. The canonical master layer is `cn_security_master`, which maps `security_id` (`SH.600000`) to Baostock (`sh.600000`), AkShare (`600000`), and Qlib (`sh600000`) codes.
+
+The curated local layer contains `cn_stock_daily_bar` and `cn_stock_valuation`. They are materialized by `security_id` partition and are intended for research, backtesting, and Qlib feature engineering. These two datasets are heavy full rebuild targets and are not run by the daily workflow by default. Daily updates only build the lightweight `cn_security_master` before rebuilding DuckDB views.
+
+Physical paths:
+
+```text
+data/parquet/cn_security_master/data.parquet
+data/parquet/cn_stock_daily_bar/security_id=SH.600000/data.parquet
+data/parquet/cn_stock_valuation/security_id=SH.600000/data.parquet
+```
+
+DuckDB views:
+
+```sql
+select * from v_cn_security_master;
+select * from v_cn_stock_daily_bar where security_id = 'SH.600000';
+select * from v_cn_stock_valuation where security_id = 'SH.600000';
+```
+
+Run `qdc build-derived --target all` when the unified research tables need a complete refresh.
+
 ### Baostock 日线
 
 ```powershell

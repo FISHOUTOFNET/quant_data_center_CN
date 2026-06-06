@@ -209,6 +209,22 @@ class ParquetStore:
         )
         return values[-1] if values else None
 
+    def list_dataset_partitions(self, dataset_id: str) -> tuple[str, ...]:
+        definition = dataset_definition(dataset_id)
+        if definition.partition_column is None:
+            return ()
+        dataset_dir = self.parquet_dir / definition.id
+        if not dataset_dir.exists():
+            return ()
+        prefix = f"{definition.partition_column}="
+        return tuple(
+            sorted(
+                item.name[len(prefix) :]
+                for item in dataset_dir.iterdir()
+                if item.is_dir() and item.name.startswith(prefix) and (item / "data.parquet").exists()
+            )
+        )
+
     def read_latest_dataset(self, dataset_id: str) -> pd.DataFrame:
         definition = dataset_definition(dataset_id)
         if definition.partition_column is None:

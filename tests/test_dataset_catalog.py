@@ -20,6 +20,7 @@ from src.storage.dataset_catalog import (
     daily_bar_dataset_names,
     daily_bar_definition,
     daily_bar_definitions,
+    derived_definitions,
     expand_akshare_selection,
     expand_daily_bar_selection,
 )
@@ -76,6 +77,8 @@ def test_storage_layout_uses_daily_bar_catalog(tmp_path) -> None:
     assert (tmp_path / "data" / "parquet" / AKSHARE_CAPITAL_STRUCTURE_EM_DATASET.name).is_dir()
     for definition in akshare_a_stock_definitions():
         assert (tmp_path / "data" / "parquet" / definition.name).is_dir()
+    for definition in derived_definitions():
+        assert (tmp_path / "data" / "parquet" / definition.name).is_dir()
 
 
 def test_duckdb_views_use_daily_bar_catalog(tmp_path) -> None:
@@ -100,3 +103,5 @@ def test_duckdb_views_use_daily_bar_catalog(tmp_path) -> None:
     assert any("v_akshare_cn_stock_daily_bar_unadjusted" in sql for sql in sqls)
     assert any("v_akshare_cn_stock_institution_holding" in sql for sql in sqls)
     assert AKSHARE_STOCK_INSTITUTION_HOLDING_DATASET.lifecycle == "legacy_unmanaged"
+    for definition in derived_definitions():
+        assert any((definition.view_name or f"v_{definition.name}") in sql for sql in sqls)

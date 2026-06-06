@@ -50,6 +50,30 @@ Qlib 同步默认在周五至周日执行（`is_qlib_update_day`），支持 `--
 
 `source_symbol` 字段保留源接口原始代码形态，只用于追溯，不作为项目标准代码。
 
+## Derived Local Layer / 本地统一数据层
+
+The derived local layer adds a canonical and query-first surface without replacing source datasets.
+
+- `cn_security_master` is the canonical mapping layer. It standardizes `security_id`, exchange, six-digit code, listing status, board, and Baostock/AkShare/Qlib source-code mappings.
+- `cn_stock_daily_bar` is the materialized unified daily-bar table, partitioned by `security_id`.
+- `cn_stock_valuation` is the materialized unified valuation table, partitioned by `security_id`.
+
+Source-layer datasets (`baostock_*`, `akshare_*`, `qlib_*`) keep their original schemas and remain the audit, repair, and traceability source of truth. Downstream research and backtesting should prefer the `cn_*` tables when a unified local view is needed.
+
+`cn_stock_daily_bar` and `cn_stock_valuation` use partition-level materializers: each builder iterates `cn_security_master`, reads only the matching source partitions for one security, merges that security's data, and writes `data/parquet/<dataset>/security_id=<SECURITY_ID>/data.parquet`. The builders do not concatenate full-market daily-bar or valuation sources into one in-memory DataFrame.
+
+Manual full rebuild:
+
+```powershell
+qdc build-derived --target all
+```
+
+The daily workflow only runs the lightweight master refresh:
+
+```powershell
+qdc build-derived --target security_master --no-build-duckdb-views
+```
+
 ## AkShare 代码与股票池
 
 AkShare 显式 `--code`、client 入参、manifest 任务键和 Parquet 分区统一使用 6 位代码：
@@ -227,6 +251,9 @@ AkShare pipeline 只保存规范化后的 Parquet 数据和统一运行元数据
 - `v_qlib_cn_calendar_day`
 - `v_qlib_cn_instrument_membership`
 - `v_qlib_cn_stock_features_day`
+- `v_cn_security_master`
+- `v_cn_stock_daily_bar`
+- `v_cn_stock_valuation`
 
 ## 扩展点
 

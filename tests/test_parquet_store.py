@@ -193,6 +193,41 @@ def test_dataset_interface_latest_partition_and_path_validation(tmp_path) -> Non
     assert store.read_latest_dataset("akshare_cn_stock_delist_sh").loc[0, "code"] == "600002"
 
 
+def test_list_dataset_partitions_returns_empty_for_non_partitioned_dataset(tmp_path) -> None:
+    store = ParquetStore(root=tmp_path)
+    store.ensure_layout()
+
+    assert store.list_dataset_partitions("baostock_cn_trading_calendar") == ()
+
+
+def test_list_dataset_partitions_returns_stable_values(tmp_path, daily_sample) -> None:
+    store = ParquetStore(root=tmp_path)
+    store.ensure_layout()
+    sh_rows = daily_sample()
+    sz_rows = daily_sample().assign(code="sz.000001")
+
+    store.write_dataset("baostock_cn_stock_daily_bar_qfq", sz_rows, {"code": "sz.000001"})
+    store.write_dataset("baostock_cn_stock_daily_bar_qfq", sh_rows, {"code": "sh.600000"})
+
+    assert store.list_dataset_partitions("baostock_cn_stock_daily_bar_qfq") == ("sh.600000", "sz.000001")
+
+
+def test_list_dataset_partitions_returns_empty_for_empty_dataset(tmp_path) -> None:
+    store = ParquetStore(root=tmp_path)
+    store.ensure_layout()
+
+    assert store.list_dataset_partitions("akshare_cn_stock_daily_bar_unadjusted") == ()
+
+
+def test_list_dataset_partitions_ignores_tmp_parquet_only(tmp_path) -> None:
+    store = ParquetStore(root=tmp_path)
+    partition_dir = tmp_path / "data" / "parquet" / "akshare_cn_stock_daily_bar_unadjusted" / "code=600000"
+    partition_dir.mkdir(parents=True)
+    (partition_dir / "data.tmp.parquet").write_text("pending", encoding="utf-8")
+
+    assert store.list_dataset_partitions("akshare_cn_stock_daily_bar_unadjusted") == ()
+
+
 def test_daily_bar_atomic_write(tmp_path, daily_sample) -> None:
     store = ParquetStore(root=tmp_path)
     store.ensure_layout()
