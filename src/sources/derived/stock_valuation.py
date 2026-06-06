@@ -10,9 +10,11 @@ from typing import Any, cast
 import pandas as pd
 
 from src.sources.derived.common import (
+    cleanup_derived_dataset_staging,
+    commit_derived_dataset_staging,
+    create_derived_dataset_staging_area,
     read_partition_or_empty,
     refresh_derived_registry,
-    safe_remove_derived_dataset_dir,
 )
 from src.sources.derived.security_master import build_security_master
 from src.storage.duckdb_store import DuckDBStore
@@ -52,28 +54,33 @@ def build_cn_stock_valuation(
     now: Callable[[], datetime] | None = None,
 ) -> dict[str, object]:
     store = ParquetStore(root=root)
-    store.ensure_layout()
-    master = _read_or_build_master(store, now)
-    safe_remove_derived_dataset_dir(store, "cn_stock_valuation")
+    staging = create_derived_dataset_staging_area(store, "cn_stock_valuation")
+    write_store = ParquetStore(root=store.root, parquet_dir=staging.staging_root, metadata_dir=store.metadata_dir)
 
-    updated_at = (now or datetime.now)()
     rows = 0
     partitions = 0
-    for _, security in master.iterrows():
-        security_id = _clean_string(security.get("security_id"))
-        if not security_id:
-            continue
-        security_df = _materialize_security_valuation(store, security, updated_at)
-        if security_df.empty:
-            continue
-        result = store.write_dataset(
-            "cn_stock_valuation",
-            security_df,
-            partition={"security_id": security_id},
-            mode="replace",
-        )
-        rows += result.row_count
-        partitions += result.updated_partitions
+    try:
+        master = _read_or_build_master(store, now)
+        updated_at = (now or datetime.now)()
+        for _, security in master.iterrows():
+            security_id = _clean_string(security.get("security_id"))
+            if not security_id:
+                continue
+            security_df = _materialize_security_valuation(store, security, updated_at)
+            if security_df.empty:
+                continue
+            result = write_store.write_dataset(
+                "cn_stock_valuation",
+                security_df,
+                partition={"security_id": security_id},
+                mode="replace",
+            )
+            rows += result.row_count
+            partitions += result.updated_partitions
+        commit_derived_dataset_staging(staging)
+    except Exception:
+        cleanup_derived_dataset_staging(staging)
+        raise
 
     if refresh_registry:
         refresh_derived_registry(store, ["cn_stock_valuation"])

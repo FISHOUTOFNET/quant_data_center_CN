@@ -363,6 +363,8 @@ def build_derived(target: tuple[str, ...], build_views: bool) -> None:
         records = run_build_derived(targets=target, build_views=build_views)
     except ValueError as exc:
         raise click.BadParameter(str(exc)) from exc
+    except RuntimeError as exc:
+        raise click.ClickException(str(exc)) from exc
     _echo_derived_records(records)
 
 
@@ -371,7 +373,10 @@ def build_derived(target: tuple[str, ...], build_views: bool) -> None:
 def build_security_master(build_views: bool) -> None:
     """Build cn_security_master."""
 
-    records = run_build_derived(targets=("security_master",), build_views=build_views)
+    try:
+        records = run_build_derived(targets=("security_master",), build_views=build_views)
+    except RuntimeError as exc:
+        raise click.ClickException(str(exc)) from exc
     _echo_derived_records(records)
 
 

@@ -6,7 +6,7 @@ from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
 
-from src.sources.derived.common import refresh_derived_registry
+from src.sources.derived.common import build_derived_file_lock, refresh_derived_registry
 from src.sources.derived.security_master import build_security_master
 from src.sources.derived.stock_daily_bar import build_cn_stock_daily_bar
 from src.sources.derived.stock_valuation import build_cn_stock_valuation
@@ -30,27 +30,26 @@ def build_derived_datasets(
     now: Callable[[], datetime] | None = None,
 ) -> list[dict[str, object]]:
     store = ParquetStore(root=root)
-    store.ensure_layout()
     expanded = _expand_targets(targets)
     if any(target in expanded for target in ("daily_bar", "valuation")) and "security_master" not in expanded:
-        master = store.read_dataset("cn_security_master")
-        if not store.dataset_exists("cn_security_master") or master.empty:
-            expanded = ("security_master", *expanded)
+        expanded = ("security_master", *expanded)
 
-    results: list[dict[str, object]] = []
-    for target in expanded:
-        builder = {
-            "security_master": build_security_master,
-            "daily_bar": build_cn_stock_daily_bar,
-            "valuation": build_cn_stock_valuation,
-        }[target]
-        results.append(builder(root=store.root, build_views=False, refresh_registry=False, now=now))
+    with build_derived_file_lock(store.root, expanded):
+        store.ensure_layout()
+        results: list[dict[str, object]] = []
+        for target in expanded:
+            builder = {
+                "security_master": build_security_master,
+                "daily_bar": build_cn_stock_daily_bar,
+                "valuation": build_cn_stock_valuation,
+            }[target]
+            results.append(builder(root=store.root, build_views=False, refresh_registry=False, now=now))
 
-    if refresh_registry:
-        refresh_derived_registry(store, [str(result["dataset"]) for result in results])
-    if build_views:
-        DuckDBStore(root=store.root).build_views()
-    return results
+        if refresh_registry:
+            refresh_derived_registry(store, [str(result["dataset"]) for result in results])
+        if build_views:
+            DuckDBStore(root=store.root).build_views()
+        return results
 
 
 def _expand_targets(targets: tuple[str, ...]) -> tuple[str, ...]:

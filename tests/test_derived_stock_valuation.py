@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import date, datetime
 
 import pandas as pd
+import pytest
 
 from src.sources.derived.stock_valuation import build_cn_stock_valuation
 from src.storage.parquet_store import ParquetStore
@@ -61,6 +62,54 @@ def test_build_cn_stock_valuation_outputs_baostock_only_rows(tmp_path) -> None:
     assert loaded.loc[0, "source_dataset"] == "baostock_cn_stock_valuation_percentile"
 
 
+def test_build_cn_stock_valuation_failure_keeps_existing_official_data(tmp_path, monkeypatch) -> None:
+    store = ParquetStore(root=tmp_path)
+    store.ensure_layout()
+    store.write_dataset("cn_security_master", _master())
+    store.write_dataset(
+        "cn_stock_valuation",
+        _canonical_valuation(close=1.0, date_value=date(2023, 12, 29)),
+        {"security_id": "SH.600000"},
+        mode="replace",
+    )
+
+    def fail_materialize(*args, **kwargs):
+        del args, kwargs
+        raise RuntimeError("valuation staging build failed")
+
+    monkeypatch.setattr("src.sources.derived.stock_valuation._materialize_security_valuation", fail_materialize)
+
+    with pytest.raises(RuntimeError, match="valuation staging build failed"):
+        build_cn_stock_valuation(root=tmp_path, build_views=False, refresh_registry=False, now=lambda: NOW)
+
+    loaded = store.read_dataset("cn_stock_valuation", {"security_id": "SH.600000"})
+    assert loaded["close"].tolist() == [1.0]
+    assert store.dataset_exists("cn_stock_valuation", {"security_id": "SH.600000"})
+    assert _temporary_dataset_dirs(tmp_path, ".staging", "cn_stock_valuation") == []
+
+
+def test_build_cn_stock_valuation_success_promotes_staging_dataset(tmp_path) -> None:
+    store = ParquetStore(root=tmp_path)
+    store.ensure_layout()
+    store.write_dataset("cn_security_master", _master())
+    store.write_dataset(
+        "cn_stock_valuation",
+        _canonical_valuation(close=1.0, date_value=date(2023, 12, 29)),
+        {"security_id": "SH.600000"},
+        mode="replace",
+    )
+    store.write_dataset("akshare_cn_stock_valuation_eastmoney", _akshare_valuation(), {"code": "600000"})
+
+    result = build_cn_stock_valuation(root=tmp_path, build_views=False, refresh_registry=False, now=lambda: NOW)
+    loaded = store.read_dataset("cn_stock_valuation", {"security_id": "SH.600000"})
+
+    assert result["rows"] == 2
+    assert loaded["close"].tolist() == [8.2, 8.3]
+    assert date(2023, 12, 29) not in set(loaded["date"])
+    assert _temporary_dataset_dirs(tmp_path, ".staging", "cn_stock_valuation") == []
+    assert _temporary_dataset_dirs(tmp_path, ".backup", "cn_stock_valuation") == []
+
+
 def _master() -> pd.DataFrame:
     return pd.DataFrame(
         [
@@ -84,6 +133,39 @@ def _master() -> pd.DataFrame:
             }
         ]
     )
+
+
+def _canonical_valuation(close: float, date_value: date) -> pd.DataFrame:
+    return pd.DataFrame(
+        [
+            {
+                "date": date_value,
+                "security_id": "SH.600000",
+                "code": "600000",
+                "exchange": "SH",
+                "name": "PF Bank",
+                "close": close,
+                "total_market_cap": 100000000.0,
+                "float_market_cap": 80000000.0,
+                "total_shares": 12000000.0,
+                "float_shares": 10000000.0,
+                "pe_ttm": 5.0,
+                "pe_static": 5.5,
+                "pb": 0.7,
+                "ps": 1.2,
+                "pcf": 3.0,
+                "source_dataset": "old_cn_stock_valuation",
+                "updated_at": NOW,
+            }
+        ]
+    )
+
+
+def _temporary_dataset_dirs(root, directory_name: str, dataset_id: str):
+    directory = root / "data" / "parquet" / directory_name
+    if not directory.exists():
+        return []
+    return sorted(path for path in directory.glob(f"{dataset_id}.*") if path.is_dir())
 
 
 def _akshare_valuation() -> pd.DataFrame:

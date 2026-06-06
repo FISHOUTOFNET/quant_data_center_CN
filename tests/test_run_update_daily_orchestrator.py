@@ -235,23 +235,25 @@ def test_daily_steps_include_yjyg_em_before_build_views_on_weekday() -> None:
     assert by_id["akshare-yjyg-em"].timeout_seconds == 900
 
 
-def test_daily_steps_build_security_master_before_views_on_weekday() -> None:
-    steps = run_update_daily.daily_steps(date(2026, 6, 8))
+@pytest.mark.parametrize("today", [date(2026, 6, 8), date(2026, 6, 6)])
+def test_daily_steps_build_derived_all_before_views(today: date) -> None:
+    steps = run_update_daily.daily_steps(today)
     by_id = {step.id: step for step in steps}
 
-    assert "build-security-master" in by_id
-    assert steps.index(by_id["financial-report"]) < steps.index(by_id["build-security-master"])
-    assert steps.index(by_id["build-security-master"]) < steps.index(by_id["build-duckdb-views"])
-    assert by_id["build-security-master"].depends_on == ("baostock-basic",)
-    assert by_id["build-security-master"].command[1:] == (
+    assert "build-derived" in by_id
+    assert "build-security-master" not in by_id
+    assert steps.index(by_id["financial-report"]) < steps.index(by_id["build-derived"])
+    assert steps.index(by_id["build-derived"]) < steps.index(by_id["build-duckdb-views"])
+    assert by_id["build-derived"].depends_on == ("baostock-basic",)
+    assert by_id["build-duckdb-views"].depends_on == ("build-derived",)
+    assert by_id["build-derived"].command[1:] == (
         "-m",
         "src.cli",
         "build-derived",
         "--target",
-        "security_master",
+        "all",
         "--no-build-duckdb-views",
     )
-    assert not any("--target all" in step.command_text for step in steps)
 
 
 def test_run_daily_update_records_yjyg_em_step_on_weekday(tmp_path: Path) -> None:
@@ -301,6 +303,7 @@ def test_weekend_akshare_valuation_failure_does_not_block_independent_later_step
     assert "akshare-daily-bar" in calls
     assert "sync-qlib" in calls
     assert "financial-report" in calls
+    assert "build-derived" in calls
     assert calls[-1] == "build-duckdb-views"
     states = _state(state_file)["runs"]["2026-06-06"]["steps"]
     assert states["akshare-valuation-full"]["status"] == "failed"
@@ -310,6 +313,7 @@ def test_weekend_akshare_valuation_failure_does_not_block_independent_later_step
     assert states["akshare-daily-bar"]["status"] == "success"
     assert states["sync-qlib"]["status"] == "success"
     assert states["financial-report"]["status"] == "success"
+    assert states["build-derived"]["status"] == "success"
     assert states["build-duckdb-views"]["status"] == "success"
 
 

@@ -196,12 +196,17 @@ def daily_steps(today: date | None = None) -> list[DailyStep]:
                 ),
             ),
             DailyStep(
-                "build-security-master",
-                "build canonical security master",
-                _cli("build-derived", "--target", "security_master", "--no-build-duckdb-views"),
+                "build-derived",
+                "build canonical derived datasets",
+                _cli("build-derived", "--target", "all", "--no-build-duckdb-views"),
                 depends_on=("baostock-basic",),
             ),
-            DailyStep("build-duckdb-views", "build-duckdb-views", _cli("build-duckdb-views")),
+            DailyStep(
+                "build-duckdb-views",
+                "build-duckdb-views",
+                _cli("build-duckdb-views"),
+                depends_on=("build-derived",),
+            ),
         ]
     )
     return steps
