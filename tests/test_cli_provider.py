@@ -384,6 +384,44 @@ def test_akshare_cli_accepts_yysj_em_periods(monkeypatch) -> None:
     assert "akshare_cn_stock_yysj_em 沪深A股 status=success rows=1" in result.output
 
 
+def test_akshare_cli_accepts_yjyg_em_periods(monkeypatch) -> None:
+    captured = {}
+
+    def fake_update(request):
+        captured.update(request.__dict__)
+        return [
+            {
+                "dataset": "akshare_cn_stock_yjyg_em",
+                "code": "2026一季",
+                "status": "success",
+                "row_count": 1,
+            }
+        ]
+
+    monkeypatch.setattr("src.cli.run_update_akshare", fake_update)
+
+    result = CliRunner().invoke(
+        cli_module.cli,
+        [
+            "akshare",
+            "update",
+            "--target",
+            "yjyg_em",
+            "--mode",
+            "incremental",
+            "--period",
+            "2026一季",
+            "--no-build-duckdb-views",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert captured["target"] == "yjyg_em"
+    assert captured["mode"] == "incremental"
+    assert captured["period"] == ("2026一季",)
+    assert "akshare_cn_stock_yjyg_em 2026一季 status=success rows=1" in result.output
+
+
 def test_akshare_cli_accepts_financial_report_target(monkeypatch) -> None:
     captured = {}
 
@@ -454,7 +492,7 @@ def test_akshare_cli_rejects_period_for_non_report_disclosure_target() -> None:
     )
 
     assert result.exit_code != 0
-    assert "--period is only valid for --target report_disclosure or yysj_em" in result.output
+    assert "--period is only valid for --target report_disclosure, yysj_em, or yjyg_em" in result.output
 
 
 def test_akshare_cli_accepts_capital_structure_target(monkeypatch) -> None:

@@ -56,6 +56,10 @@ api:
         source: eastmoney
         failure_threshold: 3
         cooldown_minutes: 30
+      stock_yjyg_em:
+        source: eastmoney
+        failure_threshold: 3
+        cooldown_minutes: 30
       stock_financial_report_sina:
         source: sina
         failure_threshold: 50
@@ -92,6 +96,9 @@ datasets:
     full_start_year: 1990
   akshare_cn_stock_yysj_em:
     full_start_year: 2008
+  akshare_cn_stock_yjyg_em:
+    full_start_period: "20030630"
+    rolling_period_count: 5
   akshare_cn_stock_financial_report_sina:
     close_after_time: "18:00"
     workers: 1

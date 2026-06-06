@@ -469,9 +469,7 @@ def _is_history_candidate(title: str, section_text: str, sample_kwargs: dict[str
     title_has_history = any(keyword.lower() in title_lower for keyword in TITLE_HISTORY_KEYWORDS)
     has_temporal_param = any(_is_temporal_param(key) for key in sample_kwargs)
     has_history = (
-        title_has_history
-        or has_temporal_param
-        or any(keyword.lower() in combined for keyword in HISTORY_KEYWORDS)
+        title_has_history or has_temporal_param or any(keyword.lower() in combined for keyword in HISTORY_KEYWORDS)
     )
     if not has_history:
         return False

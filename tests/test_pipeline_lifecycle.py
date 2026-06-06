@@ -160,11 +160,7 @@ def test_pipeline_lifecycle_releases_duckdb_between_metadata_flushes(tmp_path) -
         [
             sys.executable,
             "-c",
-            (
-                "import duckdb; "
-                f"conn = duckdb.connect({str(duckdb_file)!r}); "
-                "conn.close()"
-            ),
+            (f"import duckdb; conn = duckdb.connect({str(duckdb_file)!r}); conn.close()"),
         ],
         check=False,
         capture_output=True,

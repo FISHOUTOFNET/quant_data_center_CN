@@ -87,6 +87,21 @@ def daily_steps(today: date | None = None) -> list[DailyStep]:
                 _cli("update-baostock-valuation-percentile", "--no-build-duckdb-views"),
                 depends_on=("baostock-unadjusted",),
             ),
+            DailyStep(
+                "akshare-yjyg-em",
+                "akshare update yjyg_em incremental",
+                _cli(
+                    "akshare",
+                    "update",
+                    "--target",
+                    "yjyg_em",
+                    "--mode",
+                    "incremental",
+                    "--no-build-duckdb-views",
+                ),
+                True,
+                900,
+            ),
         ]
     )
 

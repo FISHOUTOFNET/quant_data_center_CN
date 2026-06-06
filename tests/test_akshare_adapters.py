@@ -5,15 +5,16 @@ from datetime import datetime
 import pandas as pd
 import pytest
 
+from src.sources.akshare.client import AkShareEmptyDataError
+from src.sources.akshare.cninfo.adapters.report_disclosure import ReportDisclosureAdapter
 from src.sources.akshare.eastmoney.adapters.capital_structure_em import CapitalStructureEmAdapter
 from src.sources.akshare.eastmoney.adapters.daily_bar import DailyBarAdapter
-from src.sources.akshare.exchange.adapters.delist_sh import DelistShAdapter
-from src.sources.akshare.cninfo.adapters.report_disclosure import ReportDisclosureAdapter
 from src.sources.akshare.eastmoney.adapters.spot_quote_eastmoney import SpotQuoteEastmoneyAdapter
-from src.sources.akshare.sina.adapters.spot_quote_sina import SpotQuoteSinaAdapter
 from src.sources.akshare.eastmoney.adapters.valuation_eastmoney import ValuationEastmoneyAdapter
+from src.sources.akshare.eastmoney.adapters.yjyg_em import YjygEmAdapter
 from src.sources.akshare.eastmoney.adapters.yysj_em import YysjEmAdapter
-from src.sources.akshare.client import AkShareEmptyDataError
+from src.sources.akshare.exchange.adapters.delist_sh import DelistShAdapter
+from src.sources.akshare.sina.adapters.spot_quote_sina import SpotQuoteSinaAdapter
 
 
 class _FakeResponse:
@@ -375,3 +376,93 @@ def test_yysj_em_adapter_maps_fields_and_empty_schema() -> None:
     assert mapped.loc[0, "source_endpoint"] == "stock_yysj_em"
     assert list(empty.columns) == list(mapped.columns)
     assert empty.empty
+
+
+def test_yjyg_em_adapter_maps_fields_and_empty_schema() -> None:
+    adapter = YjygEmAdapter(period="2025年报", fetched_at=datetime(2026, 1, 2, 9, 0))
+    raw = pd.DataFrame(
+        [
+            {
+                "序号": 1,
+                "股票代码": "1",
+                "股票简称": "平安银行",
+                "预测指标": "净利润",
+                "业绩变动": "预增",
+                "预测数值(元)": "123.45",
+                "业绩变动幅度(%)": "88.5",
+                "业绩变动原因": "主营业务改善",
+                "预告类型": "预增",
+                "上年同期值(元)": "65.5",
+                "公告日期": "2026-01-20",
+            },
+            {
+                "序号": 2,
+                "股票代码": "000001",
+                "股票简称": "平安银行",
+                "预测指标": "营业收入",
+                "业绩变动": "略增",
+                "预测数值(元)": "456.78",
+                "业绩变动幅度(%)": "12.3",
+                "业绩变动原因": "收入增长",
+                "预告类型": "略增",
+                "上年同期值(元)": "400",
+                "公告日期": "bad-date",
+            },
+        ]
+    )
+
+    mapped = adapter.normalize(raw)
+    empty = adapter.normalize(pd.DataFrame())
+
+    assert adapter.endpoint == "stock_yjyg_em"
+    assert adapter.params == {"date": "20251231"}
+    assert adapter.call(type("FakeAk", (), {"stock_yjyg_em": staticmethod(lambda date: date)})) == "20251231"
+    assert len(mapped) == 2
+    assert mapped["forecast_indicator"].tolist() == ["净利润", "营业收入"]
+    assert mapped.loc[0, "report_period"] == "2025年报"
+    assert str(mapped.loc[0, "period_end_date"]) == "2025-12-31"
+    assert mapped.loc[0, "code"] == "000001"
+    assert mapped.loc[0, "forecast_value"] == 123.45
+    assert mapped.loc[0, "performance_change_pct"] == 88.5
+    assert mapped.loc[0, "prior_period_value"] == 65.5
+    assert str(mapped.loc[0, "announcement_date"]) == "2026-01-20"
+    assert pd.isna(mapped.loc[1, "announcement_date"])
+    assert mapped.loc[0, "source_endpoint"] == "stock_yjyg_em"
+    assert "序号" not in mapped.columns
+    assert list(empty.columns) == list(mapped.columns)
+    assert empty.empty
+
+
+def test_yjyg_em_adapter_treats_akshare_empty_history_error_as_empty() -> None:
+    adapter = YjygEmAdapter(period="2003半年报", fetched_at=datetime(2026, 1, 2, 9, 0))
+
+    class FakeAk:
+        @staticmethod
+        def stock_yjyg_em(*, date: str) -> pd.DataFrame:
+            raise ValueError("Length mismatch: Expected axis has 0 elements")
+
+    assert adapter.call(FakeAk()).empty
+
+
+def test_yjyg_em_adapter_deduplicates_only_exact_rows() -> None:
+    adapter = YjygEmAdapter(period="2025年报", fetched_at=datetime(2026, 1, 2, 9, 0))
+    row = {
+        "股票代码": "000001",
+        "股票简称": "平安银行",
+        "预测指标": "净利润",
+        "业绩变动": "预增",
+        "预测数值": "123.45",
+        "业绩变动幅度": "88.5",
+        "业绩变动原因": "主营业务改善",
+        "预告类型": "预增",
+        "上年同期值": "65.5",
+        "公告日期": "2026-01-20",
+    }
+    different_indicator = {**row, "预测指标": "营业收入"}
+    different_value = {**row, "预测数值": "234.56"}
+
+    mapped = adapter.normalize(pd.DataFrame([row, row, different_indicator, different_value]))
+
+    assert len(mapped) == 3
+    assert mapped["forecast_indicator"].tolist().count("净利润") == 2
+    assert "营业收入" in mapped["forecast_indicator"].tolist()

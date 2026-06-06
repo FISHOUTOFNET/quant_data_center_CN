@@ -43,6 +43,7 @@ class FakeAStockClient:
         self.calls: list[tuple[str, dict[str, object]]] = []
         self.fail_spot_em = False
         self.fail_spot_sina = False
+        self.yjyg_forecast_value = 100.0
 
     def fetch_akshare_cn_stock_delist_sh(
         self, symbol: str = "全部", snapshot_date: str | None = None
@@ -193,6 +194,46 @@ class FakeAStockClient:
         )
         return _response("stock_yysj_em", {"symbol": symbol, "period": period}, data)
 
+    def fetch_yjyg_em(self, period: str | None = None) -> AkShareResponse:
+        self.calls.append(("stock_yjyg_em", {"period": period}))
+        data = pd.DataFrame(
+            [
+                {
+                    "report_period": period,
+                    "period_end_date": _period_end_date(str(period)),
+                    "code": "000001",
+                    "name": "PF Bank",
+                    "forecast_indicator": "净利润",
+                    "performance_change": "预增",
+                    "forecast_value": self.yjyg_forecast_value,
+                    "performance_change_pct": 88.5,
+                    "performance_change_reason": "主营业务改善",
+                    "forecast_type": "预增",
+                    "prior_period_value": 65.5,
+                    "announcement_date": "2026-01-20",
+                    "source_endpoint": "stock_yjyg_em",
+                    "fetched_at": datetime(2026, 1, 2, 9, 0),
+                },
+                {
+                    "report_period": period,
+                    "period_end_date": _period_end_date(str(period)),
+                    "code": "000001",
+                    "name": "PF Bank",
+                    "forecast_indicator": "营业收入",
+                    "performance_change": "略增",
+                    "forecast_value": self.yjyg_forecast_value + 100.0,
+                    "performance_change_pct": 12.3,
+                    "performance_change_reason": "收入增长",
+                    "forecast_type": "略增",
+                    "prior_period_value": 400.0,
+                    "announcement_date": "2026-01-20",
+                    "source_endpoint": "stock_yjyg_em",
+                    "fetched_at": datetime(2026, 1, 2, 9, 0),
+                },
+            ]
+        )
+        return _response("stock_yjyg_em", {"period": period}, data)
+
 
 class CircuitOpenDailyBarClient(FakeAStockClient):
     def __init__(self, circuit_code: str = "600000") -> None:
@@ -222,6 +263,7 @@ class CircuitOpenDailyBarClient(FakeAStockClient):
             data,
         )
 
+
 def update_akshare_delist(**kwargs):
     snapshot_date = kwargs.pop("snapshot_date", None)
     if snapshot_date is not None and "end" not in kwargs:
@@ -243,6 +285,10 @@ def update_akshare_report_disclosure(**kwargs):
 
 def update_akshare_yysj_em(**kwargs):
     return update_akshare(AkShareUpdateRequest(target="yysj_em", **kwargs))
+
+
+def update_akshare_yjyg_em(**kwargs):
+    return update_akshare(AkShareUpdateRequest(target="yjyg_em", **kwargs))
 
 
 def test_update_akshare_delist_writes_manual_delist_snapshot(tmp_path) -> None:
@@ -973,6 +1019,191 @@ def test_update_akshare_yysj_em_writes_partition_merges_symbols_and_resumes(tmp_
     ]
 
 
+def test_update_akshare_yjyg_em_partial_uses_rolling_forecast_periods(tmp_path) -> None:
+    _write_settings(tmp_path)
+    client = FakeAStockClient()
+
+    records = update_akshare_yjyg_em(
+        root=tmp_path,
+        build_views=False,
+        client=client,
+        now=lambda: datetime(2026, 6, 6, 12, 0),
+    )
+
+    assert [call[1]["period"] for call in client.calls if call[0] == "stock_yjyg_em"] == [
+        "2026一季",
+        "2026半年报",
+        "2026三季",
+        "2026年报",
+        "2027一季",
+    ]
+    assert [item["status"] for item in records] == ["success"] * 5
+
+
+def test_update_akshare_yjyg_em_incremental_uses_same_rolling_window(tmp_path) -> None:
+    _write_settings(tmp_path)
+    client = FakeAStockClient()
+
+    update_akshare_yjyg_em(
+        mode="incremental",
+        root=tmp_path,
+        build_views=False,
+        client=client,
+        now=lambda: datetime(2026, 6, 6, 12, 0),
+    )
+
+    assert [call[1]["period"] for call in client.calls if call[0] == "stock_yjyg_em"] == [
+        "2026一季",
+        "2026半年报",
+        "2026三季",
+        "2026年报",
+        "2027一季",
+    ]
+
+
+def test_update_akshare_yjyg_em_respects_configured_rolling_period_count(tmp_path) -> None:
+    _write_settings(tmp_path, yjyg_rolling_period_count=3)
+    client = FakeAStockClient()
+
+    update_akshare_yjyg_em(
+        root=tmp_path,
+        build_views=False,
+        client=client,
+        now=lambda: datetime(2026, 6, 6, 12, 0),
+    )
+
+    assert [call[1]["period"] for call in client.calls if call[0] == "stock_yjyg_em"] == [
+        "2026一季",
+        "2026半年报",
+        "2026三季",
+    ]
+
+
+def test_update_akshare_yjyg_em_full_uses_20030630_start_and_max_tasks(tmp_path) -> None:
+    _write_settings(tmp_path)
+    client = FakeAStockClient()
+
+    update_akshare_yjyg_em(
+        mode="full",
+        max_tasks=3,
+        root=tmp_path,
+        build_views=False,
+        client=client,
+        now=lambda: datetime(2026, 6, 6, 12, 0),
+    )
+
+    assert [call[1]["period"] for call in client.calls if call[0] == "stock_yjyg_em"] == [
+        "2003半年报",
+        "2003三季",
+        "2003年报",
+    ]
+
+
+def test_update_akshare_yjyg_em_explicit_period_overrides_mode(tmp_path) -> None:
+    _write_settings(tmp_path)
+    client = FakeAStockClient()
+
+    update_akshare_yjyg_em(
+        mode="full",
+        period=("2025年报",),
+        root=tmp_path,
+        build_views=False,
+        client=client,
+        now=lambda: datetime(2026, 6, 6, 12, 0),
+    )
+
+    assert [call[1]["period"] for call in client.calls if call[0] == "stock_yjyg_em"] == ["2025年报"]
+
+
+def test_update_akshare_yjyg_em_writes_partition_resumes_and_force_replaces(tmp_path) -> None:
+    _write_settings(tmp_path)
+    client = FakeAStockClient()
+
+    first = update_akshare_yjyg_em(
+        period=("2025年报",),
+        root=tmp_path,
+        build_views=False,
+        client=client,
+        now=lambda: datetime(2026, 6, 6, 12, 0),
+    )
+    store = ParquetStore(root=tmp_path)
+    loaded = store.read_dataset("akshare_cn_stock_yjyg_em", {"report_period": "2025年报"})
+
+    assert [item["status"] for item in first] == ["success"]
+    assert first[0]["code"] == "2025年报"
+    assert loaded["report_period"].tolist() == ["2025年报", "2025年报"]
+    assert loaded["forecast_indicator"].tolist() == ["净利润", "营业收入"]
+    assert loaded["source_endpoint"].tolist() == ["stock_yjyg_em", "stock_yjyg_em"]
+
+    client.calls.clear()
+    skipped = update_akshare_yjyg_em(
+        period=("2025年报",),
+        root=tmp_path,
+        build_views=False,
+        client=client,
+        now=lambda: datetime(2026, 6, 6, 12, 0),
+    )
+    assert skipped == []
+    assert client.calls == []
+
+    client.yjyg_forecast_value = 300.0
+    forced = update_akshare_yjyg_em(
+        period=("2025年报",),
+        root=tmp_path,
+        build_views=False,
+        force=True,
+        client=client,
+        now=lambda: datetime(2026, 6, 6, 12, 0),
+    )
+    reloaded = store.read_dataset("akshare_cn_stock_yjyg_em", {"report_period": "2025年报"})
+
+    assert [item["status"] for item in forced] == ["success"]
+    assert [call[1]["period"] for call in client.calls if call[0] == "stock_yjyg_em"] == ["2025年报"]
+    assert len(reloaded) == 2
+    assert reloaded["forecast_value"].tolist() == [300.0, 400.0]
+
+
+def test_update_akshare_yjyg_em_planning_uses_request_now(tmp_path) -> None:
+    _write_settings(tmp_path)
+    client = FakeAStockClient()
+
+    update_akshare_yjyg_em(
+        root=tmp_path,
+        build_views=False,
+        client=client,
+        now=lambda: datetime(2026, 6, 6, 12, 0),
+    )
+
+    assert [call[1]["period"] for call in client.calls if call[0] == "stock_yjyg_em"] == [
+        "2026一季",
+        "2026半年报",
+        "2026三季",
+        "2026年报",
+        "2027一季",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("settings_kwargs", "message"),
+    [
+        ({"yjyg_rolling_period_count": 0}, "rolling_period_count must be >= 1"),
+        ({"yjyg_full_start_period": "20030101"}, "Invalid quarter-end date"),
+        ({"yjyg_full_start_period": ""}, "full_start_period must not be empty"),
+    ],
+)
+def test_update_akshare_yjyg_em_rejects_invalid_config(tmp_path, settings_kwargs, message) -> None:
+    _write_settings(tmp_path, **settings_kwargs)
+
+    with pytest.raises(ValueError, match=message):
+        update_akshare_yjyg_em(
+            mode="full",
+            root=tmp_path,
+            build_views=False,
+            client=FakeAStockClient(),
+            now=lambda: datetime(2026, 6, 6, 12, 0),
+        )
+
+
 def _response(endpoint: str, params: dict[str, object], data: pd.DataFrame) -> AkShareResponse:
     return AkShareResponse(
         endpoint=endpoint,
@@ -1056,7 +1287,11 @@ def _log_entries(logger: FakeLogger, message: str) -> list[tuple[str, str, tuple
     return [entry for entry in logger.entries if entry[1] == message]
 
 
-def _write_settings(root) -> None:
+def _write_settings(
+    root,
+    yjyg_rolling_period_count: object = 5,
+    yjyg_full_start_period: object = "20030630",
+) -> None:
     config_dir = root / "config"
     config_dir.mkdir()
     (config_dir / "settings.yaml").write_text(
@@ -1074,6 +1309,9 @@ def _write_settings(root) -> None:
                 "    full_start: '1990-01-01'",
                 "  akshare_cn_stock_spot_quote:",
                 "    update_daily_bar_from_spot: true",
+                "  akshare_cn_stock_yjyg_em:",
+                f"    full_start_period: {yjyg_full_start_period!r}",
+                f"    rolling_period_count: {yjyg_rolling_period_count!r}",
                 "pipeline:",
                 "  metadata_flush_size: 1",
                 "",

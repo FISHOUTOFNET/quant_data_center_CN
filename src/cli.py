@@ -8,16 +8,16 @@ from pathlib import Path
 
 import click
 
+from src.registry_server import serve_registry
 from src.sources.akshare.client import normalize_akshare_code
-from src.sources.qlib import sync as qlib_sync_module
 from src.sources.akshare.pipeline import AkShareUpdateRequest
 from src.sources.akshare.pipeline import update_akshare as run_update_akshare
+from src.sources.baostock.repair_tool import repair as run_repair
+from src.sources.baostock.update_daily import update_daily as run_update_daily
 from src.sources.baostock.valuation_percentile import (
     update_baostock_valuation_percentile as run_update_baostock_valuation_percentile,
 )
-from src.sources.baostock.repair_tool import repair as run_repair
-from src.sources.baostock.update_daily import update_daily as run_update_daily
-from src.registry_server import serve_registry
+from src.sources.qlib import sync as qlib_sync_module
 from src.storage.duckdb_store import DuckDBStore
 from src.tools.run_update_daily import StateFileError, run_daily_update
 from src.utils import paths
@@ -72,6 +72,7 @@ def akshare() -> None:
             "delist",
             "report_disclosure",
             "yysj_em",
+            "yjyg_em",
             "financial_report",
             "all",
         ]
@@ -98,7 +99,7 @@ def akshare() -> None:
 @click.option(
     "--period",
     multiple=True,
-    help="Report disclosure period, e.g. 2025年报. Can be repeated.",
+    help="Report period, e.g. 2025年报. Applies to report_disclosure, yysj_em, and yjyg_em. Can be repeated.",
 )
 @click.option("--start", default=None, help="Start date, YYYY-MM-DD. Required for daily_bar incremental mode.")
 @click.option(

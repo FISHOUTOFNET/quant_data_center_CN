@@ -93,6 +93,8 @@ qdc akshare update --target report_disclosure --mode full
 qdc akshare update --target report_disclosure --period 2025年报 --period 2026一季
 qdc akshare update --target yysj_em
 qdc akshare update --target yysj_em --market 沪深A股 --period 2025年报
+qdc akshare update --target yjyg_em --period 2025年报
+qdc akshare update --target yjyg_em --mode incremental
 qdc akshare update --target financial_report --mode full
 qdc akshare update --target financial_report --mode incremental
 ```
@@ -113,7 +115,10 @@ qdc akshare update --target financial_report --mode incremental
 - `akshare update --target yysj_em` 调用 AkShare `stock_yysj_em`，默认同时更新 `symbol=沪深A股` 和 `symbol=京市A股`，覆盖沪深京并独立保存为 `akshare_cn_stock_yysj_em`。
 - `yysj_em` partial 同样默认更新最近四个已完成财报期；`--mode full` 从
   `datasets.akshare_cn_stock_yysj_em.full_start_year`（默认 2008）生成历史财报期。
-- `--period` 只适用于 `report_disclosure` 和 `yysj_em`，可重复传入，格式如 `2025年报`、`2026一季`。`--market` 在 `yysj_em` 下表示 `stock_yysj_em` 的 `symbol` 参数。
+- `akshare update --target yjyg_em` 调用 AkShare `stock_yjyg_em`，保存为
+  `akshare_cn_stock_yjyg_em`，按 `report_period` 分区。该数据是业绩预告长表，同一股票同一报告期可因多个 `forecast_indicator` 保留多行。
+- `yjyg_em` full 从 `datasets.akshare_cn_stock_yjyg_em.full_start_period`（默认 `20030630`，即 2003半年报）到当前滚动预告窗口末端；partial 和 incremental 都更新从上个报告期开始的 5 个连续报告期（由 `rolling_period_count` 配置），incremental 已接入 `run-update-daily`。
+- `--period` 适用于 `report_disclosure`、`yysj_em` 和 `yjyg_em`，可重复传入，格式如 `2025年报`、`2026一季`。`--market` 在 `yysj_em` 下表示 `stock_yysj_em` 的 `symbol` 参数。
 - `akshare update --target financial_report` 调用 AkShare `stock_financial_report_sina` 获取新浪三大财报，保存为
   `akshare_cn_stock_financial_report_sina` 长表并按 `code` 分区。
 - `financial_report` full 使用 active 与 delisted 的并集；incremental 只读取本地 `report_disclosure` / `yysj_em` 披露日历和
@@ -172,6 +177,7 @@ data/
 │   ├── akshare_cn_stock_capital_structure_em/code=600000/data.parquet
 │   ├── akshare_cn_stock_report_disclosure/report_period=2025年报/data.parquet
 │   ├── akshare_cn_stock_yysj_em/report_period=2025年报/data.parquet
+│   ├── akshare_cn_stock_yjyg_em/report_period=2025年报/data.parquet
 │   ├── akshare_cn_stock_financial_report_sina/code=600000/data.parquet
 │   ├── akshare_cn_stock_delist_sh/snapshot_date=YYYY-MM-DD/data.parquet
 │   ├── akshare_cn_stock_delist_sz/snapshot_date=YYYY-MM-DD/data.parquet
@@ -280,6 +286,7 @@ qdc serve-registry --host 127.0.0.1 --port 8765
 - `datasets.akshare_cn_stock_capital_structure_em.active_only`：partial 模式是否只取 active AkShare 股票池。
 - `datasets.akshare_cn_stock_report_disclosure.full_start_year`：预约披露时间 full 模式的起始年份。
 - `datasets.akshare_cn_stock_yysj_em.full_start_year`：东方财富预约披露时间 full 模式的起始年份。
+- `datasets.akshare_cn_stock_yjyg_em.full_start_period` / `rolling_period_count`：东方财富业绩预告 full 起始报告期和 partial/incremental 滚动报告期数量。
 - `datasets.akshare_cn_stock_spot_quote.update_daily_bar_from_spot`：spot 快照是否同步写入 `akshare_cn_stock_daily_bar_unadjusted`。
 - `pipeline.qlib_sync_workers`：Qlib 同步并发数，默认回退到 `pipeline.background_workers`。
 

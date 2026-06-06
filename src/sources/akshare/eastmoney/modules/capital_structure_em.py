@@ -17,7 +17,12 @@ from src.sources.akshare.client import (
     dataframe_hash,
     normalize_akshare_code,
 )
-from src.sources.akshare.pipeline.execution import AkShareExecutionContext, AkShareUpdateRequest, ConcurrencyPolicy, FetchResult
+from src.sources.akshare.pipeline.execution import (
+    AkShareExecutionContext,
+    AkShareUpdateRequest,
+    ConcurrencyPolicy,
+    FetchResult,
+)
 from src.sources.akshare.pipeline.universe import latest_active_akshare_codes, resolve_akshare_universe_codes
 from src.pipeline.common import PipelineCheckpointLookup
 from src.pipeline.lifecycle import LifecycleTaskRef

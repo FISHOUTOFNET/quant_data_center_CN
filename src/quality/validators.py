@@ -18,6 +18,7 @@ from src.storage.schema import (
     AKSHARE_SPOT_QUOTE_SINA_SCHEMA,
     AKSHARE_STOCK_INSTITUTION_HOLDING_SCHEMA,
     AKSHARE_VALUATION_EASTMONEY_SCHEMA,
+    AKSHARE_YJYG_EM_SCHEMA,
     AKSHARE_YYSJ_EM_SCHEMA,
     BAOSTOCK_CN_STOCK_ADJUSTMENT_FACTOR_SCHEMA,
     BAOSTOCK_CN_STOCK_BASIC_SCHEMA,
@@ -285,6 +286,33 @@ def validate_akshare_cn_stock_yysj_em(df: pd.DataFrame, schema: pa.Schema = AKSH
     validate_schema_matches(df, schema)
     validate_akshare_six_digit_codes(df)
     validate_unique_columns(df, ["report_period", "symbol", "code"])
+
+
+def validate_akshare_cn_stock_yjyg_em(df: pd.DataFrame, schema: pa.Schema = AKSHARE_YJYG_EM_SCHEMA) -> None:
+    validate_schema_matches(df, schema)
+    validate_akshare_six_digit_codes(df)
+    validate_unique_columns(
+        df,
+        [
+            "report_period",
+            "code",
+            "name",
+            "announcement_date",
+            "forecast_indicator",
+            "forecast_type",
+            "performance_change",
+            "forecast_value",
+            "performance_change_pct",
+            "performance_change_reason",
+            "prior_period_value",
+        ],
+    )
+    if df.empty:
+        return
+    dates = pd.to_datetime(df["announcement_date"], errors="coerce")
+    invalid = df["announcement_date"].notna() & dates.isna()
+    if invalid.any():
+        raise ValidationError("announcement_date contains invalid values")
 
 
 def validate_akshare_cn_stock_financial_report_sina(

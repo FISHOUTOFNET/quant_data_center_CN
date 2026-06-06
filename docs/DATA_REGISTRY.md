@@ -42,7 +42,9 @@ GET http://127.0.0.1:8765/v1/datasets/akshare_cn_stock_daily_bar_unadjusted
 
 The dataset detail combines catalog metadata with current inventory fields such as lifecycle, partition column, row count, date bounds, latest partition, and latest pipeline status.
 
-Datasets that do not partition by stock code use their own catalog partition column. For example, `akshare_cn_stock_report_disclosure` and `akshare_cn_stock_yysj_em` partition by `report_period` because AkShare fetches them by disclosure period parameters instead of looping `code`.
+Datasets that do not partition by stock code use their own catalog partition column. For example, `akshare_cn_stock_report_disclosure`, `akshare_cn_stock_yysj_em`, and `akshare_cn_stock_yjyg_em` partition by `report_period` because AkShare fetches them by report period parameters instead of looping `code`.
+
+`akshare_cn_stock_yjyg_em` uses endpoint `stock_yjyg_em` and CLI target `yjyg_em`. Full mode starts at `20030630` by default and extends to the end of the current rolling forecast window; partial and incremental update the consecutive forecast periods beginning with the previous report period. The table is long-form, so a stock/report-period pair may have multiple `forecast_indicator` rows.
 
 List partitions:
 
@@ -58,6 +60,10 @@ GET http://127.0.0.1:8765/v1/datasets/akshare_cn_stock_report_disclosure/partiti
 
 ```http
 GET http://127.0.0.1:8765/v1/datasets/akshare_cn_stock_yysj_em/partitions
+```
+
+```http
+GET http://127.0.0.1:8765/v1/datasets/akshare_cn_stock_yjyg_em/partitions
 ```
 
 ## Events

@@ -11,7 +11,12 @@ import pandas as pd
 
 from src.sources.akshare.cninfo.adapters.report_disclosure import report_period_end_date
 from src.sources.akshare.client import AkShareResponse, normalize_akshare_code
-from src.sources.akshare.pipeline.execution import AkShareExecutionContext, AkShareUpdateRequest, ConcurrencyPolicy, FetchResult
+from src.sources.akshare.pipeline.execution import (
+    AkShareExecutionContext,
+    AkShareUpdateRequest,
+    ConcurrencyPolicy,
+    FetchResult,
+)
 from src.sources.akshare.pipeline.common import error_stack
 from src.sources.akshare.pipeline.universe import resolve_akshare_universe_codes
 from src.pipeline.lifecycle import LifecycleTaskRef
@@ -80,16 +85,20 @@ class FinancialReportSinaModule:
                 continue
             if task.skip_existing and task.output_path.exists():
                 continue
-            if context.checkpoint_lookup is not None and task.output_path.exists() and (
-                context.checkpoint_lookup.pipeline_checkpoint_succeeded(
-                    PIPELINE_UPDATE_AKSHARE_FINANCIAL_REPORT,
-                    task.dataset,
-                    task.code,
-                    task.start_date,
-                    task.end_date,
-                    task.output_path,
+            if (
+                context.checkpoint_lookup is not None
+                and task.output_path.exists()
+                and (
+                    context.checkpoint_lookup.pipeline_checkpoint_succeeded(
+                        PIPELINE_UPDATE_AKSHARE_FINANCIAL_REPORT,
+                        task.dataset,
+                        task.code,
+                        task.start_date,
+                        task.end_date,
+                        task.output_path,
+                    )
+                    or task.output_path.exists()
                 )
-                or task.output_path.exists()
             ):
                 continue
             remaining.append(task)

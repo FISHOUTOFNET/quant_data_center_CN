@@ -10,19 +10,7 @@ from typing import Any
 
 import pandas as pd
 
-from src.sources.akshare.eastmoney.adapters.capital_structure_em import CapitalStructureEmAdapter
-from src.sources.akshare.eastmoney.adapters.daily_bar import DailyBarAdapter
-from src.sources.akshare.exchange.adapters.delist_sh import DelistShAdapter
-from src.sources.akshare.exchange.adapters.delist_sz import DelistSzAdapter
-from src.sources.akshare.sina.adapters.financial_report_sina import (
-    REPORT_TYPE_TO_SYMBOL,
-    FinancialReportSinaAdapter,
-)
 from src.sources.akshare.cninfo.adapters.report_disclosure import ReportDisclosureAdapter
-from src.sources.akshare.eastmoney.adapters.spot_quote_eastmoney import SpotQuoteEastmoneyAdapter
-from src.sources.akshare.sina.adapters.spot_quote_sina import SpotQuoteSinaAdapter
-from src.sources.akshare.eastmoney.adapters.valuation_eastmoney import ValuationEastmoneyAdapter
-from src.sources.akshare.eastmoney.adapters.yysj_em import YysjEmAdapter
 from src.sources.akshare.core.errors import (
     AkShareCircuitOpen,
     AkShareEmptyDataError,
@@ -34,6 +22,19 @@ from src.sources.akshare.core.models import AkShareResponse
 from src.sources.akshare.core.normalization import date_iso
 from src.sources.akshare.core.runtime import AkShareRuntime
 from src.sources.akshare.core.symbols import normalize_akshare_code
+from src.sources.akshare.eastmoney.adapters.capital_structure_em import CapitalStructureEmAdapter
+from src.sources.akshare.eastmoney.adapters.daily_bar import DailyBarAdapter
+from src.sources.akshare.eastmoney.adapters.spot_quote_eastmoney import SpotQuoteEastmoneyAdapter
+from src.sources.akshare.eastmoney.adapters.valuation_eastmoney import ValuationEastmoneyAdapter
+from src.sources.akshare.eastmoney.adapters.yjyg_em import YjygEmAdapter
+from src.sources.akshare.eastmoney.adapters.yysj_em import YysjEmAdapter
+from src.sources.akshare.exchange.adapters.delist_sh import DelistShAdapter
+from src.sources.akshare.exchange.adapters.delist_sz import DelistSzAdapter
+from src.sources.akshare.sina.adapters.financial_report_sina import (
+    REPORT_TYPE_TO_SYMBOL,
+    FinancialReportSinaAdapter,
+)
+from src.sources.akshare.sina.adapters.spot_quote_sina import SpotQuoteSinaAdapter
 from src.utils.config_mgr import ConfigManager
 
 
@@ -131,6 +132,12 @@ class AkShareClient:
         )
         return self._fetch_adapter(adapter)
 
+    def fetch_yjyg_em(self, period: str | None = None) -> AkShareResponse:
+        if period is None:
+            raise ValueError("stock_yjyg_em requires period")
+        adapter = YjygEmAdapter(period=period, fetched_at=self._now())
+        return self._fetch_adapter(adapter)
+
     def fetch_daily_bars(
         self,
         symbol: str,
@@ -160,7 +167,10 @@ class AkShareClient:
             responses.append(response)
             frames.append(response.data)
         data = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
-        params = {"code": normalize_akshare_code(code), "report_types": ",".join(REPORT_TYPE_TO_SYMBOL)}
+        params: dict[str, object] = {
+            "code": normalize_akshare_code(code),
+            "report_types": ",".join(REPORT_TYPE_TO_SYMBOL),
+        }
         akshare_version = responses[-1].akshare_version if responses else "unknown"
         return AkShareResponse(
             endpoint="stock_financial_report_sina",

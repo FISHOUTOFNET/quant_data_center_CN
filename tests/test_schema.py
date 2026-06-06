@@ -10,6 +10,7 @@ from src.storage.schema import (
     AKSHARE_SPOT_QUOTE_EASTMONEY_SCHEMA,
     AKSHARE_SPOT_QUOTE_SINA_SCHEMA,
     AKSHARE_VALUATION_EASTMONEY_SCHEMA,
+    AKSHARE_YJYG_EM_SCHEMA,
     AKSHARE_YYSJ_EM_SCHEMA,
     BAOSTOCK_CN_STOCK_ADJUSTMENT_FACTOR_SCHEMA,
     BAOSTOCK_CN_STOCK_BASIC_SCHEMA,
@@ -99,6 +100,26 @@ def test_akshare_a_stock_schema_core_fields() -> None:
     assert AKSHARE_SPOT_QUOTE_SINA_SCHEMA.field("is_fallback").type == pa.bool_()
     assert AKSHARE_YYSJ_EM_SCHEMA.field("period_end_date").type == pa.date32()
     assert AKSHARE_YYSJ_EM_SCHEMA.field("symbol").type == pa.string()
+    assert AKSHARE_YJYG_EM_SCHEMA.field("period_end_date").type == pa.date32()
+    assert AKSHARE_YJYG_EM_SCHEMA.field("announcement_date").type == pa.date32()
+    assert AKSHARE_YJYG_EM_SCHEMA.field("forecast_value").type == pa.float64()
+    assert AKSHARE_YJYG_EM_SCHEMA.field("performance_change_pct").type == pa.float64()
+    assert AKSHARE_YJYG_EM_SCHEMA.names == [
+        "report_period",
+        "period_end_date",
+        "code",
+        "name",
+        "forecast_indicator",
+        "performance_change",
+        "forecast_value",
+        "performance_change_pct",
+        "performance_change_reason",
+        "forecast_type",
+        "prior_period_value",
+        "announcement_date",
+        "source_endpoint",
+        "fetched_at",
+    ]
     assert AKSHARE_FINANCIAL_REPORT_SINA_SCHEMA.field("report_date").type == pa.date32()
     assert AKSHARE_FINANCIAL_REPORT_SINA_SCHEMA.field("item_value").type == pa.float64()
     assert AKSHARE_DAILY_BAR_SCHEMA.field("volume").type == pa.int64()

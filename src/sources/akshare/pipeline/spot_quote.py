@@ -12,7 +12,12 @@ from zoneinfo import ZoneInfo
 import pandas as pd
 
 from src.sources.akshare.core.normalization import date_iso
-from src.sources.akshare.pipeline.execution import AkShareExecutionContext, AkShareUpdateRequest, ConcurrencyPolicy, FetchResult
+from src.sources.akshare.pipeline.execution import (
+    AkShareExecutionContext,
+    AkShareUpdateRequest,
+    ConcurrencyPolicy,
+    FetchResult,
+)
 from src.sources.akshare.pipeline.common import PIPELINE_UPDATE_AKSHARE_SPOT, error_stack
 from src.sources.akshare.pipeline.universe import normalize_akshare_code_list
 from src.pipeline.common import (

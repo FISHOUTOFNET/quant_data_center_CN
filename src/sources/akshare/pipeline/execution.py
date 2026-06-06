@@ -11,9 +11,9 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Protocol
 
-from src.sources.akshare.client import AkShareCircuitOpen, AkShareClient, AkShareResponse
 from src.pipeline.common import PipelineCheckpointLookup
 from src.pipeline.lifecycle import PipelineLifecycle
+from src.sources.akshare.client import AkShareCircuitOpen, AkShareClient, AkShareResponse
 from src.storage.duckdb_store import DuckDBStore
 from src.storage.parquet_store import ParquetStore
 from src.utils.config_mgr import ConfigManager
@@ -322,16 +322,17 @@ def _log_progress(
 
 
 def _modules_for_target(target: str) -> Iterable[AkShareDatasetModule]:
+    from src.sources.akshare.cninfo.modules.report_disclosure import ReportDisclosureModule
     from src.sources.akshare.eastmoney.modules.capital_structure_em import CapitalStructureEmModule
     from src.sources.akshare.eastmoney.modules.daily_bar import DailyBarModule
-    from src.sources.akshare.exchange.modules.delist import DelistModule
-    from src.sources.akshare.sina.modules.financial_report_sina import FinancialReportSinaModule
-    from src.sources.akshare.cninfo.modules.report_disclosure import ReportDisclosureModule
-    from src.sources.akshare.pipeline.spot_quote import SpotQuoteModule
     from src.sources.akshare.eastmoney.modules.valuation_eastmoney import ValuationEastmoneyModule
+    from src.sources.akshare.eastmoney.modules.yjyg_em import YjygEmModule
     from src.sources.akshare.eastmoney.modules.yysj_em import YysjEmModule
+    from src.sources.akshare.exchange.modules.delist import DelistModule
+    from src.sources.akshare.pipeline.spot_quote import SpotQuoteModule
+    from src.sources.akshare.sina.modules.financial_report_sina import FinancialReportSinaModule
 
-    registry: dict[str, AkShareDatasetModule] = {
+    registry: dict[str, Any] = {
         "valuation": ValuationEastmoneyModule(),
         "capital_structure": CapitalStructureEmModule(),
         "daily_bar": DailyBarModule(),
@@ -339,6 +340,7 @@ def _modules_for_target(target: str) -> Iterable[AkShareDatasetModule]:
         "delist": DelistModule(),
         "report_disclosure": ReportDisclosureModule(),
         "yysj_em": YysjEmModule(),
+        "yjyg_em": YjygEmModule(),
         "financial_report": FinancialReportSinaModule(),
     }
     if target == "all":
@@ -349,6 +351,7 @@ def _modules_for_target(target: str) -> Iterable[AkShareDatasetModule]:
             registry["spot_quote"],
             registry["report_disclosure"],
             registry["yysj_em"],
+            registry["yjyg_em"],
             registry["financial_report"],
             registry["daily_bar"],
         ]
@@ -367,14 +370,15 @@ def _validate_request(request: AkShareUpdateRequest) -> None:
         "delist",
         "report_disclosure",
         "yysj_em",
+        "yjyg_em",
         "financial_report",
         "all",
     }:
         raise ValueError(f"Unsupported AkShare update target: {request.target}")
     if request.adjustment is not None and request.target != "daily_bar":
         raise ValueError("--adjustment is only valid for --target daily_bar")
-    if request.period and request.target not in {"report_disclosure", "yysj_em"}:
-        raise ValueError("--period is only valid for --target report_disclosure or yysj_em")
+    if request.period and request.target not in {"report_disclosure", "yysj_em", "yjyg_em"}:
+        raise ValueError("--period is only valid for --target report_disclosure, yysj_em, or yjyg_em")
 
 
 def _uses_checkpoint_lookup(request: AkShareUpdateRequest) -> bool:

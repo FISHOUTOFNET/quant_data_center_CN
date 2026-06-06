@@ -11,6 +11,7 @@
 - 日线 Daily Bar：一只股票一个交易日的 OHLCV 行情。项目内不再使用 `daily_k` 或 `hist` 表示业务日线。
 - 现货快照 Spot Quote：交易日收盘后采集的当日行情快照，可转写为 AkShare 未复权 daily bar 的 `spot_quote_close` 行。
 - 预约披露时间 Report Disclosure：财报预约/变更/实际披露日期；巨潮数据集为 `akshare_cn_stock_report_disclosure`，东方财富数据集为 `akshare_cn_stock_yysj_em`，均按 `report_period` 分区。
+- 业绩预告 Earnings Forecast：东方财富 `stock_yjyg_em` 数据集 `akshare_cn_stock_yjyg_em`，CLI target 为 `yjyg_em`，按 `report_period` 分区；同一股票同一报告期可有多个预测指标行。
 - 复权 Adjustment：行情复权口径，枚举为 `unadjusted`、`qfq`、`hfq`。
 - 复权因子 Adjustment Factor：Baostock 提供的复权因子数据集 `baostock_cn_stock_adjustment_factor`。
 - 股本结构 Capital Structure：东财股本结构历史数据集 `akshare_cn_stock_capital_structure_em`，按 6 位代码分区。
@@ -41,6 +42,7 @@
 - `akshare_cn_stock_daily_bar_hfq`
 - `akshare_cn_stock_report_disclosure`
 - `akshare_cn_stock_yysj_em`
+- `akshare_cn_stock_yjyg_em`
 - `akshare_cn_stock_institution_holding` (`legacy_unmanaged`)
 - `qlib_cn_calendar_day`
 - `qlib_cn_instrument_membership`

@@ -8,7 +8,12 @@ from pathlib import Path
 from typing import Any
 
 from src.sources.akshare.core.normalization import date_iso
-from src.sources.akshare.pipeline.execution import AkShareExecutionContext, AkShareUpdateRequest, ConcurrencyPolicy, FetchResult
+from src.sources.akshare.pipeline.execution import (
+    AkShareExecutionContext,
+    AkShareUpdateRequest,
+    ConcurrencyPolicy,
+    FetchResult,
+)
 from src.sources.akshare.pipeline.common import PIPELINE_UPDATE_AKSHARE_DELIST, error_stack
 from src.pipeline.common import should_skip_checkpoint
 from src.pipeline.lifecycle import LifecycleTaskRef

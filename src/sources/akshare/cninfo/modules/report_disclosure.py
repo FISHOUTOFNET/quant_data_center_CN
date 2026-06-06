@@ -8,7 +8,12 @@ from pathlib import Path
 from typing import Any
 
 from src.sources.akshare.cninfo.adapters.report_disclosure import report_period_end_date
-from src.sources.akshare.pipeline.execution import AkShareExecutionContext, AkShareUpdateRequest, ConcurrencyPolicy, FetchResult
+from src.sources.akshare.pipeline.execution import (
+    AkShareExecutionContext,
+    AkShareUpdateRequest,
+    ConcurrencyPolicy,
+    FetchResult,
+)
 from src.sources.akshare.pipeline.common import error_stack
 from src.pipeline.common import should_skip_checkpoint
 from src.pipeline.lifecycle import LifecycleTaskRef

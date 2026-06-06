@@ -354,12 +354,10 @@ def test_qlib_duckdb_views_can_be_created_and_queried(tmp_path: Path) -> None:
     DuckDBStore(root=tmp_path).build_views()
 
     with duckdb.connect(str(tmp_path / "data" / "duckdb" / "quant.duckdb")) as conn:
-        assert conn.execute("select max(calendar_date) from v_qlib_cn_calendar_day").fetchone() == (
-            date(2024, 1, 5),
-        )
-        assert conn.execute("select close from v_qlib_cn_stock_features_day where qlib_symbol='sh600000'").fetchone() == (
-            8.2,
-        )
+        assert conn.execute("select max(calendar_date) from v_qlib_cn_calendar_day").fetchone() == (date(2024, 1, 5),)
+        assert conn.execute(
+            "select close from v_qlib_cn_stock_features_day where qlib_symbol='sh600000'"
+        ).fetchone() == (8.2,)
 
 
 def _calendar(qlib_dir: Path) -> list[date]:

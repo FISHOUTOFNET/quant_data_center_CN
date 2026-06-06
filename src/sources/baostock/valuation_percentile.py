@@ -603,9 +603,7 @@ def _prefilter_valuation_percentile_tasks(
 
         source_start, source_end = source_range
         if checkpoint_lookup is None:
-            tasks.append(
-                _ValuationPercentileTask(code=stock_code, output_path=output_path, source_end=source_end)
-            )
+            tasks.append(_ValuationPercentileTask(code=stock_code, output_path=output_path, source_end=source_end))
             continue
 
         try:
