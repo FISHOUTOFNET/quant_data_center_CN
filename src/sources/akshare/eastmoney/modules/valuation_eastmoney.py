@@ -20,7 +20,7 @@ from src.sources.akshare.client import (
     dataframe_hash,
     normalize_akshare_code,
 )
-from src.sources.akshare.pipeline.execution import (
+from src.sources.akshare.pipeline.execution_types import (
     AkShareExecutionContext,
     AkShareUpdateRequest,
     ConcurrencyPolicy,

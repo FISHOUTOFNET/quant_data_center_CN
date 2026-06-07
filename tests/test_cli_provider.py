@@ -3,7 +3,29 @@ from __future__ import annotations
 from click.testing import CliRunner
 
 import src.cli as cli_module
+import src.commands.akshare as akshare_commands
+import src.commands.baostock as baostock_commands
+import src.commands.qlib as qlib_commands
 from src.utils.logging import logger
+
+
+def test_cli_help_exposes_core_commands_and_not_registry_server() -> None:
+    result = CliRunner().invoke(cli_module.cli, ["--help"])
+
+    assert result.exit_code == 0
+    for command in [
+        "akshare",
+        "update-baostock-daily",
+        "update-baostock-valuation-percentile",
+        "repair-baostock-daily",
+        "run-update-daily",
+        "build-derived",
+        "build-security-master",
+        "build-duckdb-views",
+        "sync-qlib",
+    ]:
+        assert command in result.output
+    assert "serve-registry" not in result.output
 
 
 def test_update_daily_full_cli_passes_explicit_provider(monkeypatch) -> None:
@@ -13,7 +35,7 @@ def test_update_daily_full_cli_passes_explicit_provider(monkeypatch) -> None:
         captured.update(kwargs)
         return [{"dataset": "baostock_cn_trading_calendar", "code": "*", "status": "success", "row_count": 1}]
 
-    monkeypatch.setattr(cli_module, "run_update_daily", fake_update_daily)
+    monkeypatch.setattr(baostock_commands, "run_update_daily", fake_update_daily)
 
     result = CliRunner().invoke(
         cli_module.cli,
@@ -49,7 +71,7 @@ def test_update_daily_cli_keeps_provider_optional(monkeypatch) -> None:
             }
         ]
 
-    monkeypatch.setattr(cli_module, "run_update_daily", fake_update_daily)
+    monkeypatch.setattr(baostock_commands, "run_update_daily", fake_update_daily)
 
     result = CliRunner().invoke(
         cli_module.cli,
@@ -78,7 +100,7 @@ def test_update_akshare_cli_passes_arguments(monkeypatch) -> None:
             {"dataset": "akshare_cn_stock_valuation_eastmoney", "code": "600000", "status": "success", "row_count": 2}
         ]
 
-    monkeypatch.setattr(cli_module, "run_update_akshare", fake_update_akshare)
+    monkeypatch.setattr(akshare_commands, "run_update_akshare", fake_update_akshare)
 
     result = CliRunner().invoke(
         cli_module.cli,
@@ -128,7 +150,7 @@ def test_update_akshare_a_stock_cli_commands_pass_arguments(monkeypatch) -> None
         }[str(request.target)]
         return [{"dataset": dataset, "code": "600000", "status": "success", "row_count": 1}]
 
-    monkeypatch.setattr(cli_module, "run_update_akshare", fake_update_akshare)
+    monkeypatch.setattr(akshare_commands, "run_update_akshare", fake_update_akshare)
 
     runner = CliRunner()
     delist_result = runner.invoke(
@@ -255,7 +277,7 @@ def test_update_baostock_valuation_percentile_cli_passes_arguments(monkeypatch) 
         ]
 
     monkeypatch.setattr(
-        cli_module, "run_update_baostock_valuation_percentile", fake_update_baostock_valuation_percentile
+        baostock_commands, "run_update_baostock_valuation_percentile", fake_update_baostock_valuation_percentile
     )
 
     result = CliRunner().invoke(
@@ -320,7 +342,7 @@ def test_akshare_cli_accepts_report_disclosure_periods(monkeypatch) -> None:
             }
         ]
 
-    monkeypatch.setattr("src.cli.run_update_akshare", fake_update)
+    monkeypatch.setattr(akshare_commands, "run_update_akshare", fake_update)
 
     result = CliRunner().invoke(
         cli_module.cli,
@@ -360,7 +382,7 @@ def test_akshare_cli_accepts_yysj_em_periods(monkeypatch) -> None:
             }
         ]
 
-    monkeypatch.setattr("src.cli.run_update_akshare", fake_update)
+    monkeypatch.setattr(akshare_commands, "run_update_akshare", fake_update)
 
     result = CliRunner().invoke(
         cli_module.cli,
@@ -398,7 +420,7 @@ def test_akshare_cli_accepts_yjyg_em_periods(monkeypatch) -> None:
             }
         ]
 
-    monkeypatch.setattr("src.cli.run_update_akshare", fake_update)
+    monkeypatch.setattr(akshare_commands, "run_update_akshare", fake_update)
 
     result = CliRunner().invoke(
         cli_module.cli,
@@ -437,7 +459,7 @@ def test_akshare_cli_accepts_financial_report_target(monkeypatch) -> None:
             }
         ]
 
-    monkeypatch.setattr("src.cli.run_update_akshare", fake_update)
+    monkeypatch.setattr(akshare_commands, "run_update_akshare", fake_update)
 
     result = CliRunner().invoke(
         cli_module.cli,
@@ -468,7 +490,7 @@ def test_akshare_cli_exits_nonzero_when_update_records_failures(monkeypatch) -> 
             }
         ]
 
-    monkeypatch.setattr("src.cli.run_update_akshare", fake_update)
+    monkeypatch.setattr(akshare_commands, "run_update_akshare", fake_update)
 
     result = CliRunner().invoke(
         cli_module.cli,
@@ -505,7 +527,7 @@ def test_akshare_cli_accepts_capital_structure_target(monkeypatch) -> None:
             {"dataset": "akshare_cn_stock_capital_structure_em", "code": "600000", "status": "success", "row_count": 1}
         ]
 
-    monkeypatch.setattr("src.cli.run_update_akshare", fake_update)
+    monkeypatch.setattr(akshare_commands, "run_update_akshare", fake_update)
 
     result = CliRunner().invoke(
         cli_module.cli,
@@ -521,8 +543,8 @@ def test_sync_qlib_cli_skips_outside_friday_sunday_window_by_default(monkeypatch
     def fail_sync_qlib_data(**kwargs):
         raise AssertionError("sync_qlib_data should not run on weekdays by default")
 
-    monkeypatch.setattr(cli_module.qlib_sync_module, "is_qlib_update_day", lambda: False, raising=False)
-    monkeypatch.setattr(cli_module.qlib_sync_module, "sync_qlib_data", fail_sync_qlib_data)
+    monkeypatch.setattr(qlib_commands.qlib_sync_module, "is_qlib_update_day", lambda: False, raising=False)
+    monkeypatch.setattr(qlib_commands.qlib_sync_module, "sync_qlib_data", fail_sync_qlib_data)
 
     result = CliRunner().invoke(cli_module.cli, ["sync-qlib", "--no-build-duckdb-views"])
 
@@ -546,8 +568,8 @@ def test_sync_qlib_cli_allows_weekday_override_and_passes_runtime_limit_and_work
         captured.update(kwargs)
         return Result()
 
-    monkeypatch.setattr(cli_module.qlib_sync_module, "is_qlib_update_day", lambda: False, raising=False)
-    monkeypatch.setattr(cli_module.qlib_sync_module, "sync_qlib_data", fake_sync_qlib_data)
+    monkeypatch.setattr(qlib_commands.qlib_sync_module, "is_qlib_update_day", lambda: False, raising=False)
+    monkeypatch.setattr(qlib_commands.qlib_sync_module, "sync_qlib_data", fake_sync_qlib_data)
 
     result = CliRunner().invoke(
         cli_module.cli,

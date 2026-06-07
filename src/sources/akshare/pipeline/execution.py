@@ -4,105 +4,26 @@ from __future__ import annotations
 
 import os
 import traceback
-from collections.abc import Callable, Iterable
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any
 
 from src.pipeline.common import PipelineCheckpointLookup
 from src.pipeline.lifecycle import PipelineLifecycle
-from src.sources.akshare.client import AkShareCircuitOpen, AkShareClient, AkShareResponse
+from src.sources.akshare.client import AkShareCircuitOpen, AkShareClient
+from src.sources.akshare.pipeline.execution_types import (
+    AkShareDatasetModule,
+    AkShareExecutionContext,
+    AkShareUpdateRequest,
+    ConcurrencyPolicy,
+    FetchResult,
+)
+from src.sources.akshare.pipeline.registry import modules_for_target, validate_request_target_options
 from src.storage.duckdb_store import DuckDBStore
 from src.storage.parquet_store import ParquetStore
 from src.utils.config_mgr import ConfigManager
-
-
-@dataclass(frozen=True)
-class AkShareUpdateRequest:
-    target: str = "valuation"
-    mode: str = "partial"
-    adjustment: str | None = None
-    code: tuple[str, ...] | list[str] | str | None = None
-    include_inactive: bool = False
-    market: str | None = None
-    start: str | Any | None = None
-    end: str | Any | None = None
-    max_tasks: int | None = None
-    workers: int | None = None
-    root: Path | None = None
-    resume: bool = True
-    force: bool = False
-    build_views: bool = True
-    client: Any | None = None
-    client_factory: Callable[[ConfigManager], Any] | None = None
-    now: Callable[[], datetime] | None = None
-    period: tuple[str, ...] | list[str] | str | None = ()
-
-
-@dataclass(frozen=True)
-class FetchResult:
-    task: Any
-    started_at: datetime
-    ended_at: datetime
-    response: AkShareResponse | None = None
-    error: Exception | None = None
-    error_stack: str = ""
-    skipped: bool = False
-    skip_status: str = "skipped_checkpoint"
-    skip_reason: str = "checkpoint"
-
-
-@dataclass
-class ConcurrencyPolicy:
-    workers: int = 1
-    thread_name_prefix: str = "update-akshare-fetch"
-    adaptive_controller: Any | None = None
-    stop_on_circuit_open: bool = False
-
-    @property
-    def target_workers(self) -> int:
-        if self.adaptive_controller is None:
-            return self.workers
-        return int(self.adaptive_controller.target_workers)
-
-    def record_fetch_result(self, success: bool) -> None:
-        if self.adaptive_controller is not None:
-            self.adaptive_controller.record_fetch_result(success)
-
-
-@dataclass
-class AkShareExecutionContext:
-    config: ConfigManager
-    store: ParquetStore
-    client: Any
-    checkpoint_lookup: PipelineCheckpointLookup | None
-    lifecycle: PipelineLifecycle
-
-
-class AkShareDatasetModule(Protocol):
-    target: str
-
-    def plan(self, request: AkShareUpdateRequest, context: AkShareExecutionContext) -> list[Any]: ...
-
-    def prefilter(self, tasks: list[Any], context: AkShareExecutionContext) -> list[Any]: ...
-
-    def fetch(self, task: Any, context: AkShareExecutionContext) -> FetchResult: ...
-
-    def record_result(self, result: FetchResult, context: AkShareExecutionContext) -> list[dict[str, object]]: ...
-
-    def record_skip(
-        self,
-        task: Any,
-        context: AkShareExecutionContext,
-        status: str = "skipped_checkpoint",
-        reason: str = "checkpoint",
-    ) -> list[dict[str, object]]: ...
-
-    def progress_row(self, task: Any, rows: list[dict[str, object]]) -> dict[str, object]: ...
-
-    def concurrency(self, request: AkShareUpdateRequest, context: AkShareExecutionContext) -> ConcurrencyPolicy: ...
 
 
 @dataclass
@@ -127,7 +48,7 @@ class _Progress:
 def update_akshare(request: AkShareUpdateRequest) -> list[dict[str, object]]:
     """Run one or more AkShare dataset modules."""
 
-    _validate_request(request)
+    validate_request_target_options(request)
     config = ConfigManager(request.root)
     store = ParquetStore(root=config.root)
     store.ensure_layout()
@@ -161,7 +82,7 @@ def update_akshare(request: AkShareUpdateRequest) -> list[dict[str, object]]:
             checkpoint_lookup=checkpoint_lookup,
             lifecycle=lifecycle,
         )
-        for module in _modules_for_target(request.target):
+        for module in modules_for_target(request.target):
             module_records, module_success = _run_module(module, request, context)
             records.extend(module_records)
             progress_success += module_success
@@ -319,66 +240,6 @@ def _log_progress(
     row = module.progress_row(task, rows)
     progress.record(row)
     _call_optional(module, "log_progress", progress, task, row)
-
-
-def _modules_for_target(target: str) -> Iterable[AkShareDatasetModule]:
-    from src.sources.akshare.cninfo.modules.report_disclosure import ReportDisclosureModule
-    from src.sources.akshare.eastmoney.modules.capital_structure_em import CapitalStructureEmModule
-    from src.sources.akshare.eastmoney.modules.daily_bar import DailyBarModule
-    from src.sources.akshare.eastmoney.modules.valuation_eastmoney import ValuationEastmoneyModule
-    from src.sources.akshare.eastmoney.modules.yjyg_em import YjygEmModule
-    from src.sources.akshare.eastmoney.modules.yysj_em import YysjEmModule
-    from src.sources.akshare.exchange.modules.delist import DelistModule
-    from src.sources.akshare.pipeline.spot_quote import SpotQuoteModule
-    from src.sources.akshare.sina.modules.financial_report_sina import FinancialReportSinaModule
-
-    registry: dict[str, Any] = {
-        "valuation": ValuationEastmoneyModule(),
-        "capital_structure": CapitalStructureEmModule(),
-        "daily_bar": DailyBarModule(),
-        "spot_quote": SpotQuoteModule(),
-        "delist": DelistModule(),
-        "report_disclosure": ReportDisclosureModule(),
-        "yysj_em": YysjEmModule(),
-        "yjyg_em": YjygEmModule(),
-        "financial_report": FinancialReportSinaModule(),
-    }
-    if target == "all":
-        return [
-            registry["valuation"],
-            registry["capital_structure"],
-            registry["delist"],
-            registry["spot_quote"],
-            registry["report_disclosure"],
-            registry["yysj_em"],
-            registry["yjyg_em"],
-            registry["financial_report"],
-            registry["daily_bar"],
-        ]
-    try:
-        return [registry[target]]
-    except KeyError as exc:
-        raise ValueError(f"Unsupported AkShare update target: {target}") from exc
-
-
-def _validate_request(request: AkShareUpdateRequest) -> None:
-    if request.target not in {
-        "valuation",
-        "capital_structure",
-        "daily_bar",
-        "spot_quote",
-        "delist",
-        "report_disclosure",
-        "yysj_em",
-        "yjyg_em",
-        "financial_report",
-        "all",
-    }:
-        raise ValueError(f"Unsupported AkShare update target: {request.target}")
-    if request.adjustment is not None and request.target != "daily_bar":
-        raise ValueError("--adjustment is only valid for --target daily_bar")
-    if request.period and request.target not in {"report_disclosure", "yysj_em", "yjyg_em"}:
-        raise ValueError("--period is only valid for --target report_disclosure, yysj_em, or yjyg_em")
 
 
 def _uses_checkpoint_lookup(request: AkShareUpdateRequest) -> bool:

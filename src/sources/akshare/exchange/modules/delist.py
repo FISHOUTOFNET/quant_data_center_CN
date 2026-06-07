@@ -11,7 +11,7 @@ from src.pipeline.common import should_skip_checkpoint
 from src.pipeline.lifecycle import LifecycleTaskRef
 from src.sources.akshare.core.normalization import date_iso
 from src.sources.akshare.pipeline.common import PIPELINE_UPDATE_AKSHARE_DELIST, error_stack
-from src.sources.akshare.pipeline.execution import (
+from src.sources.akshare.pipeline.execution_types import (
     AkShareExecutionContext,
     AkShareUpdateRequest,
     ConcurrencyPolicy,
@@ -130,7 +130,14 @@ class DelistModule:
             )
             return [rows.run_row]
 
-    def record_skip(self, task: DelistTask, context: AkShareExecutionContext) -> list[dict[str, object]]:
+    def record_skip(
+        self,
+        task: DelistTask,
+        context: AkShareExecutionContext,
+        status: str = "skipped_checkpoint",
+        reason: str = "checkpoint",
+    ) -> list[dict[str, object]]:
+        del task, context, status, reason
         return []
 
     def progress_row(self, task: DelistTask, rows: list[dict[str, object]]) -> dict[str, object]:

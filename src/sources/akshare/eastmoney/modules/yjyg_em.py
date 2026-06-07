@@ -11,7 +11,7 @@ from src.pipeline.common import should_skip_checkpoint
 from src.pipeline.lifecycle import LifecycleTaskRef
 from src.sources.akshare.cninfo.adapters.report_disclosure import report_period_end_date
 from src.sources.akshare.pipeline.common import error_stack
-from src.sources.akshare.pipeline.execution import (
+from src.sources.akshare.pipeline.execution_types import (
     AkShareExecutionContext,
     AkShareUpdateRequest,
     ConcurrencyPolicy,

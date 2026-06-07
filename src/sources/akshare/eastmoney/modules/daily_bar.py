@@ -15,7 +15,7 @@ from src.pipeline.lifecycle import LifecycleTaskRef
 from src.sources.akshare.client import AkShareCircuitOpen
 from src.sources.akshare.core.normalization import date_iso
 from src.sources.akshare.pipeline.common import PIPELINE_UPDATE_AKSHARE_DAILY_BAR, error_stack
-from src.sources.akshare.pipeline.execution import (
+from src.sources.akshare.pipeline.execution_types import (
     AkShareExecutionContext,
     AkShareUpdateRequest,
     ConcurrencyPolicy,

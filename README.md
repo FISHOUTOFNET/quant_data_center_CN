@@ -356,6 +356,7 @@ print(df)
 
 ```text
 src/
+├── commands/               # Click CLI command modules
 ├── sources/                # 按数据来源组织的采集程序
 │   ├── baostock/           # Baostock client、provider、daily update、repair、派生数据
 │   ├── akshare/            # AkShare client、runtime、执行内核与按上游来源拆分的 modules/adapters
@@ -372,7 +373,7 @@ src/
 ├── storage/                # Schema、Dataset catalog、ParquetStore、DuckDBStore、DataRegistry
 ├── tools/                  # 辅助工具（API 审计等）
 ├── utils/                  # 配置、路径、日志、运行上下文
-└── cli.py                  # Click CLI 入口
+└── cli.py                  # Click root CLI 与命令注册
 tests/                      # 单元与管道测试
 config/                     # settings.yaml
 scripts/                    # Windows 定时任务脚本
