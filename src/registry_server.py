@@ -1,4 +1,9 @@
-"""Read-only HTTP gateway for dataset discovery and Parquet queries."""
+"""Experimental internal HTTP gateway for dataset discovery and Parquet queries.
+
+This module is not part of the core data pipeline and is not exposed through
+the default CLI. It is kept only as dormant experimental code for possible
+future local UI or integration work.
+"""
 
 from __future__ import annotations
 

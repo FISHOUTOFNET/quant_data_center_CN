@@ -51,6 +51,7 @@ markers = [
 [tool.coverage.run]
 branch = true
 source = ["src"]
+omit = ["src/registry_server.py"]
 
 [tool.coverage.report]
 fail_under = 80

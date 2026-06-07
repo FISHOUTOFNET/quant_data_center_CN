@@ -214,13 +214,11 @@ AkShare pipeline 只保存规范化后的 Parquet 数据和统一运行元数据
 
 ## Data Registry
 
-`DataRegistry` 是面向应用层的文件型只读发现层，位于 `data/registry/`。pipeline 和 repair 命令写入 Parquet 后，会按 dirty dataset 刷新 catalog 与 inventory。
+`DataRegistry` 是可选的本地元数据只读模型，位于 `data/registry/`，用于诊断 catalog、inventory 和写入事件。pipeline 和 repair 命令写入 Parquet 后，会按 dirty dataset best-effort 刷新 catalog 与 inventory；刷新失败不会阻断主数据写入、derived build 或 DuckDB views 构建。
 
 - `catalog.json` 来自 `DATASET_CATALOG`，记录 schema、view、source、endpoint、code format、partition column 和 lifecycle。
 - `inventory.parquet` 扫描物理 Parquet 文件，记录分区数、文件数、行数、日期边界、最新分区和最近 pipeline 状态。
-- `events.jsonl` 是按 `event_id` 递增的写入事件日志，供轮询或 SSE 消费。
-
-`qdc serve-registry` 使用内存 DuckDB 直接读取 Parquet 视图，避免其他应用与写入进程共享 `data/duckdb/quant.duckdb` 文件锁。
+- `events.jsonl` 是按 `event_id` 递增的写入事件日志。
 
 ## DuckDB 视图
 

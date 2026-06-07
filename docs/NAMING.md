@@ -125,7 +125,6 @@ Baostock 字段：
 - `akshare update`
 - `sync-qlib`
 - `build-duckdb-views`
-- `serve-registry`
 
 旧命令不保留 alias。调用旧命令应由 Click 抛出不可用错误。
 

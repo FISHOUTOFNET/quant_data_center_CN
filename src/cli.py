@@ -8,7 +8,6 @@ from pathlib import Path
 
 import click
 
-from src.registry_server import serve_registry
 from src.sources.akshare.client import normalize_akshare_code
 from src.sources.akshare.pipeline import AkShareUpdateRequest
 from src.sources.akshare.pipeline import update_akshare as run_update_akshare
@@ -398,16 +397,6 @@ def build_views() -> None:
 
     sqls = DuckDBStore().build_views()
     click.echo(f"Built {len(sqls)} views at {paths.DUCKDB_FILE}")
-
-
-@cli.command("serve-registry")
-@click.option("--host", default="127.0.0.1", show_default=True, help="Bind host. Defaults to localhost-only access.")
-@click.option("--port", default=8765, show_default=True, type=int, help="Bind port.")
-def registry_server(host: str, port: int) -> None:
-    """Serve read-only dataset registry and Parquet query endpoints."""
-
-    click.echo(f"Serving QDC registry at http://{host}:{port}")
-    serve_registry(host=host, port=port)
 
 
 if __name__ == "__main__":
