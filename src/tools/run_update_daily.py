@@ -4,13 +4,15 @@ from __future__ import annotations
 
 import json
 import os
+import signal
 import subprocess
 import sys
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, TextIO
 
 
 class StateFileError(RuntimeError):
@@ -33,6 +35,8 @@ class DailyStep:
 
 CommandRunner = Callable[[DailyStep, Path], int]
 TIMEOUT_EXIT_CODE = 124
+TIMEOUT_CLEANUP_FAILED_EXIT_CODE = 125
+PROCESS_CLEANUP_WAIT_SECONDS = 30
 
 
 def daily_steps(today: date | None = None) -> list[DailyStep]:
@@ -63,8 +67,7 @@ def daily_steps(today: date | None = None) -> list[DailyStep]:
                 "akshare-spot-quote",
                 "akshare update spot_quote",
                 _cli("akshare", "update", "--target", "spot_quote", "--no-build-duckdb-views"),
-                True,
-                900,
+                optional=True,
             ),
             DailyStep(
                 "baostock-unadjusted",
@@ -99,8 +102,8 @@ def daily_steps(today: date | None = None) -> list[DailyStep]:
                     "incremental",
                     "--no-build-duckdb-views",
                 ),
-                True,
-                900,
+                optional=True,
+                timeout_seconds=900,
             ),
         ]
     )
@@ -276,6 +279,52 @@ def run_daily_update(
         exit_code = int(runner(step, resolved_log))
         if exit_code != 0:
             timed_out = exit_code == TIMEOUT_EXIT_CODE and step.timeout_seconds is not None
+            timeout_cleanup_failed = exit_code == TIMEOUT_CLEANUP_FAILED_EXIT_CODE and step.timeout_seconds is not None
+            if timed_out or timeout_cleanup_failed:
+                if timeout_cleanup_failed:
+                    if step.optional:
+                        _record_step(
+                            step_state,
+                            step,
+                            "failed_timeout_cleanup",
+                            exit_code,
+                            resolved_log,
+                            now,
+                        )
+                    else:
+                        _record_step(step_state, step, "failed", exit_code, resolved_log, now)
+                    _write_state(resolved_state_file, state)
+                    _emit(
+                        resolved_log,
+                        now,
+                        f"{step.name} timed out and process tree cleanup failed; stopping",
+                        console=True,
+                    )
+                    failed_exit_code = failed_exit_code or exit_code
+                    break
+
+                if not _wait_for_duckdb_available(base):
+                    if step.optional:
+                        _record_step(
+                            step_state,
+                            step,
+                            "failed_resource_locked",
+                            exit_code,
+                            resolved_log,
+                            now,
+                        )
+                    else:
+                        _record_step(step_state, step, "failed", exit_code, resolved_log, now)
+                    _write_state(resolved_state_file, state)
+                    _emit(
+                        resolved_log,
+                        now,
+                        f"{step.name} timed out and DuckDB is still locked; stopping",
+                        console=True,
+                    )
+                    failed_exit_code = failed_exit_code or exit_code
+                    break
+
             if step.optional:
                 status = "skipped_timeout" if timed_out else "skipped"
                 reason = (
@@ -335,20 +384,92 @@ def _default_run_log(root: Path, now: Callable[[], datetime] | None) -> Path:
 def _run_subprocess(step: DailyStep, log_path: Path, root: Path) -> int:
     env = {**os.environ, "QDC_DISABLE_FILE_LOG": "1"}
     with log_path.open("a", encoding="utf-8") as log:
+        popen_kwargs: dict[str, Any] = {
+            "cwd": root,
+            "stdout": log,
+            "stderr": subprocess.STDOUT,
+            "env": env,
+            "text": True,
+        }
+        if os.name != "nt":
+            popen_kwargs["start_new_session"] = True
+        proc = subprocess.Popen(step.command, **popen_kwargs)
+        try:
+            return int(proc.wait(timeout=step.timeout_seconds))
+        except subprocess.TimeoutExpired:
+            log.write(f"Step timed out after {step.timeout_seconds} seconds; terminating process tree\n")
+            if _terminate_process_tree(proc, log):
+                return TIMEOUT_EXIT_CODE
+            log.write("Process tree cleanup failed after timeout\n")
+            return TIMEOUT_CLEANUP_FAILED_EXIT_CODE
+
+
+def _terminate_process_tree(proc: subprocess.Popen[Any], log: TextIO) -> bool:
+    if proc.poll() is not None:
+        return True
+
+    if os.name == "nt":
         try:
             completed = subprocess.run(
-                step.command,
-                cwd=root,
+                ("taskkill", "/PID", str(proc.pid), "/T", "/F"),
                 stdout=log,
                 stderr=subprocess.STDOUT,
-                env=env,
                 text=True,
                 check=False,
-                timeout=step.timeout_seconds,
             )
-        except subprocess.TimeoutExpired:
-            return TIMEOUT_EXIT_CODE
-    return int(completed.returncode)
+        except OSError as exc:
+            log.write(f"Failed to run taskkill for timed out process {proc.pid}: {exc}\n")
+            return False
+        if completed.returncode != 0 and proc.poll() is None:
+            log.write(f"taskkill failed for timed out process {proc.pid}: exit code {completed.returncode}\n")
+            return False
+    else:
+        try:
+            os.killpg(proc.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            return True
+        except OSError as exc:
+            log.write(f"Failed to terminate process group {proc.pid}: {exc}\n")
+            return False
+
+    try:
+        proc.wait(timeout=PROCESS_CLEANUP_WAIT_SECONDS)
+        return True
+    except subprocess.TimeoutExpired:
+        if os.name != "nt":
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                return True
+            except OSError as exc:
+                log.write(f"Failed to kill process group {proc.pid}: {exc}\n")
+                return False
+            try:
+                proc.wait(timeout=PROCESS_CLEANUP_WAIT_SECONDS)
+                return True
+            except subprocess.TimeoutExpired:
+                pass
+        log.write(f"Timed out waiting for process tree {proc.pid} to exit after cleanup\n")
+        return False
+
+
+def _wait_for_duckdb_available(root: Path, timeout_seconds: int = 30) -> bool:
+    db_path = root / "data" / "duckdb" / "quant.duckdb"
+    if not db_path.exists():
+        return True
+
+    deadline = time.monotonic() + timeout_seconds
+    while True:
+        try:
+            import duckdb
+
+            connection = duckdb.connect(str(db_path))
+            connection.close()
+            return True
+        except Exception:
+            if time.monotonic() >= deadline:
+                return False
+            time.sleep(0.5)
 
 
 def _read_state(path: Path) -> dict[str, Any]:
@@ -397,7 +518,7 @@ def _blocked_dependencies(step: DailyStep, step_state: dict[str, Any]) -> tuple[
     blocked: list[str] = []
     for dependency in step.depends_on:
         dependency_status = str(step_state.get(dependency, {}).get("status", "pending"))
-        if dependency_status in {"failed", "blocked"}:
+        if dependency_status in {"failed", "failed_resource_locked", "failed_timeout_cleanup", "blocked"}:
             blocked.append(dependency)
     return tuple(blocked)
 
@@ -407,7 +528,7 @@ def _final_exit_code(steps: list[DailyStep], step_state: dict[str, Any], failed_
         return failed_exit_code
     for step in steps:
         current = step_state.get(step.id, {})
-        if str(current.get("status")) == "failed":
+        if str(current.get("status")) in {"failed", "failed_resource_locked", "failed_timeout_cleanup"}:
             raw_exit_code = current.get("exit_code")
             return int(raw_exit_code) if raw_exit_code is not None else 1
     for step in steps:

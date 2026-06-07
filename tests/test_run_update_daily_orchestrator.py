@@ -218,6 +218,8 @@ def test_daily_steps_include_yjyg_em_before_build_views_on_weekday() -> None:
     steps = run_update_daily.daily_steps(date(2026, 6, 8))
     by_id = {step.id: step for step in steps}
 
+    assert by_id["akshare-spot-quote"].optional is True
+    assert by_id["akshare-spot-quote"].timeout_seconds is None
     assert "akshare-yjyg-em" in by_id
     assert steps.index(by_id["akshare-yjyg-em"]) < steps.index(by_id["build-duckdb-views"])
     assert by_id["akshare-yjyg-em"].command[1:] == (
@@ -325,13 +327,22 @@ def test_run_subprocess_disables_child_file_logging(
     log_file = tmp_path / "run.log"
     step = run_update_daily.DailyStep("sample", "sample step", (sys.executable, "-c", "print('sample')"))
 
-    def fake_run(*args, **kwargs):
-        captured["args"] = args
-        captured["kwargs"] = kwargs
-        kwargs["stdout"].write("captured child output\n")
-        return subprocess.CompletedProcess(args[0], 0)
+    class FakePopen:
+        pid = 123
 
-    monkeypatch.setattr(run_update_daily.subprocess, "run", fake_run)
+        def __init__(self, *args, **kwargs):
+            captured["args"] = args
+            captured["kwargs"] = kwargs
+            kwargs["stdout"].write("captured child output\n")
+
+        def wait(self, timeout=None):
+            captured["wait_timeout"] = timeout
+            return 0
+
+        def poll(self):
+            return 0
+
+    monkeypatch.setattr(run_update_daily.subprocess, "Popen", FakePopen)
 
     assert run_update_daily._run_subprocess(step, log_file, tmp_path) == 0
 
@@ -381,6 +392,7 @@ def test_orchestrator_optional_step_timeout_is_skipped_and_continues(
 ) -> None:
     state_file = tmp_path / "state.json"
     log_file = tmp_path / "run.log"
+    calls: list[str] = []
 
     timeout_step = run_update_daily.DailyStep(
         "optional-timeout",
@@ -396,19 +408,66 @@ def test_orchestrator_optional_step_timeout_is_skipped_and_continues(
     )
 
     monkeypatch.setattr(run_update_daily, "daily_steps", lambda today=None: [timeout_step, next_step])
+    monkeypatch.setattr(run_update_daily, "_wait_for_duckdb_available", lambda root: True)
     assert (
         run_update_daily.run_daily_update(
             root=tmp_path,
             state_file=state_file,
             run_log=log_file,
             today=date(2026, 6, 8),
+            command_runner=lambda step, log_path: (
+                calls.append(step.id) or run_update_daily.TIMEOUT_EXIT_CODE
+                if step.id == "optional-timeout"
+                else calls.append(step.id) or 0
+            ),
         )
         == 0
     )
 
+    assert calls == ["optional-timeout", "after-timeout"]
     states = _state(state_file)["runs"]["2026-06-08"]["steps"]
     assert states["optional-timeout"]["status"] == "skipped_timeout"
     assert states["after-timeout"]["status"] == "success"
+
+
+def test_orchestrator_optional_step_timeout_stops_when_duckdb_is_locked(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    state_file = tmp_path / "state.json"
+    log_file = tmp_path / "run.log"
+    calls: list[str] = []
+
+    timeout_step = run_update_daily.DailyStep(
+        "optional-timeout",
+        "optional timeout",
+        (sys.executable, "-c", "import time; time.sleep(5)"),
+        optional=True,
+        timeout_seconds=1,
+    )
+    next_step = run_update_daily.DailyStep(
+        "after-timeout",
+        "after timeout",
+        (sys.executable, "-c", "print('after')"),
+    )
+
+    monkeypatch.setattr(run_update_daily, "daily_steps", lambda today=None: [timeout_step, next_step])
+    monkeypatch.setattr(run_update_daily, "_wait_for_duckdb_available", lambda root: False)
+
+    assert (
+        run_update_daily.run_daily_update(
+            root=tmp_path,
+            state_file=state_file,
+            run_log=log_file,
+            today=date(2026, 6, 8),
+            command_runner=lambda step, log_path: calls.append(step.id) or run_update_daily.TIMEOUT_EXIT_CODE,
+        )
+        == run_update_daily.TIMEOUT_EXIT_CODE
+    )
+
+    assert calls == ["optional-timeout"]
+    states = _state(state_file)["runs"]["2026-06-08"]["steps"]
+    assert states["optional-timeout"]["status"] == "failed_resource_locked"
+    assert "after-timeout" not in states
 
 
 def test_orchestrator_required_step_timeout_fails_and_continues_independent_steps(
@@ -416,6 +475,7 @@ def test_orchestrator_required_step_timeout_fails_and_continues_independent_step
 ) -> None:
     state_file = tmp_path / "state.json"
     log_file = tmp_path / "run.log"
+    calls: list[str] = []
 
     timeout_step = run_update_daily.DailyStep(
         "required-timeout",
@@ -430,16 +490,131 @@ def test_orchestrator_required_step_timeout_fails_and_continues_independent_step
     )
 
     monkeypatch.setattr(run_update_daily, "daily_steps", lambda today=None: [timeout_step, next_step])
+    monkeypatch.setattr(run_update_daily, "_wait_for_duckdb_available", lambda root: True)
     assert (
         run_update_daily.run_daily_update(
             root=tmp_path,
             state_file=state_file,
             run_log=log_file,
             today=date(2026, 6, 8),
+            command_runner=lambda step, log_path: (
+                calls.append(step.id) or run_update_daily.TIMEOUT_EXIT_CODE
+                if step.id == "required-timeout"
+                else calls.append(step.id) or 0
+            ),
         )
         != 0
     )
 
+    assert calls == ["required-timeout", "after-timeout"]
     states = _state(state_file)["runs"]["2026-06-08"]["steps"]
     assert states["required-timeout"]["status"] == "failed"
     assert states["after-timeout"]["status"] == "success"
+
+
+def test_run_subprocess_timeout_terminates_process_tree(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    log_file = tmp_path / "run.log"
+    step = run_update_daily.DailyStep(
+        "timeout",
+        "timeout",
+        (sys.executable, "-c", "import time; time.sleep(5)"),
+        timeout_seconds=1,
+    )
+    terminated: list[int] = []
+
+    class FakePopen:
+        pid = 456
+
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def wait(self, timeout=None):
+            raise subprocess.TimeoutExpired(step.command, timeout)
+
+        def poll(self):
+            return None
+
+    def fake_terminate(proc, log):
+        del log
+        terminated.append(proc.pid)
+        return True
+
+    monkeypatch.setattr(run_update_daily.subprocess, "Popen", FakePopen)
+    monkeypatch.setattr(run_update_daily, "_terminate_process_tree", fake_terminate)
+
+    assert run_update_daily._run_subprocess(step, log_file, tmp_path) == run_update_daily.TIMEOUT_EXIT_CODE
+    assert terminated == [456]
+
+
+def test_run_subprocess_timeout_cleanup_failure_returns_distinct_code(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    log_file = tmp_path / "run.log"
+    step = run_update_daily.DailyStep(
+        "timeout",
+        "timeout",
+        (sys.executable, "-c", "import time; time.sleep(5)"),
+        timeout_seconds=1,
+    )
+
+    class FakePopen:
+        pid = 789
+
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def wait(self, timeout=None):
+            raise subprocess.TimeoutExpired(step.command, timeout)
+
+        def poll(self):
+            return None
+
+    monkeypatch.setattr(run_update_daily.subprocess, "Popen", FakePopen)
+    monkeypatch.setattr(run_update_daily, "_terminate_process_tree", lambda proc, log: False)
+
+    assert (
+        run_update_daily._run_subprocess(step, log_file, tmp_path) == run_update_daily.TIMEOUT_CLEANUP_FAILED_EXIT_CODE
+    )
+
+
+def test_orchestrator_optional_timeout_cleanup_failure_stops(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    state_file = tmp_path / "state.json"
+    log_file = tmp_path / "run.log"
+    calls: list[str] = []
+
+    timeout_step = run_update_daily.DailyStep(
+        "optional-timeout",
+        "optional timeout",
+        (sys.executable, "-c", "import time; time.sleep(5)"),
+        optional=True,
+        timeout_seconds=1,
+    )
+    next_step = run_update_daily.DailyStep(
+        "after-timeout",
+        "after timeout",
+        (sys.executable, "-c", "print('after')"),
+    )
+
+    monkeypatch.setattr(run_update_daily, "daily_steps", lambda today=None: [timeout_step, next_step])
+
+    assert (
+        run_update_daily.run_daily_update(
+            root=tmp_path,
+            state_file=state_file,
+            run_log=log_file,
+            today=date(2026, 6, 8),
+            command_runner=lambda step, log_path: (
+                calls.append(step.id) or run_update_daily.TIMEOUT_CLEANUP_FAILED_EXIT_CODE
+            ),
+        )
+        == run_update_daily.TIMEOUT_CLEANUP_FAILED_EXIT_CODE
+    )
+
+    assert calls == ["optional-timeout"]
+    states = _state(state_file)["runs"]["2026-06-08"]["steps"]
+    assert states["optional-timeout"]["status"] == "failed_timeout_cleanup"
+    assert "after-timeout" not in states
