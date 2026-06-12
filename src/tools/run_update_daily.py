@@ -8,15 +8,22 @@ import signal
 import subprocess
 import sys
 import time
+import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any, TextIO
 
+from src.utils.process_lock import ProcessLockError, acquire_process_lock, is_pid_alive
+
 
 class StateFileError(RuntimeError):
     """Raised when the daily update state file cannot be read safely."""
+
+
+class RunDailyUpdateLockError(RuntimeError):
+    """Raised when another run-update-daily process owns the global lock."""
 
 
 @dataclass(frozen=True)
@@ -37,6 +44,8 @@ CommandRunner = Callable[[DailyStep, Path], int]
 TIMEOUT_EXIT_CODE = 124
 TIMEOUT_CLEANUP_FAILED_EXIT_CODE = 125
 PROCESS_CLEANUP_WAIT_SECONDS = 30
+RUNNING_ABANDONED_AFTER_SECONDS = 24 * 60 * 60
+RUN_UPDATE_DAILY_LOCK_STALE_AFTER_SECONDS = 24 * 60 * 60
 
 
 def daily_steps(today: date | None = None) -> list[DailyStep]:
@@ -183,6 +192,26 @@ def daily_steps(today: date | None = None) -> list[DailyStep]:
             ]
         )
 
+    build_derived_dependencies = [
+        "akshare-spot-quote",
+        "baostock-unadjusted",
+        "baostock-basic",
+        "baostock-valuation-percentile",
+        "financial-report",
+    ]
+    if weekend_window:
+        build_derived_dependencies.extend(
+            [
+                "akshare-delist",
+                "baostock-adjustment-factor",
+                "baostock-qfq",
+                "baostock-hfq",
+                "akshare-valuation-full",
+                "akshare-daily-bar",
+                "sync-qlib",
+            ]
+        )
+
     steps.extend(
         [
             DailyStep(
@@ -202,7 +231,7 @@ def daily_steps(today: date | None = None) -> list[DailyStep]:
                 "build-derived",
                 "build canonical derived datasets",
                 _cli("build-derived", "--target", "all", "--no-build-duckdb-views"),
-                depends_on=("baostock-basic",),
+                depends_on=tuple(build_derived_dependencies),
             ),
             DailyStep(
                 "build-duckdb-views",
@@ -238,134 +267,156 @@ def run_daily_update(
     if start_at is not None and start_at not in step_ids:
         raise ValueError(f"Unknown daily update step id: {start_at}")
 
-    state = {"runs": {}} if force else _read_state(resolved_state_file)
-    run_state = state.setdefault("runs", {}).setdefault(run_key, {"steps": {}})
-    step_state = run_state.setdefault("steps", {})
-    resolved_log.parent.mkdir(parents=True, exist_ok=True)
+    lock_dir = base / "data" / "metadata" / "locks" / "run-update-daily.lock"
+    lock_cm = acquire_process_lock(
+        lock_dir,
+        lock_name="run-update-daily",
+        purpose="run-update-daily",
+        stale_after_seconds=RUN_UPDATE_DAILY_LOCK_STALE_AFTER_SECONDS,
+        extra_owner={"run_key": run_key},
+    )
+    try:
+        active_lock = lock_cm.__enter__()
+    except ProcessLockError as exc:
+        raise RunDailyUpdateLockError(f"run-update-daily is already running; {exc}") from exc
 
-    start_seen = start_at is None
-    failed_exit_code: int | None = None
-    for step in steps:
-        if not start_seen:
-            if step.id == start_at:
-                start_seen = True
-            else:
-                _record_step(step_state, step, "skipped", 0, resolved_log, now)
-                _emit(resolved_log, now, f"Skipped {step.id} before start-at {start_at}", console=True)
+    exc_info: tuple[type[BaseException] | None, BaseException | None, object | None] = (None, None, None)
+    try:
+        state = {"runs": {}} if force else _read_state(resolved_state_file)
+        run_state = state.setdefault("runs", {}).setdefault(run_key, {"steps": {}})
+        step_state = run_state.setdefault("steps", {})
+        resolved_log.parent.mkdir(parents=True, exist_ok=True)
+        if _mark_abandoned_running_steps(steps, step_state, resolved_log, now, active_lock.owner):
+            _write_state(resolved_state_file, state)
+
+        start_seen = start_at is None
+        failed_exit_code: int | None = None
+        for step in steps:
+            if not start_seen:
+                if step.id == start_at:
+                    start_seen = True
+                else:
+                    _record_step(step_state, step, "skipped", 0, resolved_log, now)
+                    _emit(resolved_log, now, f"Skipped {step.id} before start-at {start_at}", console=True)
+                    continue
+
+            current_status = str(step_state.get(step.id, {}).get("status", "pending"))
+            if start_at is None and current_status == "success":
+                _emit(resolved_log, now, f"Skipped {step.id}; already successful", console=True)
                 continue
 
-        current_status = str(step_state.get(step.id, {}).get("status", "pending"))
-        if start_at is None and current_status == "success":
-            _emit(resolved_log, now, f"Skipped {step.id}; already successful", console=True)
-            continue
-
-        blocked_by = _blocked_dependencies(step, step_state)
-        if blocked_by:
-            _record_step(step_state, step, "blocked", 1, resolved_log, now, blocked_by=blocked_by)
-            _write_state(resolved_state_file, state)
-            _emit(
-                resolved_log,
-                now,
-                f"Blocked {step.id}; dependency failed: {', '.join(blocked_by)}",
-                console=True,
-            )
-            continue
-
-        _record_step(step_state, step, "running", None, resolved_log, now)
-        _write_state(resolved_state_file, state)
-        _emit(resolved_log, now, f"Running {step.id} ({step.name})... log={resolved_log}", console=True)
-        _emit(resolved_log, now, f"Command: {step.command_text}", console=False)
-
-        exit_code = int(runner(step, resolved_log))
-        if exit_code != 0:
-            timed_out = exit_code == TIMEOUT_EXIT_CODE and step.timeout_seconds is not None
-            timeout_cleanup_failed = exit_code == TIMEOUT_CLEANUP_FAILED_EXIT_CODE and step.timeout_seconds is not None
-            if timed_out or timeout_cleanup_failed:
-                if timeout_cleanup_failed:
-                    if step.optional:
-                        _record_step(
-                            step_state,
-                            step,
-                            "failed_timeout_cleanup",
-                            exit_code,
-                            resolved_log,
-                            now,
-                        )
-                    else:
-                        _record_step(step_state, step, "failed", exit_code, resolved_log, now)
-                    _write_state(resolved_state_file, state)
-                    _emit(
-                        resolved_log,
-                        now,
-                        f"{step.name} timed out and process tree cleanup failed; stopping",
-                        console=True,
-                    )
-                    failed_exit_code = failed_exit_code or exit_code
-                    break
-
-                if not _wait_for_duckdb_available(base):
-                    if step.optional:
-                        _record_step(
-                            step_state,
-                            step,
-                            "failed_resource_locked",
-                            exit_code,
-                            resolved_log,
-                            now,
-                        )
-                    else:
-                        _record_step(step_state, step, "failed", exit_code, resolved_log, now)
-                    _write_state(resolved_state_file, state)
-                    _emit(
-                        resolved_log,
-                        now,
-                        f"{step.name} timed out and DuckDB is still locked; stopping",
-                        console=True,
-                    )
-                    failed_exit_code = failed_exit_code or exit_code
-                    break
-
-            if step.optional:
-                status = "skipped_timeout" if timed_out else "skipped"
-                reason = (
-                    f"{step.name} timed out after {step.timeout_seconds} seconds; continuing"
-                    if timed_out
-                    else f"{step.name} completed with warnings; continuing after error code {exit_code}"
-                )
-                _emit(
-                    resolved_log,
-                    now,
-                    reason,
-                    console=True,
-                )
-                _record_step(step_state, step, status, exit_code, resolved_log, now)
+            blocked_by = _blocked_dependencies(step, step_state)
+            if blocked_by:
+                _record_step(step_state, step, "blocked", 1, resolved_log, now, blocked_by=blocked_by)
                 _write_state(resolved_state_file, state)
-                continue
-            if timed_out:
                 _emit(
                     resolved_log,
                     now,
-                    f"{step.name} timed out after {step.timeout_seconds} seconds; stopping",
+                    f"Blocked {step.id}; dependency failed: {', '.join(blocked_by)}",
                     console=True,
                 )
-            else:
-                _emit(resolved_log, now, f"{step.name} failed with error code {exit_code}", console=True)
-            _record_step(step_state, step, "failed", exit_code, resolved_log, now)
+                continue
+
+            _record_step(step_state, step, "running", None, resolved_log, now)
             _write_state(resolved_state_file, state)
-            if failed_exit_code is None:
-                failed_exit_code = exit_code
-            continue
+            _emit(resolved_log, now, f"Running {step.id} ({step.name})... log={resolved_log}", console=True)
+            _emit(resolved_log, now, f"Command: {step.command_text}", console=False)
 
-        _emit(resolved_log, now, f"Completed {step.id} ({step.name})", console=True)
-        _record_step(step_state, step, "success", 0, resolved_log, now)
-        _write_state(resolved_state_file, state)
+            exit_code = int(runner(step, resolved_log))
+            if exit_code != 0:
+                timed_out = exit_code == TIMEOUT_EXIT_CODE and step.timeout_seconds is not None
+                timeout_cleanup_failed = exit_code == TIMEOUT_CLEANUP_FAILED_EXIT_CODE and step.timeout_seconds is not None
+                if timed_out or timeout_cleanup_failed:
+                    if timeout_cleanup_failed:
+                        if step.optional:
+                            _record_step(
+                                step_state,
+                                step,
+                                "failed_timeout_cleanup",
+                                exit_code,
+                                resolved_log,
+                                now,
+                            )
+                        else:
+                            _record_step(step_state, step, "failed", exit_code, resolved_log, now)
+                        _write_state(resolved_state_file, state)
+                        _emit(
+                            resolved_log,
+                            now,
+                            f"{step.name} timed out and process tree cleanup failed; stopping",
+                            console=True,
+                        )
+                        failed_exit_code = failed_exit_code or exit_code
+                        break
 
-    final_exit_code = _final_exit_code(steps, step_state, failed_exit_code)
-    if final_exit_code == 0:
-        _emit(resolved_log, now, "All updates completed successfully", console=True)
-    else:
-        _emit(resolved_log, now, f"Daily update completed with failures; exit code {final_exit_code}", console=True)
-    return final_exit_code
+                    if not _wait_for_duckdb_available(base):
+                        if step.optional:
+                            _record_step(
+                                step_state,
+                                step,
+                                "failed_resource_locked",
+                                exit_code,
+                                resolved_log,
+                                now,
+                            )
+                        else:
+                            _record_step(step_state, step, "failed", exit_code, resolved_log, now)
+                        _write_state(resolved_state_file, state)
+                        _emit(
+                            resolved_log,
+                            now,
+                            f"{step.name} timed out and DuckDB is still locked; stopping",
+                            console=True,
+                        )
+                        failed_exit_code = failed_exit_code or exit_code
+                        break
+
+                if step.optional:
+                    status = "skipped_timeout" if timed_out else "skipped"
+                    reason = (
+                        f"{step.name} timed out after {step.timeout_seconds} seconds; continuing"
+                        if timed_out
+                        else f"{step.name} completed with warnings; continuing after error code {exit_code}"
+                    )
+                    _emit(
+                        resolved_log,
+                        now,
+                        reason,
+                        console=True,
+                    )
+                    _record_step(step_state, step, status, exit_code, resolved_log, now)
+                    _write_state(resolved_state_file, state)
+                    continue
+                if timed_out:
+                    _emit(
+                        resolved_log,
+                        now,
+                        f"{step.name} timed out after {step.timeout_seconds} seconds; stopping",
+                        console=True,
+                    )
+                else:
+                    _emit(resolved_log, now, f"{step.name} failed with error code {exit_code}", console=True)
+                _record_step(step_state, step, "failed", exit_code, resolved_log, now)
+                _write_state(resolved_state_file, state)
+                if failed_exit_code is None:
+                    failed_exit_code = exit_code
+                continue
+
+            _emit(resolved_log, now, f"Completed {step.id} ({step.name})", console=True)
+            _record_step(step_state, step, "success", 0, resolved_log, now)
+            _write_state(resolved_state_file, state)
+
+        final_exit_code = _final_exit_code(steps, step_state, failed_exit_code)
+        if final_exit_code == 0:
+            _emit(resolved_log, now, "All updates completed successfully", console=True)
+        else:
+            _emit(resolved_log, now, f"Daily update completed with failures; exit code {final_exit_code}", console=True)
+        return final_exit_code
+    except BaseException:
+        exc_info = sys.exc_info()
+        raise
+    finally:
+        lock_cm.__exit__(*exc_info)
 
 
 def _cli(*args: str) -> tuple[str, ...]:
@@ -486,7 +537,20 @@ def _read_state(path: Path) -> dict[str, Any]:
 
 def _write_state(path: Path, state: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(state, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
+    payload = json.dumps(state, ensure_ascii=False, indent=2, sort_keys=True)
+    tmp_path = path.with_name(f".{path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
+    try:
+        with tmp_path.open("w", encoding="utf-8") as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp_path, path)
+    finally:
+        if tmp_path.exists():
+            try:
+                tmp_path.unlink()
+            except OSError:
+                pass
 
 
 def _record_step(
@@ -498,27 +562,96 @@ def _record_step(
     now: Callable[[], datetime] | None,
     *,
     blocked_by: tuple[str, ...] | list[str] | None = None,
+    reason: str | None = None,
 ) -> None:
     previous = step_state.get(step.id, {})
-    started_at = previous.get("started_at") if status != "running" else _timestamp(now)
+    timestamp = _timestamp(now)
+    started_at = previous.get("started_at") if status != "running" else timestamp
     row = {
         "status": status,
         "command": step.command_text,
         "started_at": started_at,
-        "ended_at": None if status == "running" else _timestamp(now),
+        "updated_at": timestamp,
+        "ended_at": None if status == "running" else timestamp,
         "exit_code": exit_code,
         "log_path": str(log_path),
     }
+    if status == "running":
+        row["pid"] = os.getpid()
+        row["orchestrator_pid"] = os.getpid()
     if blocked_by is not None:
         row["blocked_by"] = list(blocked_by)
+    if reason is not None:
+        row["reason"] = reason
     step_state[step.id] = row
+
+
+def _mark_abandoned_running_steps(
+    steps: list[DailyStep],
+    step_state: dict[str, Any],
+    log_path: Path,
+    now: Callable[[], datetime] | None,
+    active_lock_owner: dict[str, object],
+) -> bool:
+    changed = False
+    for step in steps:
+        current = step_state.get(step.id)
+        if not isinstance(current, dict) or str(current.get("status")) != "running":
+            continue
+        reason = _running_abandoned_reason(current, now, active_lock_owner)
+        if reason is None:
+            continue
+        _record_step(step_state, step, "abandoned", 1, log_path, now, reason=reason)
+        changed = True
+    return changed
+
+
+def _running_abandoned_reason(
+    row: dict[str, Any],
+    now: Callable[[], datetime] | None,
+    active_lock_owner: dict[str, object],
+) -> str | None:
+    pid = _int_or_none(row.get("orchestrator_pid", row.get("pid")))
+    if pid is None:
+        return "running step has no orchestrator pid"
+    if not is_pid_alive(pid):
+        return f"orchestrator pid {pid} is not alive"
+
+    started_at = _parse_timestamp(row.get("started_at"))
+    if started_at is None:
+        return "running step has no valid started_at"
+    current_time = (now or datetime.now)()
+    if current_time - started_at <= timedelta(seconds=RUNNING_ABANDONED_AFTER_SECONDS):
+        return None
+
+    active_pid = _int_or_none(active_lock_owner.get("pid"))
+    if active_pid == pid:
+        return None
+    return f"running step exceeded {RUNNING_ABANDONED_AFTER_SECONDS} seconds"
+
+
+def _int_or_none(value: object) -> int | None:
+    try:
+        resolved = int(value)
+    except (TypeError, ValueError):
+        return None
+    return resolved if resolved > 0 else None
+
+
+def _parse_timestamp(value: object) -> datetime | None:
+    if not isinstance(value, str):
+        return None
+    try:
+        return datetime.fromisoformat(value)
+    except ValueError:
+        return None
 
 
 def _blocked_dependencies(step: DailyStep, step_state: dict[str, Any]) -> tuple[str, ...]:
     blocked: list[str] = []
     for dependency in step.depends_on:
         dependency_status = str(step_state.get(dependency, {}).get("status", "pending"))
-        if dependency_status in {"failed", "failed_resource_locked", "failed_timeout_cleanup", "blocked"}:
+        if dependency_status in {"failed", "failed_resource_locked", "failed_timeout_cleanup", "blocked", "abandoned"}:
             blocked.append(dependency)
     return tuple(blocked)
 
@@ -528,7 +661,7 @@ def _final_exit_code(steps: list[DailyStep], step_state: dict[str, Any], failed_
         return failed_exit_code
     for step in steps:
         current = step_state.get(step.id, {})
-        if str(current.get("status")) in {"failed", "failed_resource_locked", "failed_timeout_cleanup"}:
+        if str(current.get("status")) in {"failed", "failed_resource_locked", "failed_timeout_cleanup", "abandoned"}:
             raw_exit_code = current.get("exit_code")
             return int(raw_exit_code) if raw_exit_code is not None else 1
     for step in steps:

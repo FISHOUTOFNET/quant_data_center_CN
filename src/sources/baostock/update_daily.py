@@ -97,10 +97,15 @@ def update_daily(
 
 
 def _can_drain_capital_structure_pending(records: list[dict[str, object]]) -> bool:
-    if any(str(record.get("status")) == "failed" for record in records):
+    if any(_is_failed_status(record.get("status")) for record in records):
         logger.warning("Skipping AkShare capital structure pending drain because adjustment factor update failed")
         return False
     return True
+
+
+def _is_failed_status(value: object) -> bool:
+    status = str(value or "")
+    return status == "failed" or status.startswith("failed_")
 
 
 def _finish_update_daily(

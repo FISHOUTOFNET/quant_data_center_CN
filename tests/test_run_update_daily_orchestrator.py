@@ -3,12 +3,13 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 import pytest
 
 from src.tools import run_update_daily
+from src.utils.process_lock import acquire_process_lock
 
 
 def _state(path: Path) -> dict:
@@ -246,7 +247,26 @@ def test_daily_steps_build_derived_all_before_views(today: date) -> None:
     assert "build-security-master" not in by_id
     assert steps.index(by_id["financial-report"]) < steps.index(by_id["build-derived"])
     assert steps.index(by_id["build-derived"]) < steps.index(by_id["build-duckdb-views"])
-    assert by_id["build-derived"].depends_on == ("baostock-basic",)
+    assert by_id["build-derived"].depends_on == (
+        "akshare-spot-quote",
+        "baostock-unadjusted",
+        "baostock-basic",
+        "baostock-valuation-percentile",
+        "financial-report",
+        *(
+            (
+                "akshare-delist",
+                "baostock-adjustment-factor",
+                "baostock-qfq",
+                "baostock-hfq",
+                "akshare-valuation-full",
+                "akshare-daily-bar",
+                "sync-qlib",
+            )
+            if today.weekday() in {4, 5, 6}
+            else ()
+        ),
+    )
     assert by_id["build-duckdb-views"].depends_on == ("build-derived",)
     assert by_id["build-derived"].command[1:] == (
         "-m",
@@ -279,7 +299,82 @@ def test_run_daily_update_records_yjyg_em_step_on_weekday(tmp_path: Path) -> Non
     assert states["akshare-yjyg-em"]["status"] == "success"
 
 
-def test_weekend_akshare_valuation_failure_does_not_block_independent_later_steps(tmp_path: Path) -> None:
+@pytest.mark.parametrize("failed_step", ["baostock-unadjusted", "baostock-valuation-percentile"])
+def test_core_baostock_failure_blocks_build_derived(tmp_path: Path, failed_step: str) -> None:
+    state_file = tmp_path / "state.json"
+    log_file = tmp_path / "run.log"
+    calls: list[str] = []
+
+    assert (
+        run_update_daily.run_daily_update(
+            root=tmp_path,
+            state_file=state_file,
+            run_log=log_file,
+            today=date(2026, 6, 8),
+            command_runner=lambda step, log_path: calls.append(step.id) or (7 if step.id == failed_step else 0),
+        )
+        == 7
+    )
+
+    assert "build-derived" not in calls
+    states = _state(state_file)["runs"]["2026-06-08"]["steps"]
+    assert states["build-derived"]["status"] == "blocked"
+    assert failed_step in states["build-derived"]["blocked_by"]
+
+
+def test_weekend_daily_bar_failure_blocks_build_derived(tmp_path: Path) -> None:
+    state_file = tmp_path / "state.json"
+    log_file = tmp_path / "run.log"
+    calls: list[str] = []
+
+    assert (
+        run_update_daily.run_daily_update(
+            root=tmp_path,
+            state_file=state_file,
+            run_log=log_file,
+            today=date(2026, 6, 6),
+            command_runner=lambda step, log_path: calls.append(step.id) or (7 if step.id == "akshare-daily-bar" else 0),
+        )
+        == 7
+    )
+
+    assert "build-derived" not in calls
+    states = _state(state_file)["runs"]["2026-06-06"]["steps"]
+    assert states["build-derived"]["status"] == "blocked"
+    assert states["build-derived"]["blocked_by"] == ["akshare-daily-bar"]
+
+
+def test_optional_plain_skipped_does_not_block_build_derived(tmp_path: Path) -> None:
+    state_file = tmp_path / "state.json"
+    log_file = tmp_path / "run.log"
+    calls: list[str] = []
+
+    assert (
+        run_update_daily.run_daily_update(
+            root=tmp_path,
+            state_file=state_file,
+            run_log=log_file,
+            today=date(2026, 6, 8),
+            command_runner=lambda step, log_path: calls.append(step.id) or (7 if step.id == "akshare-spot-quote" else 0),
+        )
+        == 0
+    )
+
+    assert "build-derived" in calls
+    states = _state(state_file)["runs"]["2026-06-08"]["steps"]
+    assert states["akshare-spot-quote"]["status"] == "skipped"
+    assert states["build-derived"]["status"] == "success"
+
+
+@pytest.mark.parametrize("status", ["failed_resource_locked", "failed_timeout_cleanup"])
+def test_failed_optional_hard_status_blocks_followup(status: str) -> None:
+    step = run_update_daily.DailyStep("derived", "derived", ("cmd",), depends_on=("optional-source",))
+    step_state = {"optional-source": {"status": status}}
+
+    assert run_update_daily._blocked_dependencies(step, step_state) == ("optional-source",)
+
+
+def test_weekend_akshare_valuation_failure_blocks_build_derived(tmp_path: Path) -> None:
     state_file = tmp_path / "state.json"
     log_file = tmp_path / "run.log"
     calls: list[str] = []
@@ -305,8 +400,8 @@ def test_weekend_akshare_valuation_failure_does_not_block_independent_later_step
     assert "akshare-daily-bar" in calls
     assert "sync-qlib" in calls
     assert "financial-report" in calls
-    assert "build-derived" in calls
-    assert calls[-1] == "build-duckdb-views"
+    assert "build-derived" not in calls
+    assert "build-duckdb-views" not in calls
     states = _state(state_file)["runs"]["2026-06-06"]["steps"]
     assert states["akshare-valuation-full"]["status"] == "failed"
     assert states["akshare-report-disclosure"]["status"] == "success"
@@ -315,8 +410,9 @@ def test_weekend_akshare_valuation_failure_does_not_block_independent_later_step
     assert states["akshare-daily-bar"]["status"] == "success"
     assert states["sync-qlib"]["status"] == "success"
     assert states["financial-report"]["status"] == "success"
-    assert states["build-derived"]["status"] == "success"
-    assert states["build-duckdb-views"]["status"] == "success"
+    assert states["build-derived"]["status"] == "blocked"
+    assert states["build-derived"]["blocked_by"] == ["akshare-valuation-full"]
+    assert states["build-duckdb-views"]["status"] == "blocked"
 
 
 def test_run_subprocess_disables_child_file_logging(
@@ -363,6 +459,156 @@ def test_orchestrator_rejects_corrupt_state_file(tmp_path: Path) -> None:
             today=date(2026, 6, 5),
             command_runner=lambda step, log_path: 0,
         )
+
+
+def test_run_daily_update_rejects_active_global_lock(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    lock_dir = tmp_path / "data" / "metadata" / "locks" / "run-update-daily.lock"
+    monkeypatch.setattr(
+        run_update_daily,
+        "daily_steps",
+        lambda today=None: [run_update_daily.DailyStep("one", "one", ("cmd",))],
+    )
+
+    with acquire_process_lock(
+        lock_dir,
+        lock_name="run-update-daily",
+        purpose="outer",
+        stale_after_seconds=60,
+    ):
+        with pytest.raises(run_update_daily.RunDailyUpdateLockError) as exc_info:
+            run_update_daily.run_daily_update(
+                root=tmp_path,
+                state_file=tmp_path / "state.json",
+                today=date(2026, 6, 8),
+                command_runner=lambda step, log_path: 0,
+            )
+        assert str(lock_dir) in str(exc_info.value)
+
+
+def test_run_daily_update_recovers_stale_global_lock(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    lock_dir = tmp_path / "data" / "metadata" / "locks" / "run-update-daily.lock"
+    lock_dir.mkdir(parents=True)
+    (lock_dir / "owner.json").write_text("{bad", encoding="utf-8")
+    monkeypatch.setattr(
+        run_update_daily,
+        "daily_steps",
+        lambda today=None: [run_update_daily.DailyStep("one", "one", ("cmd",))],
+    )
+
+    assert (
+        run_update_daily.run_daily_update(
+            root=tmp_path,
+            state_file=tmp_path / "state.json",
+            today=date(2026, 6, 8),
+            command_runner=lambda step, log_path: 0,
+        )
+        == 0
+    )
+
+    assert not lock_dir.exists()
+
+
+def test_write_state_is_atomic_json_and_cleans_temp_files(tmp_path: Path) -> None:
+    state_file = tmp_path / "state.json"
+
+    run_update_daily._write_state(state_file, {"runs": {"2026-06-12": {"步骤": "成功"}}})
+
+    assert json.loads(state_file.read_text(encoding="utf-8")) == {"runs": {"2026-06-12": {"步骤": "成功"}}}
+    assert list(tmp_path.glob(".state.json.*.tmp")) == []
+
+
+def test_running_dead_pid_is_marked_abandoned(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    step = run_update_daily.DailyStep("source", "source", ("cmd",))
+    step_state = {
+        "source": {
+            "status": "running",
+            "started_at": "2026-06-08T09:00:00",
+            "orchestrator_pid": 999999,
+        }
+    }
+    monkeypatch.setattr(run_update_daily, "is_pid_alive", lambda pid: False)
+
+    changed = run_update_daily._mark_abandoned_running_steps(
+        [step],
+        step_state,
+        tmp_path / "run.log",
+        lambda: datetime(2026, 6, 8, 10, 0),
+        {"pid": 123},
+    )
+
+    assert changed is True
+    assert step_state["source"]["status"] == "abandoned"
+    assert "not alive" in step_state["source"]["reason"]
+    assert run_update_daily._final_exit_code([step], step_state, None) == 1
+
+
+def test_abandoned_dependency_blocks_until_retried_successfully(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state_file = tmp_path / "state.json"
+    log_file = tmp_path / "run.log"
+    steps = [
+        run_update_daily.DailyStep("source", "source", ("cmd",)),
+        run_update_daily.DailyStep("dependent", "dependent", ("cmd",), depends_on=("source",)),
+    ]
+    state_file.write_text(
+        json.dumps({"runs": {"2026-06-08": {"steps": {"source": {"status": "abandoned", "exit_code": 1}}}}}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(run_update_daily, "daily_steps", lambda today=None: steps)
+    calls: list[str] = []
+
+    assert run_update_daily._blocked_dependencies(steps[1], {"source": {"status": "abandoned"}}) == ("source",)
+    assert (
+        run_update_daily.run_daily_update(
+            root=tmp_path,
+            state_file=state_file,
+            run_log=log_file,
+            today=date(2026, 6, 8),
+            command_runner=lambda step, log_path: calls.append(step.id) or 0,
+        )
+        == 0
+    )
+
+    assert calls == ["source", "dependent"]
+    states = _state(state_file)["runs"]["2026-06-08"]["steps"]
+    assert states["source"]["status"] == "success"
+    assert states["dependent"]["status"] == "success"
+
+
+def test_stale_running_record_is_abandoned_unless_owned_by_active_lock(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    step = run_update_daily.DailyStep("source", "source", ("cmd",))
+    started = datetime(2026, 6, 8, 8, 0)
+    old_row = {
+        "status": "running",
+        "started_at": started.isoformat(),
+        "orchestrator_pid": 111,
+    }
+    monkeypatch.setattr(run_update_daily, "is_pid_alive", lambda pid: True)
+
+    stale_state = {"source": dict(old_row)}
+    assert run_update_daily._mark_abandoned_running_steps(
+        [step],
+        stale_state,
+        tmp_path / "run.log",
+        lambda: started + timedelta(days=2),
+        {"pid": 222},
+    )
+    assert stale_state["source"]["status"] == "abandoned"
+
+    active_state = {"source": dict(old_row)}
+    assert not run_update_daily._mark_abandoned_running_steps(
+        [step],
+        active_state,
+        tmp_path / "run.log",
+        lambda: started + timedelta(days=2),
+        {"pid": 111},
+    )
+    assert active_state["source"]["status"] == "running"
 
 
 def test_orchestrator_prints_step_progress_to_console(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:

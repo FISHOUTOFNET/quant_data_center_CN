@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import click
 
+from src.commands.records import echo_pipeline_records, raise_for_failed_records
 from src.sources.akshare.client import normalize_akshare_code
 from src.sources.akshare.pipeline import AkShareUpdateRequest
 from src.sources.akshare.pipeline import update_akshare as run_update_akshare
@@ -106,8 +107,5 @@ def register_akshare_commands(root: click.Group) -> None:
             raise click.BadParameter(str(exc)) from exc
         except RuntimeError as exc:
             raise click.ClickException(str(exc)) from exc
-        for item in records:
-            click.echo(f"{item['dataset']} {item['code']} status={item['status']} rows={item['row_count']}")
-        failed = [item for item in records if str(item.get("status")) == "failed"]
-        if failed:
-            raise click.ClickException(f"AkShare update completed with {len(failed)} failed task(s)")
+        echo_pipeline_records(records)
+        raise_for_failed_records(records, label="AkShare update")

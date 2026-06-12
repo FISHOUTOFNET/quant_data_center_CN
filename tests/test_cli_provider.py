@@ -91,6 +91,43 @@ def test_update_daily_cli_does_not_expose_universe_option() -> None:
     assert "--universe" not in result.output
 
 
+def test_update_daily_cli_exits_nonzero_when_records_fail(monkeypatch) -> None:
+    def fake_update_daily(**kwargs):
+        del kwargs
+        return [
+            {
+                "dataset": "baostock_cn_stock_daily_bar_unadjusted",
+                "code": "sh.600000",
+                "status": "failed_api",
+                "row_count": 0,
+                "error_stack": "Traceback line 1\nTraceback line 2\nTraceback line 3\nTraceback line 4",
+            }
+        ]
+
+    monkeypatch.setattr(baostock_commands, "run_update_daily", fake_update_daily)
+
+    result = CliRunner().invoke(cli_module.cli, ["update-baostock-daily", "--no-build-duckdb-views"])
+
+    assert result.exit_code != 0
+    assert "baostock_cn_stock_daily_bar_unadjusted sh.600000 status=failed_api rows=0" in result.output
+    assert "baostock_cn_stock_daily_bar_unadjusted/sh.600000" in result.output
+    assert "Traceback line 1" in result.output
+
+
+def test_update_daily_cli_handles_incomplete_failure_record(monkeypatch) -> None:
+    def fake_update_daily(**kwargs):
+        del kwargs
+        return [{"status": "failed", "error_stack": "metadata flush failed"}]
+
+    monkeypatch.setattr(baostock_commands, "run_update_daily", fake_update_daily)
+
+    result = CliRunner().invoke(cli_module.cli, ["update-baostock-daily", "--no-build-duckdb-views"])
+
+    assert result.exit_code != 0
+    assert "<unknown> * status=failed rows=0" in result.output
+    assert "KeyError" not in result.output
+
+
 def test_update_akshare_cli_passes_arguments(monkeypatch) -> None:
     captured: dict[str, object] = {}
 
@@ -303,6 +340,29 @@ def test_update_baostock_valuation_percentile_cli_passes_arguments(monkeypatch) 
     assert captured["resume"] is False
     assert captured["force"] is True
     assert captured["build_views"] is False
+
+
+def test_update_baostock_valuation_percentile_cli_exits_nonzero_when_records_fail(monkeypatch) -> None:
+    def fake_update_baostock_valuation_percentile(**kwargs):
+        del kwargs
+        return [
+            {
+                "dataset": "baostock_cn_stock_valuation_percentile",
+                "code": "sh.600000",
+                "status": "failed",
+                "row_count": 0,
+                "error_stack": "valuation failed",
+            }
+        ]
+
+    monkeypatch.setattr(
+        baostock_commands, "run_update_baostock_valuation_percentile", fake_update_baostock_valuation_percentile
+    )
+
+    result = CliRunner().invoke(cli_module.cli, ["update-baostock-valuation-percentile", "--no-build-duckdb-views"])
+
+    assert result.exit_code != 0
+    assert "baostock_cn_stock_valuation_percentile/sh.600000" in result.output
 
 
 def test_akshare_cli_rejects_non_six_digit_code_shapes() -> None:

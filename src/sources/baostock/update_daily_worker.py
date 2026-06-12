@@ -216,7 +216,17 @@ class _DailyUpdateBackgroundWorker:
         except Exception:
             error_stack = traceback.format_exc()
             logger.exception("Pipeline metadata flush failed")
-            return BackgroundTaskResult(run_records=[{"status": "failed", "error_stack": error_stack}])
+            return BackgroundTaskResult(
+                run_records=[
+                    {
+                        "dataset": "__metadata__",
+                        "code": "*",
+                        "status": "failed",
+                        "row_count": 0,
+                        "error_stack": error_stack,
+                    }
+                ]
+            )
 
     def _set_factor_state(self, code: str, state: _AdjustFactorState) -> None:
         with self._state_lock:

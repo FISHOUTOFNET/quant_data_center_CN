@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -13,12 +13,13 @@ from src.sources.derived.common import (
     cleanup_derived_dataset_staging,
     commit_derived_dataset_staging,
     create_derived_dataset_staging_area,
-    read_partition_or_empty,
     refresh_derived_registry,
 )
 from src.sources.derived.security_master import build_security_master
+from src.storage.dataset_catalog import DATASET_CATALOG
 from src.storage.duckdb_store import DuckDBStore
 from src.storage.parquet_store import ParquetStore
+from src.storage.schema import CN_STOCK_DAILY_BAR_SCHEMA
 
 BAOSTOCK_DAILY_SOURCES = {
     "baostock_cn_stock_daily_bar_unadjusted": "unadjusted",
@@ -30,6 +31,7 @@ AKSHARE_DAILY_SOURCES = {
     "akshare_cn_stock_daily_bar_qfq": "qfq",
     "akshare_cn_stock_daily_bar_hfq": "hfq",
 }
+CN_STOCK_DAILY_BAR_COLUMNS = tuple(field.name for field in CN_STOCK_DAILY_BAR_SCHEMA)
 
 
 def build_cn_stock_daily_bar(
@@ -47,12 +49,14 @@ def build_cn_stock_daily_bar(
     partitions = 0
     try:
         master = _read_or_build_master(store, now)
+        partition_cache = _build_daily_source_partition_cache(store)
+        master = _filter_master_to_daily_source_candidates(master, partition_cache)
         updated_at = (now or datetime.now)()
         for _, security in master.iterrows():
             security_id = _clean_string(security.get("security_id"))
             if not security_id:
                 continue
-            security_df = _materialize_security_daily_bar(store, security, updated_at)
+            security_df = _materialize_security_daily_bar(store, security, updated_at, partition_cache)
             if security_df.empty:
                 continue
             result = write_store.write_dataset(
@@ -88,10 +92,57 @@ def _read_or_build_master(store: ParquetStore, now: Callable[[], datetime] | Non
     return master
 
 
+def _build_daily_source_partition_cache(store: ParquetStore) -> dict[str, set[str]]:
+    partition_cache: dict[str, set[str]] = {}
+    for dataset_id in (*BAOSTOCK_DAILY_SOURCES, *AKSHARE_DAILY_SOURCES):
+        if DATASET_CATALOG[dataset_id].partition_column is None:
+            partition_cache[dataset_id] = set()
+            continue
+        partition_cache[dataset_id] = set(store.list_dataset_partitions(dataset_id))
+    return partition_cache
+
+
+def _read_partition_or_empty_cached(
+    store: ParquetStore,
+    dataset_id: str,
+    partition_value: str,
+    partition_cache: Mapping[str, set[str]],
+) -> pd.DataFrame:
+    partition_column = DATASET_CATALOG[dataset_id].partition_column
+    if partition_column is None:
+        return store.read_dataset(dataset_id)
+    if partition_value not in partition_cache.get(dataset_id, set()):
+        return store.empty_dataset_frame(dataset_id)
+    return store.read_dataset(dataset_id, {partition_column: partition_value})
+
+
+def _filter_master_to_daily_source_candidates(
+    master: pd.DataFrame,
+    partition_cache: Mapping[str, set[str]],
+) -> pd.DataFrame:
+    if master.empty:
+        return master
+
+    baostock_partitions = set().union(
+        *(partition_cache.get(dataset_id, set()) for dataset_id in BAOSTOCK_DAILY_SOURCES)
+    )
+    akshare_partitions = set().union(*(partition_cache.get(dataset_id, set()) for dataset_id in AKSHARE_DAILY_SOURCES))
+
+    baostock_codes = [_clean_string(value) for value in _column_or_none(master, "baostock_code")]
+    akshare_codes = [_clean_string(value) for value in _column_or_none(master, "akshare_code")]
+    keep = [
+        (bool(baostock_code) and baostock_code in baostock_partitions)
+        or (bool(akshare_code) and akshare_code in akshare_partitions)
+        for baostock_code, akshare_code in zip(baostock_codes, akshare_codes, strict=True)
+    ]
+    return master.loc[keep].reset_index(drop=True)
+
+
 def _materialize_security_daily_bar(
     store: ParquetStore,
     security: pd.Series,
     updated_at: datetime,
+    partition_cache: Mapping[str, set[str]],
 ) -> pd.DataFrame:
     frames: list[pd.DataFrame] = []
     baostock_code = _clean_string(security.get("baostock_code"))
@@ -99,19 +150,19 @@ def _materialize_security_daily_bar(
 
     if baostock_code:
         for dataset_id, adjustment in BAOSTOCK_DAILY_SOURCES.items():
-            source = read_partition_or_empty(store, dataset_id, baostock_code)
+            source = _read_partition_or_empty_cached(store, dataset_id, baostock_code, partition_cache)
             frames.append(_map_baostock_daily(source, dataset_id, adjustment, security, updated_at))
 
     if akshare_code:
         for dataset_id, adjustment in AKSHARE_DAILY_SOURCES.items():
-            source = read_partition_or_empty(store, dataset_id, akshare_code)
+            source = _read_partition_or_empty_cached(store, dataset_id, akshare_code, partition_cache)
             frames.append(_map_akshare_daily(source, dataset_id, adjustment, security, updated_at))
 
     non_empty = [frame for frame in frames if not frame.empty]
     if not non_empty:
         return pd.DataFrame()
     combined = pd.concat(non_empty, ignore_index=True)
-    combined["_source_rank"] = combined.apply(_source_rank, axis=1)
+    combined["_source_rank"] = _assign_source_rank(combined)
     combined = (
         combined.sort_values(["date", "security_id", "adjustment", "_source_rank"], kind="mergesort")
         .drop_duplicates(["date", "security_id", "adjustment"], keep="first")
@@ -130,36 +181,32 @@ def _map_baostock_daily(
     updated_at: datetime,
 ) -> pd.DataFrame:
     if df.empty:
-        return pd.DataFrame()
-    return pd.DataFrame(
-        [
-            {
-                "date": row.get("date"),
-                "security_id": security.get("security_id"),
-                "code": security.get("code"),
-                "exchange": security.get("exchange"),
-                "name": security.get("name"),
-                "adjustment": adjustment,
-                "open": row.get("open"),
-                "high": row.get("high"),
-                "low": row.get("low"),
-                "close": row.get("close"),
-                "prev_close": row.get("prev_close"),
-                "volume": row.get("volume"),
-                "amount": row.get("amount"),
-                "turnover_rate": row.get("turnover_rate"),
-                "pct_change": row.get("pct_change"),
-                "trade_status": row.get("trade_status"),
-                "is_st": row.get("is_st"),
-                "is_active": security.get("is_active"),
-                "source_dataset": dataset_id,
-                "source_endpoint": "query_history_k_data_plus",
-                "quality_status": "daily_bar_confirmed",
-                "updated_at": updated_at,
-            }
-            for _, row in df.iterrows()
-        ]
-    )
+        return pd.DataFrame(columns=CN_STOCK_DAILY_BAR_COLUMNS)
+
+    out = pd.DataFrame(index=df.index)
+    out["date"] = _column_or_none(df, "date")
+    out["security_id"] = security.get("security_id")
+    out["code"] = security.get("code")
+    out["exchange"] = security.get("exchange")
+    out["name"] = security.get("name")
+    out["adjustment"] = adjustment
+    out["open"] = _column_or_none(df, "open")
+    out["high"] = _column_or_none(df, "high")
+    out["low"] = _column_or_none(df, "low")
+    out["close"] = _column_or_none(df, "close")
+    out["prev_close"] = _column_or_none(df, "prev_close")
+    out["volume"] = _column_or_none(df, "volume")
+    out["amount"] = _column_or_none(df, "amount")
+    out["turnover_rate"] = _column_or_none(df, "turnover_rate")
+    out["pct_change"] = _column_or_none(df, "pct_change")
+    out["trade_status"] = _column_or_none(df, "trade_status")
+    out["is_st"] = _column_or_none(df, "is_st")
+    out["is_active"] = security.get("is_active")
+    out["source_dataset"] = dataset_id
+    out["source_endpoint"] = "query_history_k_data_plus"
+    out["quality_status"] = "daily_bar_confirmed"
+    out["updated_at"] = updated_at
+    return out.loc[:, CN_STOCK_DAILY_BAR_COLUMNS]
 
 
 def _map_akshare_daily(
@@ -170,48 +217,56 @@ def _map_akshare_daily(
     updated_at: datetime,
 ) -> pd.DataFrame:
     if df.empty:
-        return pd.DataFrame()
-    return pd.DataFrame(
-        [
-            {
-                "date": row.get("date"),
-                "security_id": security.get("security_id"),
-                "code": security.get("code"),
-                "exchange": security.get("exchange"),
-                "name": security.get("name"),
-                "adjustment": adjustment,
-                "open": row.get("open"),
-                "high": row.get("high"),
-                "low": row.get("low"),
-                "close": row.get("close"),
-                "prev_close": None,
-                "volume": row.get("volume"),
-                "amount": row.get("amount"),
-                "turnover_rate": row.get("turnover_rate"),
-                "pct_change": row.get("pct_change"),
-                "trade_status": None,
-                "is_st": None,
-                "is_active": security.get("is_active"),
-                "source_dataset": dataset_id,
-                "source_endpoint": _clean_string(row.get("source_endpoint")) or "stock_zh_a_hist",
-                "quality_status": _clean_string(row.get("quality_status")) or "daily_bar_confirmed",
-                "updated_at": updated_at,
-            }
-            for _, row in df.iterrows()
-        ]
-    )
+        return pd.DataFrame(columns=CN_STOCK_DAILY_BAR_COLUMNS)
+
+    out = pd.DataFrame(index=df.index)
+    out["date"] = _column_or_none(df, "date")
+    out["security_id"] = security.get("security_id")
+    out["code"] = security.get("code")
+    out["exchange"] = security.get("exchange")
+    out["name"] = security.get("name")
+    out["adjustment"] = adjustment
+    out["open"] = _column_or_none(df, "open")
+    out["high"] = _column_or_none(df, "high")
+    out["low"] = _column_or_none(df, "low")
+    out["close"] = _column_or_none(df, "close")
+    out["prev_close"] = None
+    out["volume"] = _column_or_none(df, "volume")
+    out["amount"] = _column_or_none(df, "amount")
+    out["turnover_rate"] = _column_or_none(df, "turnover_rate")
+    out["pct_change"] = _column_or_none(df, "pct_change")
+    out["trade_status"] = None
+    out["is_st"] = None
+    out["is_active"] = security.get("is_active")
+    out["source_dataset"] = dataset_id
+    out["source_endpoint"] = _string_column_with_default(df, "source_endpoint", "stock_zh_a_hist")
+    out["quality_status"] = _string_column_with_default(df, "quality_status", "daily_bar_confirmed")
+    out["updated_at"] = updated_at
+    return out.loc[:, CN_STOCK_DAILY_BAR_COLUMNS]
 
 
-def _source_rank(row: pd.Series) -> int:
-    source_dataset = _clean_string(row.get("source_dataset"))
-    if source_dataset.startswith("baostock_"):
-        return 0
-    quality_status = _clean_string(row.get("quality_status"))
-    if quality_status == "daily_bar_confirmed":
-        return 1
-    if quality_status == "spot_quote_close":
-        return 2
-    return 3
+def _assign_source_rank(combined: pd.DataFrame) -> pd.Series:
+    source_dataset = _string_column_with_default(combined, "source_dataset", "")
+    quality_status = _string_column_with_default(combined, "quality_status", "")
+    rank = pd.Series(3, index=combined.index)
+    rank.loc[quality_status == "spot_quote_close"] = 2
+    rank.loc[quality_status == "daily_bar_confirmed"] = 1
+    rank.loc[source_dataset.str.startswith("baostock_")] = 0
+    return rank
+
+
+def _column_or_none(df: pd.DataFrame, column: str) -> pd.Series:
+    if column in df.columns:
+        return df[column]
+    return pd.Series([None] * len(df), index=df.index)
+
+
+def _string_column_with_default(df: pd.DataFrame, column: str, default: str) -> pd.Series:
+    if column in df.columns:
+        series = df[column].astype("string").str.strip()
+    else:
+        series = pd.Series(pd.NA, index=df.index, dtype="string")
+    return series.mask(series.isna() | (series == ""), default)
 
 
 def _clean_string(value: Any) -> str:

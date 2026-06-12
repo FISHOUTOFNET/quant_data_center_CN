@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -76,3 +77,14 @@ def test_build_derived_file_lock_blocks_concurrent_builds(
     )
 
     assert result == [{"dataset": "cn_security_master", "status": "success", "rows": 1}]
+
+
+def test_build_derived_file_lock_writes_process_lock_owner(tmp_path: Path) -> None:
+    with build_derived_file_lock(tmp_path, ("security_master",), stale_after_seconds=123) as lock_dir:
+        owner = json.loads((lock_dir / "owner.json").read_text(encoding="utf-8"))
+        assert owner["lock_name"] == "build-derived"
+        assert owner["purpose"] == "build-derived"
+        assert owner["stale_after_seconds"] == 123
+        assert owner["target"] == ["security_master"]
+
+    assert not lock_dir.exists()

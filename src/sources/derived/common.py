@@ -2,15 +2,11 @@
 
 from __future__ import annotations
 
-import json
-import os
 import shutil
-import socket
 import uuid
 from collections.abc import Iterable, Iterator
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass
-from datetime import datetime
 from pathlib import Path
 
 import pandas as pd
@@ -19,6 +15,7 @@ from src.storage.data_registry import DataRegistry
 from src.storage.dataset_catalog import DATASET_CATALOG
 from src.storage.parquet_store import ParquetStore
 from src.utils.logging import logger
+from src.utils.process_lock import ProcessLockError, acquire_process_lock
 
 
 class BuildDerivedLockError(RuntimeError):
@@ -58,31 +55,26 @@ def read_latest_or_empty(store: ParquetStore, dataset_id: str) -> pd.DataFrame:
 
 
 @contextmanager
-def build_derived_file_lock(root: Path, targets: tuple[str, ...]) -> Iterator[Path]:
+def build_derived_file_lock(
+    root: Path,
+    targets: tuple[str, ...],
+    *,
+    stale_after_seconds: int = 12 * 60 * 60,
+) -> Iterator[Path]:
     """Acquire a cross-process lock for a complete build-derived run."""
 
     lock_dir = root.resolve() / "data" / "metadata" / "locks" / "build-derived.lock"
-    lock_dir.parent.mkdir(parents=True, exist_ok=True)
     try:
-        lock_dir.mkdir()
-    except FileExistsError as exc:
-        owner = _read_lock_owner(lock_dir)
-        raise BuildDerivedLockError(f"build-derived is already running; lock={lock_dir} owner={owner}") from exc
-
-    owner = {
-        "pid": os.getpid(),
-        "started_at": datetime.now().isoformat(timespec="seconds"),
-        "hostname": socket.gethostname(),
-        "target": list(targets),
-    }
-    try:
-        (lock_dir / "owner.json").write_text(
-            json.dumps(owner, ensure_ascii=False, indent=2, sort_keys=True),
-            encoding="utf-8",
-        )
-        yield lock_dir
-    finally:
-        shutil.rmtree(lock_dir, ignore_errors=True)
+        with acquire_process_lock(
+            lock_dir,
+            lock_name="build-derived",
+            purpose="build-derived",
+            stale_after_seconds=stale_after_seconds,
+            extra_owner={"target": list(targets)},
+        ) as lock:
+            yield lock.path
+    except ProcessLockError as exc:
+        raise BuildDerivedLockError(f"build-derived is already running; {exc}") from exc
 
 
 def create_derived_dataset_staging_area(store: ParquetStore, dataset_id: str) -> DerivedDatasetStagingArea:
@@ -139,13 +131,6 @@ def _require_derived_dataset(dataset_id: str):
     if definition.source != "derived":
         raise ValueError(f"Refusing to stage non-derived dataset directory: {dataset_id}")
     return definition
-
-
-def _read_lock_owner(lock_dir: Path) -> str:
-    owner_path = lock_dir / "owner.json"
-    if not owner_path.exists():
-        return "unavailable"
-    return owner_path.read_text(encoding="utf-8", errors="replace").strip() or "unavailable"
 
 
 def _restore_staging_swap(area: DerivedDatasetStagingArea, backup_created: bool) -> None:

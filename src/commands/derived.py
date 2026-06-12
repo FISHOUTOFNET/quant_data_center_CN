@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import click
 
+from src.commands.records import raise_for_failed_records
 from src.sources.derived.update import build_derived_datasets as run_build_derived
 
 
@@ -28,6 +29,7 @@ def register_derived_commands(root: click.Group) -> None:
         except RuntimeError as exc:
             raise click.ClickException(str(exc)) from exc
         _echo_derived_records(records)
+        raise_for_failed_records(records, label="Derived dataset build")
 
     @root.command("build-security-master")
     @click.option("--build-duckdb-views/--no-build-duckdb-views", "build_views", default=True, show_default=True)
@@ -39,6 +41,7 @@ def register_derived_commands(root: click.Group) -> None:
         except RuntimeError as exc:
             raise click.ClickException(str(exc)) from exc
         _echo_derived_records(records)
+        raise_for_failed_records(records, label="Derived dataset build")
 
 
 def _echo_derived_records(records: list[dict[str, object]]) -> None:

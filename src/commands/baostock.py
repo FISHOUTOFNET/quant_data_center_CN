@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import click
 
+from src.commands.records import echo_pipeline_records, raise_for_failed_records
 from src.sources.baostock.repair_tool import repair as run_repair
 from src.sources.baostock.update_daily import update_daily as run_update_daily
 from src.sources.baostock.valuation_percentile import (
@@ -64,8 +65,8 @@ def register_baostock_commands(root: click.Group) -> None:
             resume=resume,
             force=force,
         )
-        for item in records:
-            click.echo(f"{item['dataset']} {item['code']} status={item['status']} rows={item['row_count']}")
+        echo_pipeline_records(records)
+        raise_for_failed_records(records, label="Baostock daily update")
 
     @root.command("update-baostock-valuation-percentile")
     @click.option(
@@ -102,8 +103,8 @@ def register_baostock_commands(root: click.Group) -> None:
             force=force,
             build_views=build_views,
         )
-        for item in records:
-            click.echo(f"{item['dataset']} {item['code']} status={item['status']} rows={item['row_count']}")
+        echo_pipeline_records(records)
+        raise_for_failed_records(records, label="Baostock valuation percentile update")
 
     @root.command("repair-baostock-daily")
     @click.option("--code", required=True, help="Stock code, e.g. sh.600000.")
