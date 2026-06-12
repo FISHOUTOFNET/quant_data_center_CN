@@ -69,7 +69,9 @@ qdc build-security-master
 
 The source layer remains unchanged: `baostock_*`, `akshare_*`, and `qlib_*` datasets keep their original schemas and code formats for traceability, repair, and audit. The canonical master layer is `cn_security_master`, which maps `security_id` (`SH.600000`) to Baostock (`sh.600000`), AkShare (`600000`), and Qlib (`sh600000`) codes.
 
-The curated local layer contains `cn_stock_daily_bar` and `cn_stock_valuation`. They are materialized by `security_id` partition and are intended for research, backtesting, and Qlib feature engineering. These two datasets are heavy full rebuild targets and are not run by the daily workflow by default. Daily updates only build the lightweight `cn_security_master` before rebuilding DuckDB views.
+The curated local layer contains `cn_stock_daily_bar` and `cn_stock_valuation`. They are materialized by `security_id` partition and are intended for research, backtesting, and Qlib feature engineering. The daily workflow (`qdc run-update-daily`) runs `qdc build-derived --target all --no-build-duckdb-views` after all required upstream steps succeed, which rebuilds `cn_security_master`, `cn_stock_daily_bar`, and `cn_stock_valuation` in full. It then runs `qdc build-duckdb-views` to refresh all DuckDB views.
+
+> **Operations note:** `build-derived --target all` is a full derived rebuild and may take a long time. If you only need to refresh the security master, run `qdc build-derived --target security_master` or `qdc build-security-master`. If you need a complete refresh of the research layer, run `qdc build-derived --target all`. If any required upstream step fails or is blocked during the daily run, `build-derived` will be blocked and the final exit code will be non-zero, so Windows Task Scheduler or external monitors can alert on partial failures.
 
 Physical paths:
 
@@ -336,6 +338,8 @@ independent later steps continue, while steps that explicitly depend on the
 failed step are recorded as `blocked`. The final process exit code remains
 non-zero when any required step failed or was blocked, so Windows Task Scheduler
 and external monitors can still alert on partial failures.
+
+The daily orchestration flow is: upstream source updates → `qdc build-derived --target all --no-build-duckdb-views` → `qdc build-duckdb-views`. The `build-derived --target all` step rebuilds all derived datasets (`cn_security_master`, `cn_stock_daily_bar`, `cn_stock_valuation`) and depends on the success of required upstream steps.
 
 查询任务状态：
 
