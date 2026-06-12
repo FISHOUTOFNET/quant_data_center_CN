@@ -28,10 +28,12 @@ def test_process_lock_acquire_release_removes_lock_dir(tmp_path: Path) -> None:
 def test_process_lock_rejects_active_owner(tmp_path: Path) -> None:
     lock_dir = tmp_path / "sample.lock"
 
-    with acquire_process_lock(lock_dir, lock_name="sample", purpose="outer", stale_after_seconds=60):
-        with pytest.raises(ProcessLockError, match="owner="):
-            with acquire_process_lock(lock_dir, lock_name="sample", purpose="inner", stale_after_seconds=60):
-                pass
+    with (
+        acquire_process_lock(lock_dir, lock_name="sample", purpose="outer", stale_after_seconds=60),
+        pytest.raises(ProcessLockError, match="owner="),
+        acquire_process_lock(lock_dir, lock_name="sample", purpose="inner", stale_after_seconds=60),
+    ):
+        pass
 
 
 def test_process_lock_recovers_dead_pid_owner(tmp_path: Path) -> None:

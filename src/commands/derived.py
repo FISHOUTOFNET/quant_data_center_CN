@@ -18,12 +18,35 @@ def register_derived_commands(root: click.Group) -> None:
         type=click.Choice(["security_master", "daily_bar", "valuation", "all"]),
         default=("all",),
     )
+    @click.option(
+        "--mode",
+        type=click.Choice(["incremental", "full"]),
+        default="incremental",
+        show_default=True,
+        help="Build mode. Use full for manual repair of all derived partitions.",
+    )
+    @click.option(
+        "--security-id",
+        "security_ids",
+        multiple=True,
+        help="Rebuild one security_id partition, e.g. SH.600000. May be repeated.",
+    )
     @click.option("--build-duckdb-views/--no-build-duckdb-views", "build_views", default=True, show_default=True)
-    def build_derived(target: tuple[str, ...], build_views: bool) -> None:
+    def build_derived(
+        target: tuple[str, ...],
+        mode: str,
+        security_ids: tuple[str, ...],
+        build_views: bool,
+    ) -> None:
         """Build canonical and curated derived datasets."""
 
         try:
-            records = run_build_derived(targets=target, build_views=build_views)
+            records = run_build_derived(
+                targets=target,
+                mode=mode,
+                security_ids=security_ids,
+                build_views=build_views,
+            )
         except ValueError as exc:
             raise click.BadParameter(str(exc)) from exc
         except RuntimeError as exc:
@@ -37,7 +60,7 @@ def register_derived_commands(root: click.Group) -> None:
         """Build cn_security_master."""
 
         try:
-            records = run_build_derived(targets=("security_master",), build_views=build_views)
+            records = run_build_derived(targets=("security_master",), mode="full", build_views=build_views)
         except RuntimeError as exc:
             raise click.ClickException(str(exc)) from exc
         _echo_derived_records(records)

@@ -32,6 +32,18 @@ class DerivedDatasetStagingArea:
     final_existed: bool
 
 
+@dataclass(frozen=True)
+class DerivedPartitionStagingArea:
+    dataset_id: str
+    partition_column: str
+    partition_value: str
+    staging_root: Path
+    staging_partition_dir: Path
+    final_partition_dir: Path
+    backup_dir: Path
+    final_existed: bool
+
+
 def dataset_partition_values(store: ParquetStore, dataset_id: str) -> tuple[str, ...]:
     return store.list_dataset_partitions(dataset_id)
 
@@ -95,6 +107,33 @@ def create_derived_dataset_staging_area(store: ParquetStore, dataset_id: str) ->
     )
 
 
+def create_derived_partition_staging_area(
+    store: ParquetStore,
+    dataset_id: str,
+    partition_value: str,
+) -> DerivedPartitionStagingArea:
+    definition = _require_derived_dataset(dataset_id)
+    if definition.partition_column is None:
+        raise ValueError(f"{dataset_id} is not partitioned")
+    token = uuid.uuid4().hex
+    partition_dir_name = f"{definition.partition_column}={partition_value}"
+    staging_root = store.parquet_dir / ".staging" / f"{definition.id}.{partition_value}.{token}"
+    staging_partition_dir = staging_root / definition.id / partition_dir_name
+    final_partition_dir = store.parquet_dir / definition.id / partition_dir_name
+    backup_dir = store.parquet_dir / ".backup" / f"{definition.id}.{partition_value}.{token}"
+    staging_partition_dir.mkdir(parents=True, exist_ok=False)
+    return DerivedPartitionStagingArea(
+        dataset_id=definition.id,
+        partition_column=definition.partition_column,
+        partition_value=partition_value,
+        staging_root=staging_root,
+        staging_partition_dir=staging_partition_dir,
+        final_partition_dir=final_partition_dir,
+        backup_dir=backup_dir,
+        final_existed=final_partition_dir.exists(),
+    )
+
+
 def commit_derived_dataset_staging(area: DerivedDatasetStagingArea) -> None:
     """Move a staged derived dataset into the canonical Parquet directory."""
 
@@ -116,6 +155,33 @@ def commit_derived_dataset_staging(area: DerivedDatasetStagingArea) -> None:
             shutil.rmtree(area.staging_root, ignore_errors=True)
 
 
+def commit_derived_partition_staging(area: DerivedPartitionStagingArea, *, delete_partition: bool = False) -> None:
+    """Atomically replace or delete one partition of a derived dataset."""
+
+    _require_derived_dataset(area.dataset_id)
+    area.backup_dir.parent.mkdir(parents=True, exist_ok=True)
+    area.final_partition_dir.parent.mkdir(parents=True, exist_ok=True)
+    backup_created = False
+    try:
+        if area.final_partition_dir.exists():
+            area.final_partition_dir.rename(area.backup_dir)
+            backup_created = True
+        if not delete_partition:
+            area.staging_partition_dir.rename(area.final_partition_dir)
+    except Exception as exc:
+        if backup_created and area.backup_dir.exists() and not area.final_partition_dir.exists():
+            with suppress(Exception):
+                area.backup_dir.rename(area.final_partition_dir)
+        raise RuntimeError(
+            f"Failed to promote staged derived partition {area.dataset_id}/{area.partition_value}"
+        ) from exc
+    finally:
+        if backup_created and area.backup_dir.exists():
+            shutil.rmtree(area.backup_dir, ignore_errors=True)
+        if area.staging_root.exists():
+            shutil.rmtree(area.staging_root, ignore_errors=True)
+
+
 def cleanup_derived_dataset_staging(area: DerivedDatasetStagingArea) -> None:
     """Remove staging leftovers without touching a pre-existing canonical dataset."""
 
@@ -124,6 +190,16 @@ def cleanup_derived_dataset_staging(area: DerivedDatasetStagingArea) -> None:
     if not area.final_existed and _is_empty_directory(area.final_dir):
         with suppress(OSError):
             area.final_dir.rmdir()
+
+
+def cleanup_derived_partition_staging(area: DerivedPartitionStagingArea) -> None:
+    """Remove one-partition staging leftovers without touching canonical data."""
+
+    if area.staging_root.exists():
+        shutil.rmtree(area.staging_root, ignore_errors=True)
+    if not area.final_existed and _is_empty_directory(area.final_partition_dir):
+        with suppress(OSError):
+            area.final_partition_dir.rmdir()
 
 
 def _require_derived_dataset(dataset_id: str):

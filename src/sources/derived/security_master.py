@@ -18,10 +18,13 @@ from src.utils.logging import logger
 def build_security_master(
     *,
     root: Path | None = None,
+    security_ids: tuple[str, ...] | None = None,
+    changed_since: datetime | None = None,
     build_views: bool = True,
     refresh_registry: bool = True,
     now: Callable[[], datetime] | None = None,
 ) -> dict[str, object]:
+    del security_ids, changed_since
     store = ParquetStore(root=root)
     store.ensure_layout()
     updated_at = (now or datetime.now)()

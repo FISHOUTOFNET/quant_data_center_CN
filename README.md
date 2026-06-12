@@ -60,18 +60,31 @@ pre-commit run --all-files
 ### Derived local layer
 
 ```powershell
-qdc build-derived
-qdc build-derived --target security_master
-qdc build-derived --target daily_bar
-qdc build-derived --target valuation
+qdc build-derived --target all --mode incremental
+qdc build-derived --target all --mode full
+qdc build-derived --target daily_bar --security-id SH.600000
+qdc build-derived --target valuation --security-id SH.600000
 qdc build-security-master
+qdc run-update-daily
+qdc build-duckdb-views
+qdc migrate-metadata-duckdb
 ```
 
 The source layer remains unchanged: `baostock_*`, `akshare_*`, and `qlib_*` datasets keep their original schemas and code formats for traceability, repair, and audit. The canonical master layer is `cn_security_master`, which maps `security_id` (`SH.600000`) to Baostock (`sh.600000`), AkShare (`600000`), and Qlib (`sh600000`) codes.
 
-The curated local layer contains `cn_stock_daily_bar` and `cn_stock_valuation`. They are materialized by `security_id` partition and are intended for research, backtesting, and Qlib feature engineering. The daily workflow (`qdc run-update-daily`) runs `qdc build-derived --target all --no-build-duckdb-views` after all required upstream steps succeed, which rebuilds `cn_security_master`, `cn_stock_daily_bar`, and `cn_stock_valuation` in full. It then runs `qdc build-duckdb-views` to refresh all DuckDB views.
+The curated local layer contains `cn_stock_daily_bar` and `cn_stock_valuation`. They are materialized by `security_id` partition and are intended for research, backtesting, and Qlib feature engineering. The daily workflow (`qdc run-update-daily`) runs `qdc build-derived --target all --mode incremental --no-build-duckdb-views` after all required upstream steps succeed, then runs `qdc build-duckdb-views` to refresh query views.
 
-> **Operations note:** `build-derived --target all` is a full derived rebuild and may take a long time. If you only need to refresh the security master, run `qdc build-derived --target security_master` or `qdc build-security-master`. If you need a complete refresh of the research layer, run `qdc build-derived --target all`. If any required upstream step fails or is blocked during the daily run, `build-derived` will be blocked and the final exit code will be non-zero, so Windows Task Scheduler or external monitors can alert on partial failures.
+`build-derived` supports two modes. `--mode incremental` is the default and is used by the daily workflow; it refreshes `cn_security_master` in full because it is small, then rebuilds only changed `security_id` partitions for `cn_stock_daily_bar` and `cn_stock_valuation`. Change detection uses local metadata and Parquet partition mtimes, never a network call. If the changed partition set cannot be determined reliably, the affected target falls back to full and logs a warning. `--mode full` preserves the previous full-rebuild behavior and is the manual repair path.
+
+Manual repair examples:
+
+```powershell
+qdc build-derived --target all --mode full --no-build-duckdb-views
+qdc build-derived --target daily_bar --security-id SH.600000 --mode incremental --no-build-duckdb-views
+qdc build-derived --target valuation --security-id SH.600000 --mode incremental --no-build-duckdb-views
+```
+
+If any required upstream step fails or is blocked during the daily run, `build-derived` will be blocked and the final exit code will be non-zero, so Windows Task Scheduler or external monitors can alert on partial failures.
 
 Physical paths:
 
@@ -89,7 +102,7 @@ select * from v_cn_stock_daily_bar where security_id = 'SH.600000';
 select * from v_cn_stock_valuation where security_id = 'SH.600000';
 ```
 
-Run `qdc build-derived --target all` when the unified research tables need a complete refresh.
+Run `qdc build-derived --target all --mode full` when the unified research tables need a complete refresh.
 
 ### Baostock 日线
 
@@ -228,6 +241,7 @@ data/
 │   ├── pipeline_runs.parquet
 │   ├── dataset_update_status.parquet
 │   ├── pipeline_checkpoints.parquet
+│   ├── qdc_metadata.duckdb
 │   ├── akshare_capital_structure_pending.parquet
 │   └── qlib_sync_state.parquet
 ├── registry/
@@ -239,6 +253,12 @@ data/
 ```
 
 `data/registry` is an optional local metadata read model for diagnostics. It is not required for daily updates, DuckDB queries, research, or backtesting.
+
+DuckDB is split by responsibility:
+
+- Query views live in `data/duckdb/quant.duckdb` and are rebuilt by `qdc build-duckdb-views`.
+- Pipeline metadata lives in `data/metadata/qdc_metadata.duckdb`: `pipeline_runs`, `dataset_update_status`, and `pipeline_checkpoints`.
+- Existing metadata tables in an old `data/duckdb/quant.duckdb` can be copied with `qdc migrate-metadata-duckdb`; the migration is idempotent and skips missing old tables.
 
 ## 查询示例
 
@@ -288,7 +308,7 @@ qdc build-duckdb-views
 
 ## 配置
 
-主要配置在 `config/settings.yaml`。
+主要配置在 `config/settings.yaml`。每日 workflow 配置在 `config/daily_workflow.yaml`；每个 step 声明 `id`、`name`、`command`、`depends_on`、`optional`、`timeout_seconds`、`when` 和 `enabled`。`when` 支持 `weekday`、`weekend`、`friday_to_sunday` 和具体英文星期名；命令可使用 `{python}`、`{qdc}`、`{today}`、`{hist_start}` 变量。修改 workflow 后可先运行 `qdc run-update-daily --help` 和相关单测确认配置可解析。
 
 常用项：
 
@@ -305,6 +325,8 @@ qdc build-duckdb-views
 - `datasets.akshare_cn_stock_yjyg_em.full_start_period` / `rolling_period_count`：东方财富业绩预告 full 起始报告期和 partial/incremental 滚动报告期数量。
 - `datasets.akshare_cn_stock_spot_quote.update_daily_bar_from_spot`：spot 快照是否同步写入 `akshare_cn_stock_daily_bar_unadjusted`。
 - `pipeline.qlib_sync_workers`：Qlib 同步并发数，默认回退到 `pipeline.background_workers`。
+- `storage.duckdb_file`：查询视图库，默认 `data/duckdb/quant.duckdb`。
+- `storage.metadata_duckdb_file`：pipeline 元数据库，默认 `data/metadata/qdc_metadata.duckdb`。
 
 ## 命名迁移
 
@@ -339,14 +361,14 @@ failed step are recorded as `blocked`. The final process exit code remains
 non-zero when any required step failed or was blocked, so Windows Task Scheduler
 and external monitors can still alert on partial failures.
 
-The daily orchestration flow is: upstream source updates → `qdc build-derived --target all --no-build-duckdb-views` → `qdc build-duckdb-views`. The `build-derived --target all` step rebuilds all derived datasets (`cn_security_master`, `cn_stock_daily_bar`, `cn_stock_valuation`) and depends on the success of required upstream steps.
+The daily orchestration flow is configured in `config/daily_workflow.yaml`: upstream source updates → `qdc build-derived --target all --mode incremental --no-build-duckdb-views` → `qdc build-duckdb-views`. The `build-derived` step depends on required upstream steps, refreshes `cn_security_master`, and incrementally rebuilds affected `cn_stock_daily_bar` / `cn_stock_valuation` partitions.
 
 查询任务状态：
 
 ```python
 import duckdb
 
-con = duckdb.connect("data/duckdb/quant.duckdb")
+con = duckdb.connect("data/metadata/qdc_metadata.duckdb")
 df = con.execute("""
     select dataset, code, status, last_success_date, row_count
     from dataset_update_status

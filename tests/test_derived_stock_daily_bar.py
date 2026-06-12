@@ -118,6 +118,62 @@ def test_build_cn_stock_daily_bar_success_promotes_staging_dataset(tmp_path, dai
     assert _temporary_dataset_dirs(tmp_path, ".backup", "cn_stock_daily_bar") == []
 
 
+def test_build_cn_stock_daily_bar_incremental_preserves_unaffected_partition(tmp_path, daily_sample) -> None:
+    store = ParquetStore(root=tmp_path)
+    store.ensure_layout()
+    master = pd.concat(
+        [
+            _master(),
+            pd.DataFrame(
+                [
+                    {
+                        **_master().iloc[0].to_dict(),
+                        "security_id": "SZ.000001",
+                        "code": "000001",
+                        "exchange": "SZ",
+                        "baostock_code": "sz.000001",
+                        "akshare_code": "000001",
+                        "qlib_symbol": "sz000001",
+                    }
+                ]
+            ),
+        ],
+        ignore_index=True,
+    )
+    store.write_dataset("cn_security_master", master)
+    store.write_dataset(
+        "cn_stock_daily_bar",
+        _canonical_daily_bar(close=1.0, date_value=date(2023, 12, 29)),
+        {"security_id": "SH.600000"},
+        mode="replace",
+    )
+    store.write_dataset(
+        "cn_stock_daily_bar",
+        _canonical_daily_bar(close=2.0, date_value=date(2023, 12, 29)).assign(
+            security_id="SZ.000001",
+            code="000001",
+            exchange="SZ",
+        ),
+        {"security_id": "SZ.000001"},
+        mode="replace",
+    )
+    store.write_dataset("baostock_cn_stock_daily_bar_unadjusted", daily_sample(), {"code": "sh.600000"})
+
+    result = build_cn_stock_daily_bar(
+        root=tmp_path,
+        security_ids=("SH.600000",),
+        build_views=False,
+        refresh_registry=False,
+        now=lambda: NOW,
+    )
+
+    sh_loaded = store.read_dataset("cn_stock_daily_bar", {"security_id": "SH.600000"})
+    sz_loaded = store.read_dataset("cn_stock_daily_bar", {"security_id": "SZ.000001"})
+    assert result["partitions"] == 1
+    assert sh_loaded["close"].tolist() == [8.2, 8.3]
+    assert sz_loaded["close"].tolist() == [2.0]
+
+
 def test_map_baostock_daily_preserves_schema_order_and_missing_optional_fields() -> None:
     source = pd.DataFrame(
         [

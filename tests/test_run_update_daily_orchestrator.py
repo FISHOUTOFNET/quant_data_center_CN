@@ -274,8 +274,45 @@ def test_daily_steps_build_derived_all_before_views(today: date) -> None:
         "build-derived",
         "--target",
         "all",
+        "--mode",
+        "incremental",
         "--no-build-duckdb-views",
     )
+
+
+def test_daily_steps_load_weekday_steps_from_config() -> None:
+    steps = run_update_daily.daily_steps(date(2026, 6, 8), root=Path(__file__).resolve().parents[1])
+    by_id = {step.id: step for step in steps}
+
+    assert "baostock-qfq" not in by_id
+    assert by_id["build-derived"].command[1:] == (
+        "-m",
+        "src.cli",
+        "build-derived",
+        "--target",
+        "all",
+        "--mode",
+        "incremental",
+        "--no-build-duckdb-views",
+    )
+
+
+def test_daily_steps_load_weekend_steps_from_config() -> None:
+    steps = run_update_daily.daily_steps(date(2026, 6, 6), root=Path(__file__).resolve().parents[1])
+    by_id = {step.id: step for step in steps}
+
+    assert "baostock-qfq" in by_id
+    assert by_id["akshare-daily-bar"].command[-3:] == ("--start", "2026-05-07", "--no-build-duckdb-views")
+    assert "akshare-valuation-full" in by_id["build-derived"].depends_on
+
+
+def test_daily_workflow_config_missing_required_field_is_clear(tmp_path: Path) -> None:
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    (config_dir / "daily_workflow.yaml").write_text("steps:\n  - id: broken\n", encoding="utf-8")
+
+    with pytest.raises(run_update_daily.DailyWorkflowConfigError, match=r"broken.*command"):
+        run_update_daily.daily_steps(date(2026, 6, 8), root=tmp_path)
 
 
 def test_run_daily_update_records_yjyg_em_step_on_weekday(tmp_path: Path) -> None:
@@ -355,7 +392,9 @@ def test_optional_plain_skipped_does_not_block_build_derived(tmp_path: Path) -> 
             state_file=state_file,
             run_log=log_file,
             today=date(2026, 6, 8),
-            command_runner=lambda step, log_path: calls.append(step.id) or (7 if step.id == "akshare-spot-quote" else 0),
+            command_runner=lambda step, log_path: (
+                calls.append(step.id) or (7 if step.id == "akshare-spot-quote" else 0)
+            ),
         )
         == 0
     )

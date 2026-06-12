@@ -831,7 +831,8 @@ def test_duckdb_metadata_ignores_parquet_metadata_files(tmp_path) -> None:
     checkpoints = store.read_pipeline_checkpoints()
 
     assert checkpoints.empty
-    assert (tmp_path / "data" / "duckdb" / "quant.duckdb").exists()
+    assert (tmp_path / "data" / "metadata" / "qdc_metadata.duckdb").exists()
+    assert not (tmp_path / "data" / "duckdb" / "quant.duckdb").exists()
 
 
 def test_dataset_update_status_upsert_replaces_existing_row(tmp_path) -> None:

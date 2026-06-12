@@ -6,6 +6,7 @@ import duckdb
 import pandas as pd
 
 from src.storage.duckdb_store import DuckDBStore
+from src.storage.metadata_store import DuckDBMetadataStore, migrate_metadata_duckdb
 from src.storage.parquet_store import ParquetStore
 
 
@@ -117,6 +118,149 @@ def test_duckdb_views_include_derived_datasets(tmp_path) -> None:
         assert conn.execute("select count(*) from v_cn_stock_valuation where security_id='SH.600000'").fetchone() == (
             1,
         )
+
+
+def test_duckdb_store_and_metadata_store_default_paths_are_separate(tmp_path) -> None:
+    assert DuckDBStore(root=tmp_path).duckdb_file == tmp_path / "data" / "duckdb" / "quant.duckdb"
+    assert DuckDBMetadataStore(root=tmp_path).duckdb_file == tmp_path / "data" / "metadata" / "qdc_metadata.duckdb"
+
+
+def test_metadata_writes_do_not_create_query_duckdb(tmp_path) -> None:
+    store = ParquetStore(root=tmp_path)
+    store.upsert_dataset_update_status(
+        pd.DataFrame(
+            [
+                {
+                    "dataset": "baostock_cn_stock_daily_bar_qfq",
+                    "code": "sh.600000",
+                    "last_success_date": "2024-01-03",
+                    "row_count": 2,
+                    "status": "success",
+                    "updated_at": datetime(2024, 1, 3, 18, 0),
+                    "error_stack": "",
+                }
+            ]
+        )
+    )
+
+    assert (tmp_path / "data" / "metadata" / "qdc_metadata.duckdb").exists()
+    assert not (tmp_path / "data" / "duckdb" / "quant.duckdb").exists()
+
+
+def test_metadata_migration_copies_legacy_tables_idempotently(tmp_path) -> None:
+    legacy = tmp_path / "data" / "duckdb" / "quant.duckdb"
+    legacy.parent.mkdir(parents=True)
+    with duckdb.connect(str(legacy)) as conn:
+        conn.execute(
+            """
+            CREATE TABLE pipeline_runs (
+                task_id VARCHAR,
+                dataset VARCHAR,
+                code VARCHAR,
+                status VARCHAR,
+                start_date DATE,
+                end_date DATE,
+                start_time TIMESTAMP,
+                end_time TIMESTAMP,
+                row_count BIGINT,
+                error_stack VARCHAR
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO pipeline_runs VALUES (
+                'task-1',
+                'baostock_cn_stock_daily_bar_qfq',
+                'sh.600000',
+                'success',
+                DATE '2024-01-01',
+                DATE '2024-01-31',
+                TIMESTAMP '2024-01-31 09:00:00',
+                TIMESTAMP '2024-01-31 09:01:00',
+                2,
+                ''
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE dataset_update_status (
+                dataset VARCHAR,
+                code VARCHAR,
+                last_success_date DATE,
+                row_count BIGINT,
+                status VARCHAR,
+                updated_at TIMESTAMP,
+                error_stack VARCHAR
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO dataset_update_status VALUES (
+                'baostock_cn_stock_daily_bar_qfq',
+                'sh.600000',
+                DATE '2024-01-31',
+                2,
+                'success',
+                TIMESTAMP '2024-01-31 09:01:00',
+                ''
+            )
+            """
+        )
+
+    first = migrate_metadata_duckdb(root=tmp_path)
+    second = migrate_metadata_duckdb(root=tmp_path)
+
+    metadata = DuckDBMetadataStore(root=tmp_path)
+    assert first["migrated_rows"] == {
+        "pipeline_runs": 1,
+        "dataset_update_status": 1,
+        "pipeline_checkpoints": 0,
+    }
+    assert second["migrated_rows"] == {
+        "pipeline_runs": 0,
+        "dataset_update_status": 1,
+        "pipeline_checkpoints": 0,
+    }
+    assert len(metadata.read_pipeline_runs()) == 1
+    assert len(metadata.read_dataset_update_status()) == 1
+
+
+def test_build_duckdb_views_does_not_modify_metadata_duckdb(tmp_path) -> None:
+    store = ParquetStore(root=tmp_path)
+    store.ensure_layout()
+    store.upsert_dataset_update_status(
+        pd.DataFrame(
+            [
+                {
+                    "dataset": "cn_security_master",
+                    "code": "",
+                    "last_success_date": "2024-01-05",
+                    "row_count": 1,
+                    "status": "success",
+                    "updated_at": datetime(2024, 1, 5, 12, 0),
+                    "error_stack": "",
+                }
+            ]
+        )
+    )
+    store.write_dataset("cn_security_master", _master())
+
+    DuckDBStore(root=tmp_path).build_views()
+
+    assert len(DuckDBMetadataStore(root=tmp_path).read_dataset_update_status()) == 1
+    with duckdb.connect(str(tmp_path / "data" / "duckdb" / "quant.duckdb")) as conn:
+        metadata_table_count = conn.execute(
+            """
+            SELECT count(*)
+            FROM information_schema.tables
+            WHERE table_schema = current_schema()
+              AND table_name = 'dataset_update_status'
+            """
+        ).fetchone()
+    assert metadata_table_count == (0,)
 
 
 def _master() -> pd.DataFrame:

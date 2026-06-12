@@ -113,6 +113,7 @@ pipeline:
 
 storage:
   duckdb_file: data/duckdb/quant.duckdb
+  metadata_duckdb_file: data/metadata/qdc_metadata.duckdb
 
 logging:
   file: logs/qdc.log

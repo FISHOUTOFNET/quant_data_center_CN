@@ -65,13 +65,22 @@ Source-layer datasets (`baostock_*`, `akshare_*`, `qlib_*`) keep their original 
 Manual full rebuild:
 
 ```powershell
-qdc build-derived --target all
+qdc build-derived --target all --mode full
 ```
 
-The daily workflow only runs the lightweight master refresh:
+Daily incremental rebuild:
 
 ```powershell
-qdc build-derived --target security_master --no-build-duckdb-views
+qdc build-derived --target all --mode incremental --no-build-duckdb-views
+```
+
+`--mode incremental` is the daily default. It refreshes `cn_security_master` in full because master is small, then uses local metadata and Parquet partition mtimes to map changed source partitions to affected `security_id` values. `cn_stock_daily_bar` and `cn_stock_valuation` then stage and atomically promote only those partitions. If the changed set cannot be determined reliably, the affected target safely falls back to full and logs a warning.
+
+Single-partition repair:
+
+```powershell
+qdc build-derived --target daily_bar --security-id SH.600000 --mode incremental --no-build-duckdb-views
+qdc build-derived --target valuation --security-id SH.600000 --mode incremental --no-build-duckdb-views
 ```
 
 ## AkShare 代码与股票池
@@ -158,7 +167,7 @@ Daily-bar upsert 使用 `(code, date, adjustment)` 去重，后写入的 `daily_
 
 ## 存储模型
 
-Parquet 是数据主存储，DuckDB 只构建查询视图和运行元数据表。
+Parquet 是数据主存储。DuckDB 被拆成两个互不依赖的本地库：查询视图库和 pipeline 元数据库。
 
 ```text
 data/
@@ -182,6 +191,7 @@ data/
 │   ├── pipeline_runs.parquet
 │   ├── dataset_update_status.parquet
 │   ├── pipeline_checkpoints.parquet
+│   ├── qdc_metadata.duckdb
 │   ├── akshare_capital_structure_pending.parquet
 │   └── qlib_sync_state.parquet
 ├── registry/
@@ -190,6 +200,10 @@ data/
 │   └── events.jsonl
 └── duckdb/quant.duckdb
 ```
+
+- `data/duckdb/quant.duckdb` is the query-view database owned by `DuckDBStore.build_views()`.
+- `data/metadata/qdc_metadata.duckdb` is the pipeline metadata database owned by `DuckDBMetadataStore`.
+- Old metadata tables left in `data/duckdb/quant.duckdb` are not modified by default. Run `qdc migrate-metadata-duckdb` to copy `pipeline_runs`, `dataset_update_status`, and `pipeline_checkpoints` into the new metadata database. The migration is idempotent and skips missing old tables.
 
 写入策略：
 
@@ -202,7 +216,7 @@ data/
 
 ## 元数据与续传
 
-运行状态存储在 `data/duckdb/quant.duckdb`：
+运行状态存储在 `data/metadata/qdc_metadata.duckdb`：
 
 - `pipeline_runs`：每个任务的运行记录。
 - `dataset_update_status`：每个数据集/代码的最近状态。
@@ -211,6 +225,18 @@ data/
 `--resume` 默认开启，只有 checkpoint 成功且目标文件仍存在时才跳过。`--force` 会忽略 checkpoint 重新执行。
 
 AkShare pipeline 只保存规范化后的 Parquet 数据和统一运行元数据，不再归档原始响应文件。
+
+## Daily Workflow 配置
+
+每日任务由 `config/daily_workflow.yaml` 生成 `DailyStep`，而不是在 `src/tools/run_update_daily.py` 中硬编码。配置项包括：
+
+- `id` / `name`：step 标识和日志名称。
+- `command`：命令数组，支持 `{python}`、`{qdc}`、`{today}`、`{hist_start}`。
+- `depends_on`：依赖 step id；未启用的 step 会从依赖中自动过滤。
+- `optional` / `timeout_seconds` / `enabled`：保持原有 optional、超时和开关语义。
+- `when`：支持 `weekday`、`weekend`、`friday_to_sunday` 和具体英文星期名。
+
+默认 flow 保持现有行为：工作日运行核心源更新、`financial_report` incremental、`build-derived --mode incremental` 和 `build-duckdb-views`；周五至周日额外运行 delist、复权、AkShare valuation full、report disclosure、yysj、AkShare daily bar incremental 与 qlib sync。
 
 ## Data Registry
 

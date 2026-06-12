@@ -10,11 +10,16 @@ import sys
 import time
 import uuid
 from collections.abc import Callable
+from contextlib import suppress
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any, TextIO
 
+import yaml
+
+from src.storage.metadata_store import default_metadata_duckdb_file
+from src.utils import paths
 from src.utils.process_lock import ProcessLockError, acquire_process_lock, is_pid_alive
 
 
@@ -24,6 +29,10 @@ class StateFileError(RuntimeError):
 
 class RunDailyUpdateLockError(RuntimeError):
     """Raised when another run-update-daily process owns the global lock."""
+
+
+class DailyWorkflowConfigError(ValueError):
+    """Raised when the daily workflow configuration is invalid."""
 
 
 @dataclass(frozen=True)
@@ -46,162 +55,205 @@ TIMEOUT_CLEANUP_FAILED_EXIT_CODE = 125
 PROCESS_CLEANUP_WAIT_SECONDS = 30
 RUNNING_ABANDONED_AFTER_SECONDS = 24 * 60 * 60
 RUN_UPDATE_DAILY_LOCK_STALE_AFTER_SECONDS = 24 * 60 * 60
-
-
-def daily_steps(today: date | None = None) -> list[DailyStep]:
-    resolved_today = today or date.today()
-    weekend_window = resolved_today.weekday() in {4, 5, 6}
-    hist_start = (resolved_today - timedelta(days=30)).isoformat()
-
-    steps = [
-        DailyStep("cleanup", "cleanup expired logs", _cmd("src.tools.log_cleanup", "--retention-days", "30"), True),
-        DailyStep(
-            "calendar",
-            "update-baostock-daily calendar",
-            _cli("update-baostock-daily", "--dataset", "baostock_cn_trading_calendar", "--no-build-duckdb-views"),
-        ),
-    ]
-    if weekend_window:
-        steps.append(
-            DailyStep(
-                "akshare-delist",
-                "akshare update delist",
-                _cli("akshare", "update", "--target", "delist", "--no-build-duckdb-views"),
-            )
-        )
-
-    steps.extend(
-        [
-            DailyStep(
+DAILY_WORKFLOW_CONFIG = "daily_workflow.yaml"
+_LAST_LOCKED_DUCKDB_PATHS: tuple[Path, ...] = ()
+DEFAULT_DAILY_WORKFLOW_CONFIG: dict[str, object] = {
+    "steps": [
+        {
+            "id": "cleanup",
+            "name": "cleanup expired logs",
+            "command": ["{python}", "-m", "src.tools.log_cleanup", "--retention-days", "30"],
+            "optional": True,
+        },
+        {
+            "id": "calendar",
+            "name": "update-baostock-daily calendar",
+            "command": [
+                "{qdc}",
+                "update-baostock-daily",
+                "--dataset",
+                "baostock_cn_trading_calendar",
+                "--no-build-duckdb-views",
+            ],
+        },
+        {
+            "id": "akshare-delist",
+            "name": "akshare update delist",
+            "when": ["friday_to_sunday"],
+            "command": ["{qdc}", "akshare", "update", "--target", "delist", "--no-build-duckdb-views"],
+        },
+        {
+            "id": "akshare-spot-quote",
+            "name": "akshare update spot_quote",
+            "command": ["{qdc}", "akshare", "update", "--target", "spot_quote", "--no-build-duckdb-views"],
+            "optional": True,
+        },
+        {
+            "id": "baostock-unadjusted",
+            "name": "update-baostock-daily unadjusted",
+            "command": [
+                "{qdc}",
+                "update-baostock-daily",
+                "--dataset",
+                "baostock_cn_stock_daily_bar_unadjusted",
+                "--no-build-duckdb-views",
+            ],
+        },
+        {
+            "id": "baostock-basic",
+            "name": "update-baostock-daily stock basic",
+            "command": [
+                "{qdc}",
+                "update-baostock-daily",
+                "--dataset",
+                "baostock_cn_stock_basic",
+                "--no-build-duckdb-views",
+            ],
+        },
+        {
+            "id": "baostock-valuation-percentile",
+            "name": "update-baostock-valuation-percentile",
+            "command": ["{qdc}", "update-baostock-valuation-percentile", "--no-build-duckdb-views"],
+            "depends_on": ["baostock-unadjusted"],
+        },
+        {
+            "id": "akshare-yjyg-em",
+            "name": "akshare update yjyg_em incremental",
+            "command": [
+                "{qdc}",
+                "akshare",
+                "update",
+                "--target",
+                "yjyg_em",
+                "--mode",
+                "incremental",
+                "--no-build-duckdb-views",
+            ],
+            "optional": True,
+            "timeout_seconds": 900,
+        },
+        {
+            "id": "baostock-adjustment-factor",
+            "name": "update-baostock-daily adjustment factor",
+            "when": ["friday_to_sunday"],
+            "command": [
+                "{qdc}",
+                "update-baostock-daily",
+                "--dataset",
+                "baostock_cn_stock_adjustment_factor",
+                "--no-build-duckdb-views",
+            ],
+        },
+        {
+            "id": "baostock-qfq",
+            "name": "update-baostock-daily qfq",
+            "when": ["friday_to_sunday"],
+            "command": [
+                "{qdc}",
+                "update-baostock-daily",
+                "--dataset",
+                "baostock_cn_stock_daily_bar_qfq",
+                "--no-build-duckdb-views",
+            ],
+            "depends_on": ["baostock-unadjusted", "baostock-adjustment-factor"],
+        },
+        {
+            "id": "baostock-hfq",
+            "name": "update-baostock-daily hfq",
+            "when": ["friday_to_sunday"],
+            "command": [
+                "{qdc}",
+                "update-baostock-daily",
+                "--dataset",
+                "baostock_cn_stock_daily_bar_hfq",
+                "--no-build-duckdb-views",
+            ],
+            "depends_on": ["baostock-unadjusted", "baostock-adjustment-factor"],
+        },
+        {
+            "id": "akshare-valuation-full",
+            "name": "akshare update valuation full",
+            "when": ["friday_to_sunday"],
+            "command": [
+                "{qdc}",
+                "akshare",
+                "update",
+                "--target",
+                "valuation",
+                "--mode",
+                "full",
+                "--no-build-duckdb-views",
+            ],
+        },
+        {
+            "id": "akshare-report-disclosure",
+            "name": "akshare update report_disclosure",
+            "when": ["friday_to_sunday"],
+            "command": ["{qdc}", "akshare", "update", "--target", "report_disclosure", "--no-build-duckdb-views"],
+        },
+        {
+            "id": "akshare-yysj-em",
+            "name": "akshare update yysj_em",
+            "when": ["friday_to_sunday"],
+            "command": ["{qdc}", "akshare", "update", "--target", "yysj_em", "--no-build-duckdb-views"],
+        },
+        {
+            "id": "akshare-daily-bar",
+            "name": "akshare update daily_bar incremental all from {hist_start}",
+            "when": ["friday_to_sunday"],
+            "command": [
+                "{qdc}",
+                "akshare",
+                "update",
+                "--target",
+                "daily_bar",
+                "--mode",
+                "incremental",
+                "--adjustment",
+                "all",
+                "--start",
+                "{hist_start}",
+                "--no-build-duckdb-views",
+            ],
+        },
+        {
+            "id": "sync-qlib",
+            "name": "sync-qlib",
+            "when": ["friday_to_sunday"],
+            "command": ["{qdc}", "sync-qlib", "--no-build-duckdb-views", "--max-runtime-seconds", "7200"],
+        },
+        {
+            "id": "financial-report",
+            "name": "akshare update financial_report incremental",
+            "command": [
+                "{qdc}",
+                "akshare",
+                "update",
+                "--target",
+                "financial_report",
+                "--mode",
+                "incremental",
+                "--no-build-duckdb-views",
+            ],
+        },
+        {
+            "id": "build-derived",
+            "name": "build canonical derived datasets",
+            "command": [
+                "{qdc}",
+                "build-derived",
+                "--target",
+                "all",
+                "--mode",
+                "incremental",
+                "--no-build-duckdb-views",
+            ],
+            "depends_on": [
                 "akshare-spot-quote",
-                "akshare update spot_quote",
-                _cli("akshare", "update", "--target", "spot_quote", "--no-build-duckdb-views"),
-                optional=True,
-            ),
-            DailyStep(
                 "baostock-unadjusted",
-                "update-baostock-daily unadjusted",
-                _cli(
-                    "update-baostock-daily",
-                    "--dataset",
-                    "baostock_cn_stock_daily_bar_unadjusted",
-                    "--no-build-duckdb-views",
-                ),
-            ),
-            DailyStep(
                 "baostock-basic",
-                "update-baostock-daily stock basic",
-                _cli("update-baostock-daily", "--dataset", "baostock_cn_stock_basic", "--no-build-duckdb-views"),
-            ),
-            DailyStep(
                 "baostock-valuation-percentile",
-                "update-baostock-valuation-percentile",
-                _cli("update-baostock-valuation-percentile", "--no-build-duckdb-views"),
-                depends_on=("baostock-unadjusted",),
-            ),
-            DailyStep(
-                "akshare-yjyg-em",
-                "akshare update yjyg_em incremental",
-                _cli(
-                    "akshare",
-                    "update",
-                    "--target",
-                    "yjyg_em",
-                    "--mode",
-                    "incremental",
-                    "--no-build-duckdb-views",
-                ),
-                optional=True,
-                timeout_seconds=900,
-            ),
-        ]
-    )
-
-    if weekend_window:
-        steps.extend(
-            [
-                DailyStep(
-                    "baostock-adjustment-factor",
-                    "update-baostock-daily adjustment factor",
-                    _cli(
-                        "update-baostock-daily",
-                        "--dataset",
-                        "baostock_cn_stock_adjustment_factor",
-                        "--no-build-duckdb-views",
-                    ),
-                ),
-                DailyStep(
-                    "baostock-qfq",
-                    "update-baostock-daily qfq",
-                    _cli(
-                        "update-baostock-daily",
-                        "--dataset",
-                        "baostock_cn_stock_daily_bar_qfq",
-                        "--no-build-duckdb-views",
-                    ),
-                    depends_on=("baostock-unadjusted", "baostock-adjustment-factor"),
-                ),
-                DailyStep(
-                    "baostock-hfq",
-                    "update-baostock-daily hfq",
-                    _cli(
-                        "update-baostock-daily",
-                        "--dataset",
-                        "baostock_cn_stock_daily_bar_hfq",
-                        "--no-build-duckdb-views",
-                    ),
-                    depends_on=("baostock-unadjusted", "baostock-adjustment-factor"),
-                ),
-                DailyStep(
-                    "akshare-valuation-full",
-                    "akshare update valuation full",
-                    _cli("akshare", "update", "--target", "valuation", "--mode", "full", "--no-build-duckdb-views"),
-                ),
-                DailyStep(
-                    "akshare-report-disclosure",
-                    "akshare update report_disclosure",
-                    _cli("akshare", "update", "--target", "report_disclosure", "--no-build-duckdb-views"),
-                ),
-                DailyStep(
-                    "akshare-yysj-em",
-                    "akshare update yysj_em",
-                    _cli("akshare", "update", "--target", "yysj_em", "--no-build-duckdb-views"),
-                ),
-                DailyStep(
-                    "akshare-daily-bar",
-                    f"akshare update daily_bar incremental all from {hist_start}",
-                    _cli(
-                        "akshare",
-                        "update",
-                        "--target",
-                        "daily_bar",
-                        "--mode",
-                        "incremental",
-                        "--adjustment",
-                        "all",
-                        "--start",
-                        hist_start,
-                        "--no-build-duckdb-views",
-                    ),
-                ),
-                DailyStep(
-                    "sync-qlib",
-                    "sync-qlib",
-                    _cli("sync-qlib", "--no-build-duckdb-views", "--max-runtime-seconds", "7200"),
-                ),
-            ]
-        )
-
-    build_derived_dependencies = [
-        "akshare-spot-quote",
-        "baostock-unadjusted",
-        "baostock-basic",
-        "baostock-valuation-percentile",
-        "financial-report",
-    ]
-    if weekend_window:
-        build_derived_dependencies.extend(
-            [
+                "financial-report",
                 "akshare-delist",
                 "baostock-adjustment-factor",
                 "baostock-qfq",
@@ -209,39 +261,176 @@ def daily_steps(today: date | None = None) -> list[DailyStep]:
                 "akshare-valuation-full",
                 "akshare-daily-bar",
                 "sync-qlib",
-            ]
-        )
+            ],
+        },
+        {
+            "id": "build-duckdb-views",
+            "name": "build-duckdb-views",
+            "command": ["{qdc}", "build-duckdb-views"],
+            "depends_on": ["build-derived"],
+        },
+    ]
+}
 
-    steps.extend(
-        [
-            DailyStep(
-                "financial-report",
-                "akshare update financial_report incremental",
-                _cli(
-                    "akshare",
-                    "update",
-                    "--target",
-                    "financial_report",
-                    "--mode",
-                    "incremental",
-                    "--no-build-duckdb-views",
-                ),
-            ),
-            DailyStep(
-                "build-derived",
-                "build canonical derived datasets",
-                _cli("build-derived", "--target", "all", "--no-build-duckdb-views"),
-                depends_on=tuple(build_derived_dependencies),
-            ),
-            DailyStep(
-                "build-duckdb-views",
-                "build-duckdb-views",
-                _cli("build-duckdb-views"),
-                depends_on=("build-derived",),
-            ),
-        ]
+
+def daily_steps(today: date | None = None, root: Path | None = None) -> list[DailyStep]:
+    resolved_today = today or date.today()
+    config = _load_daily_workflow_config((root or paths.ROOT).resolve())
+    return _steps_from_workflow_config(config, resolved_today)
+
+
+def _daily_steps_for_root(today: date, root: Path) -> list[DailyStep]:
+    try:
+        return daily_steps(today=today, root=root)
+    except TypeError:
+        return daily_steps(today)
+
+
+def _load_daily_workflow_config(root: Path) -> dict[str, object]:
+    path = root / "config" / DAILY_WORKFLOW_CONFIG
+    if not path.exists():
+        return DEFAULT_DAILY_WORKFLOW_CONFIG
+    try:
+        loaded = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    except yaml.YAMLError as exc:
+        raise DailyWorkflowConfigError(f"Invalid daily workflow YAML: {path}: {exc}") from exc
+    if not isinstance(loaded, dict):
+        raise DailyWorkflowConfigError(f"Daily workflow config root must be a mapping: {path}")
+    return loaded
+
+
+def _steps_from_workflow_config(config: dict[str, object], today: date) -> list[DailyStep]:
+    raw_steps = config.get("steps")
+    if not isinstance(raw_steps, list):
+        raise DailyWorkflowConfigError("Daily workflow config missing required list field: steps")
+
+    context = _workflow_context(today)
+    steps: list[DailyStep] = []
+    for index, raw_step in enumerate(raw_steps):
+        if not isinstance(raw_step, dict):
+            raise DailyWorkflowConfigError(f"Daily workflow step #{index + 1} must be a mapping")
+        if not bool(raw_step.get("enabled", True)):
+            continue
+        if not _day_rule_matches(raw_step.get("when", ["all"]), today):
+            continue
+        steps.append(_daily_step_from_config(raw_step, context, index))
+
+    step_ids = {step.id for step in steps}
+    return [
+        DailyStep(
+            step.id,
+            step.name,
+            step.command,
+            optional=step.optional,
+            timeout_seconds=step.timeout_seconds,
+            depends_on=tuple(dependency for dependency in step.depends_on if dependency in step_ids),
+        )
+        for step in steps
+    ]
+
+
+def _workflow_context(today: date) -> dict[str, str]:
+    return {
+        "python": sys.executable,
+        "today": today.isoformat(),
+        "hist_start": (today - timedelta(days=30)).isoformat(),
+    }
+
+
+def _daily_step_from_config(raw_step: dict[str, object], context: dict[str, str], index: int) -> DailyStep:
+    step_id = _required_string(raw_step, "id", index)
+    name = _render_text(str(raw_step.get("name", step_id)), context)
+    command = _render_command(raw_step.get("command"), context, step_id)
+    optional = bool(raw_step.get("optional", False))
+    timeout_seconds = _optional_timeout(raw_step.get("timeout_seconds"), step_id)
+    depends_on = _string_list(raw_step.get("depends_on", []), f"{step_id}.depends_on")
+    return DailyStep(
+        id=step_id,
+        name=name,
+        command=command,
+        optional=optional,
+        timeout_seconds=timeout_seconds,
+        depends_on=tuple(depends_on),
     )
-    return steps
+
+
+def _required_string(raw_step: dict[str, object], field: str, index: int) -> str:
+    value = raw_step.get(field)
+    if not isinstance(value, str) or not value.strip():
+        raise DailyWorkflowConfigError(f"Daily workflow step #{index + 1} missing required string field: {field}")
+    return value.strip()
+
+
+def _optional_timeout(value: object, step_id: str) -> int | None:
+    if value is None:
+        return None
+    if not isinstance(value, str | int):
+        raise DailyWorkflowConfigError(f"Daily workflow step {step_id} has invalid timeout_seconds: {value!r}")
+    try:
+        timeout = int(value)
+    except (TypeError, ValueError) as exc:
+        raise DailyWorkflowConfigError(f"Daily workflow step {step_id} has invalid timeout_seconds: {value!r}") from exc
+    if timeout <= 0:
+        raise DailyWorkflowConfigError(f"Daily workflow step {step_id} timeout_seconds must be positive")
+    return timeout
+
+
+def _string_list(value: object, field_name: str) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        return [value]
+    if not isinstance(value, list):
+        raise DailyWorkflowConfigError(f"Daily workflow field {field_name} must be a string or list of strings")
+    output: list[str] = []
+    for item in value:
+        if not isinstance(item, str) or not item.strip():
+            raise DailyWorkflowConfigError(f"Daily workflow field {field_name} must contain only strings")
+        output.append(item.strip())
+    return output
+
+
+def _render_command(command: object, context: dict[str, str], step_id: str) -> tuple[str, ...]:
+    if isinstance(command, str):
+        command_items = [command]
+    elif isinstance(command, list):
+        command_items = command
+    else:
+        raise DailyWorkflowConfigError(f"Daily workflow step {step_id} missing required command string/list")
+
+    rendered: list[str] = []
+    for item in command_items:
+        if not isinstance(item, str):
+            raise DailyWorkflowConfigError(f"Daily workflow step {step_id} command must contain only strings")
+        if item == "{qdc}":
+            rendered.extend(_cli())
+        else:
+            rendered.append(_render_text(item, context))
+    if not rendered:
+        raise DailyWorkflowConfigError(f"Daily workflow step {step_id} command must not be empty")
+    return tuple(rendered)
+
+
+def _render_text(value: str, context: dict[str, str]) -> str:
+    return value.format(**context)
+
+
+def _day_rule_matches(raw_rules: object, today: date) -> bool:
+    rules = _string_list(raw_rules, "when")
+    if not rules or "all" in rules:
+        return True
+    weekday = today.weekday()
+    for rule in rules:
+        normalized = rule.strip().lower()
+        if normalized == "weekday" and weekday < 5:
+            return True
+        if normalized == "weekend" and weekday in {5, 6}:
+            return True
+        if normalized in {"friday_to_sunday", "weekend_window"} and weekday in {4, 5, 6}:
+            return True
+        if normalized == today.strftime("%A").lower():
+            return True
+    return False
 
 
 def run_daily_update(
@@ -261,7 +450,7 @@ def run_daily_update(
     resolved_state_file = state_file or base / "data" / "metadata" / "run_update_daily_state.json"
     resolved_log = run_log or _default_run_log(base, now)
     runner = command_runner or (lambda step, log_path: _run_subprocess(step, log_path, base))
-    steps = daily_steps(resolved_today)
+    steps = _daily_steps_for_root(resolved_today, base)
     step_ids = [step.id for step in steps]
 
     if start_at is not None and start_at not in step_ids:
@@ -325,7 +514,9 @@ def run_daily_update(
             exit_code = int(runner(step, resolved_log))
             if exit_code != 0:
                 timed_out = exit_code == TIMEOUT_EXIT_CODE and step.timeout_seconds is not None
-                timeout_cleanup_failed = exit_code == TIMEOUT_CLEANUP_FAILED_EXIT_CODE and step.timeout_seconds is not None
+                timeout_cleanup_failed = (
+                    exit_code == TIMEOUT_CLEANUP_FAILED_EXIT_CODE and step.timeout_seconds is not None
+                )
                 if timed_out or timeout_cleanup_failed:
                     if timeout_cleanup_failed:
                         if step.optional:
@@ -350,6 +541,8 @@ def run_daily_update(
                         break
 
                     if not _wait_for_duckdb_available(base):
+                        locked_paths = _LAST_LOCKED_DUCKDB_PATHS
+                        locked_text = ", ".join(str(path) for path in locked_paths) or "unknown DuckDB file"
                         if step.optional:
                             _record_step(
                                 step_state,
@@ -365,7 +558,7 @@ def run_daily_update(
                         _emit(
                             resolved_log,
                             now,
-                            f"{step.name} timed out and DuckDB is still locked; stopping",
+                            f"{step.name} timed out and DuckDB is still locked ({locked_text}); stopping",
                             console=True,
                         )
                         failed_exit_code = failed_exit_code or exit_code
@@ -505,22 +698,43 @@ def _terminate_process_tree(proc: subprocess.Popen[Any], log: TextIO) -> bool:
 
 
 def _wait_for_duckdb_available(root: Path, timeout_seconds: int = 30) -> bool:
-    db_path = root / "data" / "duckdb" / "quant.duckdb"
-    if not db_path.exists():
+    global _LAST_LOCKED_DUCKDB_PATHS
+    db_paths = _duckdb_files_to_check(root)
+    _LAST_LOCKED_DUCKDB_PATHS = ()
+    existing_paths = tuple(path for path in db_paths if path.exists())
+    if not existing_paths:
         return True
 
     deadline = time.monotonic() + timeout_seconds
     while True:
+        locked = _locked_duckdb_files(existing_paths)
+        if not locked:
+            _LAST_LOCKED_DUCKDB_PATHS = ()
+            return True
+        _LAST_LOCKED_DUCKDB_PATHS = locked
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.5)
+
+
+def _duckdb_files_to_check(root: Path) -> tuple[Path, ...]:
+    return (
+        (root / "data" / "duckdb" / "quant.duckdb").resolve(),
+        default_metadata_duckdb_file(root).resolve(),
+    )
+
+
+def _locked_duckdb_files(paths: tuple[Path, ...]) -> tuple[Path, ...]:
+    locked: list[Path] = []
+    for path in paths:
         try:
             import duckdb
 
-            connection = duckdb.connect(str(db_path))
+            connection = duckdb.connect(str(path))
             connection.close()
-            return True
         except Exception:
-            if time.monotonic() >= deadline:
-                return False
-            time.sleep(0.5)
+            locked.append(path)
+    return tuple(locked)
 
 
 def _read_state(path: Path) -> dict[str, Any]:
@@ -547,10 +761,8 @@ def _write_state(path: Path, state: dict[str, Any]) -> None:
         os.replace(tmp_path, path)
     finally:
         if tmp_path.exists():
-            try:
+            with suppress(OSError):
                 tmp_path.unlink()
-            except OSError:
-                pass
 
 
 def _record_step(
@@ -631,6 +843,8 @@ def _running_abandoned_reason(
 
 
 def _int_or_none(value: object) -> int | None:
+    if value is None or not isinstance(value, str | int):
+        return None
     try:
         resolved = int(value)
     except (TypeError, ValueError):

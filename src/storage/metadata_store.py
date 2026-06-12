@@ -20,10 +20,13 @@ from src.storage.schema import (
     field_names,
 )
 from src.utils import paths
+from src.utils.config_mgr import ConfigError, ConfigManager
+from src.utils.logging import logger
 
 CHECKPOINT_KEY_COLUMNS = ["pipeline", "dataset", "code", "start_date", "end_date"]
 DUCKDB_METADATA_CONNECT_MAX_RETRIES = 5
 DUCKDB_METADATA_CONNECT_RETRY_DELAY = 0.5
+METADATA_TABLES = ("pipeline_runs", "dataset_update_status", "pipeline_checkpoints")
 _DB_LOCKS: WeakValueDictionary[Path, RLock] = WeakValueDictionary()
 _DB_LOCKS_GUARD = RLock()
 
@@ -47,7 +50,7 @@ class DuckDBMetadataStore:
         duckdb_file: Path | None = None,
     ) -> None:
         self.root = (root or paths.ROOT).resolve()
-        self.duckdb_file = (duckdb_file or self.root / "data" / "duckdb" / "quant.duckdb").resolve()
+        self.duckdb_file = (duckdb_file or default_metadata_duckdb_file(self.root)).resolve()
         self._lock = _lock_for(self.duckdb_file)
         self._initialized = False
         self._conn: duckdb.DuckDBPyConnection | None = None
@@ -356,3 +359,110 @@ def _replace_null_like(series: pd.Series) -> pd.Series:
 
 def empty_metadata_frame(schema: pa.Schema) -> pd.DataFrame:
     return pd.DataFrame(columns=field_names(schema))
+
+
+def default_metadata_duckdb_file(root: Path | None = None) -> Path:
+    base = (root or paths.ROOT).resolve()
+    try:
+        return ConfigManager(base).path("storage.metadata_duckdb_file", "data/metadata/qdc_metadata.duckdb")
+    except ConfigError:
+        return (base / "data" / "metadata" / "qdc_metadata.duckdb").resolve()
+
+
+def legacy_metadata_duckdb_file(root: Path | None = None) -> Path:
+    base = (root or paths.ROOT).resolve()
+    return (base / "data" / "duckdb" / "quant.duckdb").resolve()
+
+
+def migrate_metadata_duckdb(
+    *,
+    root: Path | None = None,
+    source_file: Path | None = None,
+    target_file: Path | None = None,
+) -> dict[str, object]:
+    """Copy legacy metadata tables from quant.duckdb into qdc_metadata.duckdb."""
+
+    base = (root or paths.ROOT).resolve()
+    source = (source_file or legacy_metadata_duckdb_file(base)).resolve()
+    target = (target_file or default_metadata_duckdb_file(base)).resolve()
+    migrated = dict.fromkeys(METADATA_TABLES, 0)
+    result: dict[str, object] = {
+        "source": str(source),
+        "target": str(target),
+        "migrated_rows": migrated,
+        "skipped": False,
+    }
+
+    if source == target:
+        result["skipped"] = True
+        result["reason"] = "source and target are the same file"
+        return result
+    if not source.exists():
+        result["skipped"] = True
+        result["reason"] = "legacy metadata DuckDB file does not exist"
+        return result
+
+    target_store = DuckDBMetadataStore(root=base, duckdb_file=target)
+    try:
+        target_store.initialize()
+        with duckdb.connect(str(source), read_only=True) as source_conn:
+            if _duckdb_table_exists(source_conn, "pipeline_runs"):
+                runs = _clean_dataframe_for_schema(
+                    source_conn.execute("SELECT * FROM pipeline_runs").df(),
+                    PIPELINE_RUNS_SCHEMA,
+                )
+                runs = _new_pipeline_runs(target_store, runs)
+                if not runs.empty:
+                    target_store.append_pipeline_runs(runs)
+                migrated["pipeline_runs"] = len(runs)
+
+            if _duckdb_table_exists(source_conn, "dataset_update_status"):
+                statuses = _clean_dataframe_for_schema(
+                    source_conn.execute("SELECT * FROM dataset_update_status").df(),
+                    DATASET_UPDATE_STATUS_SCHEMA,
+                )
+                if not statuses.empty:
+                    target_store.upsert_dataset_update_status(statuses)
+                migrated["dataset_update_status"] = len(statuses)
+
+            if _duckdb_table_exists(source_conn, "pipeline_checkpoints"):
+                checkpoints = _clean_dataframe_for_schema(
+                    source_conn.execute("SELECT * FROM pipeline_checkpoints").df(),
+                    PIPELINE_CHECKPOINTS_SCHEMA,
+                )
+                if not checkpoints.empty:
+                    target_store.upsert_pipeline_checkpoints(checkpoints)
+                migrated["pipeline_checkpoints"] = len(checkpoints)
+    finally:
+        target_store.close()
+    logger.info(
+        "Migrated metadata DuckDB tables source={} target={} rows={}",
+        source,
+        target,
+        migrated,
+    )
+    return result
+
+
+def _duckdb_table_exists(conn: duckdb.DuckDBPyConnection, table_name: str) -> bool:
+    row = conn.execute(
+        """
+        SELECT count(*)
+        FROM information_schema.tables
+        WHERE table_schema = current_schema()
+          AND table_name = ?
+        """,
+        [table_name],
+    ).fetchone()
+    return bool(row and row[0])
+
+
+def _new_pipeline_runs(store: DuckDBMetadataStore, incoming: pd.DataFrame) -> pd.DataFrame:
+    if incoming.empty:
+        return incoming
+    existing = store.read_pipeline_runs()
+    if existing.empty or "task_id" not in existing.columns:
+        return incoming.drop_duplicates(["task_id"], keep="last").reset_index(drop=True)
+    existing_ids = set(existing["task_id"].dropna().astype(str))
+    work = incoming.drop_duplicates(["task_id"], keep="last")
+    return work.loc[~work["task_id"].astype(str).isin(existing_ids)].reset_index(drop=True)

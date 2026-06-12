@@ -110,6 +110,62 @@ def test_build_cn_stock_valuation_success_promotes_staging_dataset(tmp_path) -> 
     assert _temporary_dataset_dirs(tmp_path, ".backup", "cn_stock_valuation") == []
 
 
+def test_build_cn_stock_valuation_incremental_preserves_unaffected_partition(tmp_path) -> None:
+    store = ParquetStore(root=tmp_path)
+    store.ensure_layout()
+    master = pd.concat(
+        [
+            _master(),
+            pd.DataFrame(
+                [
+                    {
+                        **_master().iloc[0].to_dict(),
+                        "security_id": "SZ.000001",
+                        "code": "000001",
+                        "exchange": "SZ",
+                        "baostock_code": "sz.000001",
+                        "akshare_code": "000001",
+                        "qlib_symbol": "sz000001",
+                    }
+                ]
+            ),
+        ],
+        ignore_index=True,
+    )
+    store.write_dataset("cn_security_master", master)
+    store.write_dataset(
+        "cn_stock_valuation",
+        _canonical_valuation(close=1.0, date_value=date(2023, 12, 29)),
+        {"security_id": "SH.600000"},
+        mode="replace",
+    )
+    store.write_dataset(
+        "cn_stock_valuation",
+        _canonical_valuation(close=2.0, date_value=date(2023, 12, 29)).assign(
+            security_id="SZ.000001",
+            code="000001",
+            exchange="SZ",
+        ),
+        {"security_id": "SZ.000001"},
+        mode="replace",
+    )
+    store.write_dataset("akshare_cn_stock_valuation_eastmoney", _akshare_valuation(), {"code": "600000"})
+
+    result = build_cn_stock_valuation(
+        root=tmp_path,
+        security_ids=("SH.600000",),
+        build_views=False,
+        refresh_registry=False,
+        now=lambda: NOW,
+    )
+
+    sh_loaded = store.read_dataset("cn_stock_valuation", {"security_id": "SH.600000"})
+    sz_loaded = store.read_dataset("cn_stock_valuation", {"security_id": "SZ.000001"})
+    assert result["partitions"] == 1
+    assert sh_loaded["close"].tolist() == [8.2, 8.3]
+    assert sz_loaded["close"].tolist() == [2.0]
+
+
 def _master() -> pd.DataFrame:
     return pd.DataFrame(
         [

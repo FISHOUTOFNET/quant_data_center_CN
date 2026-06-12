@@ -154,8 +154,11 @@ def _parse_started_at(value: object) -> datetime | None:
 
 
 def _owner_pid(owner: dict[str, Any]) -> int | None:
+    raw_pid = owner.get("pid")
+    if raw_pid is None:
+        return None
     try:
-        pid = int(owner.get("pid"))
+        pid = int(raw_pid)
     except (TypeError, ValueError):
         return None
     return pid if pid > 0 else None

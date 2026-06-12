@@ -27,6 +27,7 @@ METADATA_DIR = DATA_DIR / "metadata"
 DUCKDB_DIR = DATA_DIR / "duckdb"
 LOGS_DIR = ROOT / "logs"
 DUCKDB_FILE = DUCKDB_DIR / "quant.duckdb"
+METADATA_DUCKDB_FILE = METADATA_DIR / "qdc_metadata.duckdb"
 
 
 def resolve_path(path: str | Path, base: Path | None = None) -> Path:

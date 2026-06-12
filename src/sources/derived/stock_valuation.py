@@ -11,8 +11,11 @@ import pandas as pd
 
 from src.sources.derived.common import (
     cleanup_derived_dataset_staging,
+    cleanup_derived_partition_staging,
     commit_derived_dataset_staging,
+    commit_derived_partition_staging,
     create_derived_dataset_staging_area,
+    create_derived_partition_staging_area,
     read_partition_or_empty,
     refresh_derived_registry,
 )
@@ -49,11 +52,23 @@ PERCENTILE_MAPPINGS = {
 def build_cn_stock_valuation(
     *,
     root: Path | None = None,
+    security_ids: tuple[str, ...] | None = None,
+    changed_since: datetime | None = None,
     build_views: bool = True,
     refresh_registry: bool = True,
     now: Callable[[], datetime] | None = None,
 ) -> dict[str, object]:
     store = ParquetStore(root=root)
+    del changed_since
+    if security_ids is not None:
+        return _build_cn_stock_valuation_partitions(
+            store=store,
+            security_ids=security_ids,
+            build_views=build_views,
+            refresh_registry=refresh_registry,
+            now=now,
+        )
+
     staging = create_derived_dataset_staging_area(store, "cn_stock_valuation")
     write_store = ParquetStore(root=store.root, parquet_dir=staging.staging_root, metadata_dir=store.metadata_dir)
 
@@ -91,6 +106,61 @@ def build_cn_stock_valuation(
         "status": "success",
         "rows": rows,
         "partitions": partitions,
+    }
+
+
+def _build_cn_stock_valuation_partitions(
+    *,
+    store: ParquetStore,
+    security_ids: tuple[str, ...],
+    build_views: bool,
+    refresh_registry: bool,
+    now: Callable[[], datetime] | None,
+) -> dict[str, object]:
+    store.ensure_layout()
+    requested = set(security_ids)
+    if not requested:
+        return {"dataset": "cn_stock_valuation", "status": "success", "rows": 0, "partitions": 0}
+
+    rows = 0
+    partitions = 0
+    master = _read_or_build_master(store, now)
+    master = master.loc[master["security_id"].astype("string").isin(requested)].reset_index(drop=True)
+    updated_at = (now or datetime.now)()
+    for _, security in master.iterrows():
+        security_id = _clean_string(security.get("security_id"))
+        if not security_id:
+            continue
+        staging = create_derived_partition_staging_area(store, "cn_stock_valuation", security_id)
+        write_store = ParquetStore(root=store.root, parquet_dir=staging.staging_root, metadata_dir=store.metadata_dir)
+        try:
+            security_df = _materialize_security_valuation(store, security, updated_at)
+            if security_df.empty:
+                commit_derived_partition_staging(staging, delete_partition=True)
+            else:
+                result = write_store.write_dataset(
+                    "cn_stock_valuation",
+                    security_df,
+                    partition={"security_id": security_id},
+                    mode="replace",
+                )
+                rows += result.row_count
+                partitions += result.updated_partitions
+                commit_derived_partition_staging(staging)
+        except Exception:
+            cleanup_derived_partition_staging(staging)
+            raise
+
+    if refresh_registry:
+        refresh_derived_registry(store, ["cn_stock_valuation"])
+    if build_views:
+        DuckDBStore(root=store.root).build_views()
+    return {
+        "dataset": "cn_stock_valuation",
+        "status": "success",
+        "rows": rows,
+        "partitions": partitions,
+        "security_ids": tuple(sorted(requested)),
     }
 
 
