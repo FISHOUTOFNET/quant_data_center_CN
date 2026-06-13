@@ -14,6 +14,9 @@ from src.tools import run_update_daily
 from src.utils.process_lock import acquire_process_lock
 
 
+REPO_ROOT = Path(__file__).resolve().parents[1]
+
+
 def _state(path: Path) -> dict:
     return json.loads(path.read_text(encoding="utf-8"))
 
@@ -30,6 +33,15 @@ def _write_settings(root: Path) -> None:
     config_dir = root / "config"
     config_dir.mkdir(exist_ok=True)
     (config_dir / "settings.yaml").write_text("project:\n  timezone: Asia/Shanghai\n", encoding="utf-8")
+
+
+def _write_repo_workflow(root: Path) -> None:
+    config_dir = root / "config"
+    config_dir.mkdir(exist_ok=True)
+    (config_dir / "daily_workflow.yaml").write_text(
+        (REPO_ROOT / "config" / "daily_workflow.yaml").read_text(encoding="utf-8"),
+        encoding="utf-8",
+    )
 
 
 def _write_minimal_workflow(root: Path, extra_steps: str = "") -> None:
@@ -394,6 +406,7 @@ def test_market_date_override_forces_market_window_step(tmp_path: Path) -> None:
 
 
 def test_orchestrator_resumes_after_successful_steps(tmp_path: Path) -> None:
+    _write_repo_workflow(tmp_path)
     state_file = tmp_path / "state.json"
     log_file = tmp_path / "run.log"
     calls: list[str] = []
@@ -431,10 +444,11 @@ def test_orchestrator_resumes_after_successful_steps(tmp_path: Path) -> None:
         == 0
     )
 
-    assert calls == []
-    states = _steps(state_file, "natural_date:2026-06-05")
-    assert states["calendar"]["status"] == "success"
-    assert states["baostock-qfq"]["status"] == "success"
+    assert calls == ["cleanup"]
+    natural_states = _steps(state_file, "natural_date:2026-06-05")
+    market_states = _steps(state_file, "market_date:2026-06-05")
+    assert natural_states["calendar"]["status"] == "success"
+    assert market_states["baostock-qfq"]["status"] == "success"
 
 
 def test_market_date_success_is_reused_on_weekend_and_holiday_monday(tmp_path: Path) -> None:
@@ -699,6 +713,11 @@ steps:
         run_update_daily.daily_steps(date(2026, 6, 13), root=tmp_path)
 
 
+def test_daily_workflow_config_missing_file_fails_fast(tmp_path: Path) -> None:
+    with pytest.raises(run_update_daily.DailyWorkflowConfigError, match=r"config[\\/]daily_workflow\.yaml"):
+        run_update_daily.daily_steps(date(2026, 6, 13), root=tmp_path)
+
+
 def test_orchestrator_continues_independent_steps_and_blocks_dependents(tmp_path: Path) -> None:
     state_file = tmp_path / "state.json"
     log_file = tmp_path / "run.log"
@@ -791,6 +810,7 @@ def test_orchestrator_retries_failed_and_unblocks_dependents(tmp_path: Path, mon
 
 
 def test_orchestrator_force_and_start_at_control_resume(tmp_path: Path) -> None:
+    _write_repo_workflow(tmp_path)
     state_file = tmp_path / "state.json"
     log_file = tmp_path / "run.log"
     calls: list[str] = []
@@ -842,8 +862,8 @@ def test_orchestrator_force_and_start_at_control_resume(tmp_path: Path) -> None:
 
 
 def test_orchestrator_market_window_schedules_heavy_steps_only_in_window() -> None:
-    friday = [step.id for step in run_update_daily.daily_steps(date(2026, 6, 5))]
-    monday = [step.id for step in run_update_daily.daily_steps(date(2026, 6, 8))]
+    friday = [step.id for step in run_update_daily.daily_steps(date(2026, 6, 5), root=REPO_ROOT)]
+    monday = [step.id for step in run_update_daily.daily_steps(date(2026, 6, 8), root=REPO_ROOT)]
 
     assert "baostock-qfq" in friday
     assert "akshare-valuation-full" in friday
@@ -857,7 +877,7 @@ def test_orchestrator_market_window_schedules_heavy_steps_only_in_window() -> No
 
 
 def test_daily_steps_include_yjyg_em_before_build_views_on_weekday() -> None:
-    steps = run_update_daily.daily_steps(date(2026, 6, 8))
+    steps = run_update_daily.daily_steps(date(2026, 6, 8), root=REPO_ROOT)
     by_id = {step.id: step for step in steps}
 
     assert by_id["akshare-spot-quote"].optional is True
@@ -881,7 +901,7 @@ def test_daily_steps_include_yjyg_em_before_build_views_on_weekday() -> None:
 
 @pytest.mark.parametrize("today", [date(2026, 6, 8), date(2026, 6, 6)])
 def test_daily_steps_build_derived_all_before_views(today: date) -> None:
-    steps = run_update_daily.daily_steps(today)
+    steps = run_update_daily.daily_steps(today, root=REPO_ROOT)
     by_id = {step.id: step for step in steps}
     expected_dependencies = (
         (
@@ -927,7 +947,7 @@ def test_daily_steps_build_derived_all_before_views(today: date) -> None:
 
 
 def test_daily_steps_load_weekday_steps_from_config() -> None:
-    steps = run_update_daily.daily_steps(date(2026, 6, 8), root=Path(__file__).resolve().parents[1])
+    steps = run_update_daily.daily_steps(date(2026, 6, 8), root=REPO_ROOT)
     by_id = {step.id: step for step in steps}
 
     assert by_id["baostock-unadjusted"].schedule_policy == "daily"
@@ -946,7 +966,7 @@ def test_daily_steps_load_weekday_steps_from_config() -> None:
 
 
 def test_daily_steps_load_weekend_steps_from_config() -> None:
-    steps = run_update_daily.daily_steps(date(2026, 6, 6), root=Path(__file__).resolve().parents[1])
+    steps = run_update_daily.daily_steps(date(2026, 6, 6), root=REPO_ROOT)
     by_id = {step.id: step for step in steps}
 
     assert "baostock-qfq" in by_id
@@ -966,6 +986,7 @@ def test_daily_workflow_config_missing_required_field_is_clear(tmp_path: Path) -
 
 
 def test_run_daily_update_records_yjyg_em_step_on_weekday(tmp_path: Path) -> None:
+    _write_repo_workflow(tmp_path)
     state_file = tmp_path / "state.json"
     log_file = tmp_path / "run.log"
     calls: list[str] = []
@@ -988,6 +1009,7 @@ def test_run_daily_update_records_yjyg_em_step_on_weekday(tmp_path: Path) -> Non
 
 @pytest.mark.parametrize("failed_step", ["baostock-unadjusted", "baostock-valuation-percentile"])
 def test_core_baostock_failure_blocks_build_derived(tmp_path: Path, failed_step: str) -> None:
+    _write_repo_workflow(tmp_path)
     state_file = tmp_path / "state.json"
     log_file = tmp_path / "run.log"
     calls: list[str] = []
@@ -1010,6 +1032,7 @@ def test_core_baostock_failure_blocks_build_derived(tmp_path: Path, failed_step:
 
 
 def test_weekend_daily_bar_failure_blocks_build_derived(tmp_path: Path) -> None:
+    _write_repo_workflow(tmp_path)
     state_file = tmp_path / "state.json"
     log_file = tmp_path / "run.log"
     calls: list[str] = []
@@ -1032,6 +1055,7 @@ def test_weekend_daily_bar_failure_blocks_build_derived(tmp_path: Path) -> None:
 
 
 def test_optional_plain_skipped_does_not_block_build_derived(tmp_path: Path) -> None:
+    _write_repo_workflow(tmp_path)
     state_file = tmp_path / "state.json"
     log_file = tmp_path / "run.log"
     calls: list[str] = []
@@ -1050,9 +1074,10 @@ def test_optional_plain_skipped_does_not_block_build_derived(tmp_path: Path) -> 
     )
 
     assert "build-derived" in calls
-    states = _steps(state_file, "natural_date:2026-06-08")
-    assert states["akshare-spot-quote"]["status"] == "skipped"
-    assert states["build-derived"]["status"] == "success"
+    market_states = _steps(state_file, "market_date:2026-06-08")
+    natural_states = _steps(state_file, "natural_date:2026-06-08")
+    assert market_states["akshare-spot-quote"]["status"] == "skipped"
+    assert natural_states["build-derived"]["status"] == "success"
 
 
 @pytest.mark.parametrize("status", ["failed_resource_locked", "failed_timeout_cleanup"])
@@ -1064,6 +1089,7 @@ def test_failed_optional_hard_status_blocks_followup(status: str) -> None:
 
 
 def test_weekend_akshare_valuation_failure_blocks_build_derived(tmp_path: Path) -> None:
+    _write_repo_workflow(tmp_path)
     state_file = tmp_path / "state.json"
     log_file = tmp_path / "run.log"
     calls: list[str] = []
@@ -1091,17 +1117,18 @@ def test_weekend_akshare_valuation_failure_blocks_build_derived(tmp_path: Path) 
     assert "financial-report" in calls
     assert "build-derived" not in calls
     assert "build-duckdb-views" not in calls
-    states = _steps(state_file, "natural_date:2026-06-06")
-    assert states["akshare-valuation-full"]["status"] == "failed"
-    assert states["akshare-report-disclosure"]["status"] == "success"
-    assert states["akshare-yysj-em"]["status"] == "success"
-    assert states["akshare-yjyg-em"]["status"] == "success"
-    assert states["akshare-daily-bar"]["status"] == "success"
-    assert states["sync-qlib"]["status"] == "success"
-    assert states["financial-report"]["status"] == "success"
-    assert states["build-derived"]["status"] == "blocked"
-    assert states["build-derived"]["blocked_by"] == ["akshare-valuation-full"]
-    assert states["build-duckdb-views"]["status"] == "blocked"
+    market_states = _steps(state_file, "market_date:2026-06-06")
+    natural_states = _steps(state_file, "natural_date:2026-06-06")
+    assert market_states["akshare-valuation-full"]["status"] == "failed"
+    assert natural_states["akshare-report-disclosure"]["status"] == "success"
+    assert natural_states["akshare-yysj-em"]["status"] == "success"
+    assert natural_states["akshare-yjyg-em"]["status"] == "success"
+    assert market_states["akshare-daily-bar"]["status"] == "success"
+    assert market_states["sync-qlib"]["status"] == "success"
+    assert natural_states["financial-report"]["status"] == "success"
+    assert natural_states["build-derived"]["status"] == "blocked"
+    assert natural_states["build-derived"]["blocked_by"] == ["akshare-valuation-full"]
+    assert natural_states["build-duckdb-views"]["status"] == "blocked"
 
 
 def test_run_subprocess_disables_child_file_logging(
@@ -1138,6 +1165,7 @@ def test_run_subprocess_disables_child_file_logging(
 
 
 def test_orchestrator_rejects_corrupt_state_file(tmp_path: Path) -> None:
+    _write_repo_workflow(tmp_path)
     state_file = tmp_path / "state.json"
     state_file.write_text("{bad json", encoding="utf-8")
 
@@ -1304,6 +1332,7 @@ def test_stale_running_record_is_abandoned_unless_owned_by_active_lock(
 
 
 def test_orchestrator_prints_step_progress_to_console(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    _write_repo_workflow(tmp_path)
     state_file = tmp_path / "state.json"
     log_file = tmp_path / "run.log"
 

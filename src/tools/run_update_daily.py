@@ -91,6 +91,9 @@ RUNNING_ABANDONED_AFTER_SECONDS = 24 * 60 * 60
 RUN_UPDATE_DAILY_LOCK_STALE_AFTER_SECONDS = 24 * 60 * 60
 DAILY_WORKFLOW_CONFIG = "daily_workflow.yaml"
 _LAST_LOCKED_DUCKDB_PATHS: tuple[Path, ...] = ()
+# Kept only as a test/migration reference for the legacy workflow shape.
+# Production execution must load config/daily_workflow.yaml and must not
+# silently fall back to this in-memory default.
 DEFAULT_DAILY_WORKFLOW_CONFIG: dict[str, object] = {
     "steps": [
         {
@@ -328,7 +331,10 @@ def _daily_steps_for_root(effective_dates: DailyEffectiveDates, root: Path) -> l
 def _load_daily_workflow_config(root: Path) -> dict[str, object]:
     path = root / "config" / DAILY_WORKFLOW_CONFIG
     if not path.exists():
-        return DEFAULT_DAILY_WORKFLOW_CONFIG
+        raise DailyWorkflowConfigError(
+            f"Daily workflow config is missing: {path}. "
+            f"Restore or create config/{DAILY_WORKFLOW_CONFIG} before running the daily workflow."
+        )
     try:
         loaded = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
     except yaml.YAMLError as exc:

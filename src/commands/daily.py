@@ -6,7 +6,7 @@ from pathlib import Path
 
 import click
 
-from src.tools.run_update_daily import RunDailyUpdateLockError, StateFileError, run_daily_update
+from src.tools.run_update_daily import DailyWorkflowConfigError, RunDailyUpdateLockError, StateFileError, run_daily_update
 from src.utils import paths
 
 
@@ -54,6 +54,8 @@ def register_daily_commands(root: click.Group) -> None:
         except StateFileError as exc:
             raise click.ClickException(str(exc)) from exc
         except RunDailyUpdateLockError as exc:
+            raise click.ClickException(str(exc)) from exc
+        except DailyWorkflowConfigError as exc:
             raise click.ClickException(str(exc)) from exc
         except ValueError as exc:
             raise click.BadParameter(str(exc)) from exc

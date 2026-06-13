@@ -5,6 +5,7 @@ from click.testing import CliRunner
 import src.cli as cli_module
 import src.commands.akshare as akshare_commands
 import src.commands.baostock as baostock_commands
+import src.commands.daily as daily_commands
 import src.commands.qlib as qlib_commands
 from src.utils.logging import logger
 
@@ -26,6 +27,18 @@ def test_cli_help_exposes_core_commands_and_not_registry_server() -> None:
     ]:
         assert command in result.output
     assert "serve-registry" not in result.output
+
+
+def test_run_update_daily_cli_reports_missing_workflow_config(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(daily_commands.paths, "ROOT", tmp_path)
+
+    result = CliRunner().invoke(cli_module.cli, ["run-update-daily"])
+
+    assert result.exit_code != 0
+    assert "Error:" in result.output
+    assert "config" in result.output
+    assert "daily_workflow.yaml" in result.output
+    assert "Traceback" not in result.output
 
 
 def test_update_daily_full_cli_passes_explicit_provider(monkeypatch) -> None:
