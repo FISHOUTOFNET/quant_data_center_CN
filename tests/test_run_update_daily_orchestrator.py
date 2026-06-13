@@ -6,14 +6,88 @@ import sys
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
+import pandas as pd
 import pytest
 
+from src.storage.parquet_store import ParquetStore
 from src.tools import run_update_daily
 from src.utils.process_lock import acquire_process_lock
 
 
 def _state(path: Path) -> dict:
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _steps(path: Path, key: str) -> dict:
+    return _state(path)["runs"][key]["steps"]
+
+
+def _dependency_ids(step: run_update_daily.DailyStep) -> tuple[str, ...]:
+    return tuple(run_update_daily._dependency_step_id(dependency) for dependency in step.depends_on)
+
+
+def _write_settings(root: Path) -> None:
+    config_dir = root / "config"
+    config_dir.mkdir(exist_ok=True)
+    (config_dir / "settings.yaml").write_text("project:\n  timezone: Asia/Shanghai\n", encoding="utf-8")
+
+
+def _write_minimal_workflow(root: Path, extra_steps: str = "") -> None:
+    config_dir = root / "config"
+    config_dir.mkdir(exist_ok=True)
+    (config_dir / "daily_workflow.yaml").write_text(
+        f"""
+steps:
+  - id: cleanup
+    name: cleanup
+    schedule_policy: daily
+    state_key_policy: run_instance
+    resume_policy: always_run
+    data_freshness_policy: maintenance
+    command: ["cmd"]
+  - id: market
+    name: market
+    schedule_policy: market_window
+    state_key_policy: market_date
+    resume_policy: skip_if_success
+    data_freshness_policy: market_session
+    command: ["cmd", "{{market_date}}", "{{hist_start}}"]
+  - id: financial
+    name: financial
+    schedule_policy: daily
+    state_key_policy: natural_date
+    resume_policy: skip_if_success
+    data_freshness_policy: natural_daily
+    command: ["cmd"]
+  - id: build-derived
+    name: build
+    schedule_policy: daily
+    state_key_policy: natural_date
+    resume_policy: skip_if_success
+    data_freshness_policy: natural_daily
+    command: ["cmd"]
+    depends_on:
+      - step: market
+        state_key_policy: market_date
+      - step: financial
+        state_key_policy: natural_date
+{extra_steps}
+""".lstrip(),
+        encoding="utf-8",
+    )
+
+
+def _write_calendar(root: Path, rows: list[tuple[str, str]]) -> None:
+    _write_settings(root)
+    store = ParquetStore(root=root)
+    store.ensure_layout()
+    try:
+        store.write_dataset(
+            "baostock_cn_trading_calendar",
+            pd.DataFrame([{"calendar_date": day, "is_trading_day": flag} for day, flag in rows]),
+        )
+    finally:
+        store.close()
 
 
 def test_orchestrator_resumes_after_successful_steps(tmp_path: Path) -> None:
@@ -55,9 +129,268 @@ def test_orchestrator_resumes_after_successful_steps(tmp_path: Path) -> None:
     )
 
     assert calls == []
-    states = _state(state_file)["runs"]["2026-06-05"]["steps"]
+    states = _steps(state_file, "natural_date:2026-06-05")
     assert states["calendar"]["status"] == "success"
     assert states["baostock-qfq"]["status"] == "success"
+
+
+def test_market_date_success_is_reused_on_weekend_and_holiday_monday(tmp_path: Path) -> None:
+    _write_minimal_workflow(tmp_path)
+    state_file = tmp_path / "state.json"
+    log_file = tmp_path / "run.log"
+    calls: list[str] = []
+
+    def runner(step: run_update_daily.DailyStep, log_path: Path) -> int:
+        del log_path
+        calls.append(step.id)
+        return 0
+
+    assert run_update_daily.run_daily_update(
+        root=tmp_path,
+        state_file=state_file,
+        run_log=log_file,
+        today=date(2026, 6, 12),
+        as_of_date="2026-06-12",
+        market_date="2026-06-12",
+        now=lambda: datetime(2026, 6, 12, 18, 0),
+        command_runner=runner,
+    ) == 0
+    assert "market" in calls
+    assert _steps(state_file, "market_date:2026-06-12")["market"]["status"] == "success"
+
+    calls.clear()
+    assert run_update_daily.run_daily_update(
+        root=tmp_path,
+        state_file=state_file,
+        run_log=log_file,
+        today=date(2026, 6, 13),
+        as_of_date="2026-06-13",
+        market_date="2026-06-12",
+        now=lambda: datetime(2026, 6, 13, 18, 0),
+        command_runner=runner,
+    ) == 0
+    assert "market" not in calls
+    assert "financial" in calls
+    assert _steps(state_file, "natural_date:2026-06-13")["financial"]["status"] == "success"
+
+    calls.clear()
+    assert run_update_daily.run_daily_update(
+        root=tmp_path,
+        state_file=state_file,
+        run_log=log_file,
+        today=date(2026, 6, 14),
+        as_of_date="2026-06-14",
+        market_date="2026-06-12",
+        now=lambda: datetime(2026, 6, 14, 18, 0),
+        command_runner=runner,
+    ) == 0
+    assert "market" not in calls
+    assert "financial" in calls
+
+    calls.clear()
+    assert run_update_daily.run_daily_update(
+        root=tmp_path,
+        state_file=state_file,
+        run_log=log_file,
+        today=date(2026, 6, 15),
+        as_of_date="2026-06-15",
+        market_date="2026-06-12",
+        now=lambda: datetime(2026, 6, 15, 18, 0),
+        command_runner=runner,
+    ) == 0
+    assert "market" not in calls
+    assert "financial" in calls
+    assert _steps(state_file, "natural_date:2026-06-15")["build-derived"]["status"] == "success"
+
+
+def test_monday_cutoff_resolves_previous_or_current_market_date(tmp_path: Path) -> None:
+    _write_minimal_workflow(tmp_path)
+    _write_calendar(
+        tmp_path,
+        [
+            ("2026-06-05", "1"),
+            ("2026-06-06", "0"),
+            ("2026-06-07", "0"),
+            ("2026-06-08", "1"),
+        ],
+    )
+    state_file = tmp_path / "state.json"
+    log_file = tmp_path / "run.log"
+    calls: list[str] = []
+
+    assert run_update_daily.run_daily_update(
+        root=tmp_path,
+        state_file=state_file,
+        run_log=log_file,
+        today=date(2026, 6, 5),
+        as_of_date="2026-06-05",
+        market_date="2026-06-05",
+        now=lambda: datetime(2026, 6, 5, 18, 0),
+        command_runner=lambda step, log_path: calls.append(step.id) or 0,
+    ) == 0
+    calls.clear()
+
+    assert run_update_daily.run_daily_update(
+        root=tmp_path,
+        state_file=state_file,
+        run_log=log_file,
+        today=date(2026, 6, 8),
+        now=lambda: datetime(2026, 6, 8, 17, 59),
+        command_runner=lambda step, log_path: calls.append(step.id) or 0,
+    ) == 0
+    assert "market" not in calls
+
+    calls.clear()
+    assert run_update_daily.run_daily_update(
+        root=tmp_path,
+        state_file=state_file,
+        run_log=log_file,
+        today=date(2026, 6, 8),
+        now=lambda: datetime(2026, 6, 8, 18, 0),
+        command_runner=lambda step, log_path: calls.append(step.id) or 0,
+    ) == 0
+    assert "market" in calls
+    assert _steps(state_file, "market_date:2026-06-08")["market"]["status"] == "success"
+
+
+def test_build_derived_depends_on_market_and_natural_state_keys(tmp_path: Path) -> None:
+    _write_minimal_workflow(tmp_path)
+    state_file = tmp_path / "state.json"
+    state_file.write_text(
+        json.dumps(
+            {
+                "version": 2,
+                "runs": {
+                    "market_date:2026-06-12": {"steps": {"market": {"status": "success"}}},
+                    "natural_date:2026-06-13": {"steps": {"financial": {"status": "success"}}},
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    calls: list[str] = []
+
+    assert run_update_daily.run_daily_update(
+        root=tmp_path,
+        state_file=state_file,
+        run_log=tmp_path / "run.log",
+        today=date(2026, 6, 13),
+        as_of_date="2026-06-13",
+        market_date="2026-06-12",
+        start_at="build-derived",
+        command_runner=lambda step, log_path: calls.append(step.id) or 0,
+    ) == 0
+
+    assert calls == ["build-derived"]
+    assert _steps(state_file, "natural_date:2026-06-13")["build-derived"]["status"] == "success"
+
+
+def test_always_run_policy_reruns_successful_step(tmp_path: Path) -> None:
+    _write_minimal_workflow(tmp_path)
+    calls: list[str] = []
+    kwargs = {
+        "root": tmp_path,
+        "state_file": tmp_path / "state.json",
+        "run_log": tmp_path / "run.log",
+        "today": date(2026, 6, 13),
+        "as_of_date": "2026-06-13",
+        "market_date": "2026-06-12",
+        "now": lambda: datetime(2026, 6, 13, 18, 0),
+        "command_runner": lambda step, log_path: calls.append(step.id) or 0,
+    }
+
+    assert run_update_daily.run_daily_update(**kwargs) == 0
+    assert run_update_daily.run_daily_update(**kwargs) == 0
+
+    assert calls.count("cleanup") == 2
+    assert calls.count("market") == 1
+
+
+def test_force_reruns_successful_market_date_step(tmp_path: Path) -> None:
+    _write_minimal_workflow(tmp_path)
+    state_file = tmp_path / "state.json"
+    state_file.write_text(
+        json.dumps({"version": 2, "runs": {"market_date:2026-06-12": {"steps": {"market": {"status": "success"}}}}}),
+        encoding="utf-8",
+    )
+    calls: list[str] = []
+
+    assert run_update_daily.run_daily_update(
+        root=tmp_path,
+        state_file=state_file,
+        run_log=tmp_path / "run.log",
+        today=date(2026, 6, 13),
+        as_of_date="2026-06-13",
+        market_date="2026-06-12",
+        force=True,
+        command_runner=lambda step, log_path: calls.append(step.id) or 0,
+    ) == 0
+
+    assert "market" in calls
+
+
+def test_legacy_natural_date_state_is_recognized_for_skip(tmp_path: Path) -> None:
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    (config_dir / "daily_workflow.yaml").write_text(
+        """
+steps:
+  - id: financial
+    name: financial
+    schedule_policy: daily
+    state_key_policy: natural_date
+    resume_policy: skip_if_success
+    data_freshness_policy: natural_daily
+    command: ["cmd"]
+""".lstrip(),
+        encoding="utf-8",
+    )
+    state_file = tmp_path / "state.json"
+    state_file.write_text(
+        json.dumps({"runs": {"2026-06-13": {"steps": {"financial": {"status": "success"}}}}}),
+        encoding="utf-8",
+    )
+    calls: list[str] = []
+
+    assert run_update_daily.run_daily_update(
+        root=tmp_path,
+        state_file=state_file,
+        run_log=tmp_path / "run.log",
+        today=date(2026, 6, 13),
+        as_of_date="2026-06-13",
+        market_date="2026-06-12",
+        command_runner=lambda step, log_path: calls.append(step.id) or 0,
+    ) == 0
+
+    assert calls == []
+    assert _state(state_file)["version"] == 2
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("schedule_policy", "sometimes"),
+        ("state_key_policy", "business_date"),
+        ("resume_policy", "maybe_skip"),
+        ("data_freshness_policy", "stale"),
+    ],
+)
+def test_daily_workflow_config_rejects_invalid_policy(tmp_path: Path, field: str, value: str) -> None:
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    (config_dir / "daily_workflow.yaml").write_text(
+        f"""
+steps:
+  - id: broken
+    name: broken
+    {field}: {value}
+    command: ["cmd"]
+""".lstrip(),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(run_update_daily.DailyWorkflowConfigError, match=field):
+        run_update_daily.daily_steps(date(2026, 6, 13), root=tmp_path)
 
 
 def test_orchestrator_continues_independent_steps_and_blocks_dependents(tmp_path: Path) -> None:
@@ -95,7 +428,7 @@ def test_orchestrator_continues_independent_steps_and_blocks_dependents(tmp_path
 
     assert result == 7
     assert calls == ["independent", "source"]
-    states = _state(state_file)["runs"]["2026-06-05"]["steps"]
+    states = _steps(state_file, "natural_date:2026-06-05")
     assert states["independent"]["status"] == "success"
     assert states["source"]["status"] == "failed"
     assert states["dependent"]["status"] == "blocked"
@@ -129,7 +462,7 @@ def test_orchestrator_retries_failed_and_unblocks_dependents(tmp_path: Path, mon
         == 7
     )
     assert calls == ["source"]
-    states = _state(state_file)["runs"]["2026-06-05"]["steps"]
+    states = _steps(state_file, "natural_date:2026-06-05")
     assert states["source"]["status"] == "failed"
     assert states["dependent"]["status"] == "blocked"
 
@@ -146,7 +479,7 @@ def test_orchestrator_retries_failed_and_unblocks_dependents(tmp_path: Path, mon
         == 0
     )
     assert calls == ["source", "dependent"]
-    states = _state(state_file)["runs"]["2026-06-05"]["steps"]
+    states = _steps(state_file, "natural_date:2026-06-05")
     assert states["source"]["status"] == "success"
     assert states["dependent"]["status"] == "success"
 
@@ -202,15 +535,15 @@ def test_orchestrator_force_and_start_at_control_resume(tmp_path: Path) -> None:
     assert "calendar" not in calls
 
 
-def test_orchestrator_weekend_window_filters_heavy_steps(tmp_path: Path) -> None:
+def test_orchestrator_market_window_keeps_market_steps_schedulable() -> None:
     friday = [step.id for step in run_update_daily.daily_steps(date(2026, 6, 5))]
     monday = [step.id for step in run_update_daily.daily_steps(date(2026, 6, 8))]
 
     assert "baostock-qfq" in friday
     assert "akshare-valuation-full" in friday
     assert "akshare-yjyg-em" in friday
-    assert "baostock-qfq" not in monday
-    assert "akshare-valuation-full" not in monday
+    assert "baostock-qfq" in monday
+    assert "akshare-valuation-full" in monday
     assert "akshare-yjyg-em" in monday
     assert "financial-report" in monday
 
@@ -247,27 +580,21 @@ def test_daily_steps_build_derived_all_before_views(today: date) -> None:
     assert "build-security-master" not in by_id
     assert steps.index(by_id["financial-report"]) < steps.index(by_id["build-derived"])
     assert steps.index(by_id["build-derived"]) < steps.index(by_id["build-duckdb-views"])
-    assert by_id["build-derived"].depends_on == (
+    assert _dependency_ids(by_id["build-derived"]) == (
         "akshare-spot-quote",
         "baostock-unadjusted",
         "baostock-basic",
         "baostock-valuation-percentile",
         "financial-report",
-        *(
-            (
-                "akshare-delist",
-                "baostock-adjustment-factor",
-                "baostock-qfq",
-                "baostock-hfq",
-                "akshare-valuation-full",
-                "akshare-daily-bar",
-                "sync-qlib",
-            )
-            if today.weekday() in {4, 5, 6}
-            else ()
-        ),
+        "akshare-delist",
+        "baostock-adjustment-factor",
+        "baostock-qfq",
+        "baostock-hfq",
+        "akshare-valuation-full",
+        "akshare-daily-bar",
+        "sync-qlib",
     )
-    assert by_id["build-duckdb-views"].depends_on == ("build-derived",)
+    assert _dependency_ids(by_id["build-duckdb-views"]) == ("build-derived",)
     assert by_id["build-derived"].command[1:] == (
         "-m",
         "src.cli",
@@ -284,7 +611,8 @@ def test_daily_steps_load_weekday_steps_from_config() -> None:
     steps = run_update_daily.daily_steps(date(2026, 6, 8), root=Path(__file__).resolve().parents[1])
     by_id = {step.id: step for step in steps}
 
-    assert "baostock-qfq" not in by_id
+    assert by_id["baostock-qfq"].schedule_policy == "market_window"
+    assert by_id["baostock-qfq"].state_key_policy == "market_date"
     assert by_id["build-derived"].command[1:] == (
         "-m",
         "src.cli",
@@ -302,8 +630,10 @@ def test_daily_steps_load_weekend_steps_from_config() -> None:
     by_id = {step.id: step for step in steps}
 
     assert "baostock-qfq" in by_id
-    assert by_id["akshare-daily-bar"].command[-3:] == ("--start", "2026-05-07", "--no-build-duckdb-views")
-    assert "akshare-valuation-full" in by_id["build-derived"].depends_on
+    assert "--start" in by_id["akshare-daily-bar"].command
+    assert "2026-05-07" in by_id["akshare-daily-bar"].command
+    assert "--end" in by_id["akshare-daily-bar"].command
+    assert "akshare-valuation-full" in _dependency_ids(by_id["build-derived"])
 
 
 def test_daily_workflow_config_missing_required_field_is_clear(tmp_path: Path) -> None:
@@ -332,7 +662,7 @@ def test_run_daily_update_records_yjyg_em_step_on_weekday(tmp_path: Path) -> Non
     )
 
     assert "akshare-yjyg-em" in calls
-    states = _state(state_file)["runs"]["2026-06-08"]["steps"]
+    states = _steps(state_file, "natural_date:2026-06-08")
     assert states["akshare-yjyg-em"]["status"] == "success"
 
 
@@ -354,7 +684,7 @@ def test_core_baostock_failure_blocks_build_derived(tmp_path: Path, failed_step:
     )
 
     assert "build-derived" not in calls
-    states = _state(state_file)["runs"]["2026-06-08"]["steps"]
+    states = _steps(state_file, "natural_date:2026-06-08")
     assert states["build-derived"]["status"] == "blocked"
     assert failed_step in states["build-derived"]["blocked_by"]
 
@@ -376,7 +706,7 @@ def test_weekend_daily_bar_failure_blocks_build_derived(tmp_path: Path) -> None:
     )
 
     assert "build-derived" not in calls
-    states = _state(state_file)["runs"]["2026-06-06"]["steps"]
+    states = _steps(state_file, "natural_date:2026-06-06")
     assert states["build-derived"]["status"] == "blocked"
     assert states["build-derived"]["blocked_by"] == ["akshare-daily-bar"]
 
@@ -400,7 +730,7 @@ def test_optional_plain_skipped_does_not_block_build_derived(tmp_path: Path) -> 
     )
 
     assert "build-derived" in calls
-    states = _state(state_file)["runs"]["2026-06-08"]["steps"]
+    states = _steps(state_file, "natural_date:2026-06-08")
     assert states["akshare-spot-quote"]["status"] == "skipped"
     assert states["build-derived"]["status"] == "success"
 
@@ -441,7 +771,7 @@ def test_weekend_akshare_valuation_failure_blocks_build_derived(tmp_path: Path) 
     assert "financial-report" in calls
     assert "build-derived" not in calls
     assert "build-duckdb-views" not in calls
-    states = _state(state_file)["runs"]["2026-06-06"]["steps"]
+    states = _steps(state_file, "natural_date:2026-06-06")
     assert states["akshare-valuation-full"]["status"] == "failed"
     assert states["akshare-report-disclosure"]["status"] == "success"
     assert states["akshare-yysj-em"]["status"] == "success"
@@ -552,7 +882,10 @@ def test_write_state_is_atomic_json_and_cleans_temp_files(tmp_path: Path) -> Non
 
     run_update_daily._write_state(state_file, {"runs": {"2026-06-12": {"步骤": "成功"}}})
 
-    assert json.loads(state_file.read_text(encoding="utf-8")) == {"runs": {"2026-06-12": {"步骤": "成功"}}}
+    assert json.loads(state_file.read_text(encoding="utf-8")) == {
+        "version": 2,
+        "runs": {"2026-06-12": {"步骤": "成功"}},
+    }
     assert list(tmp_path.glob(".state.json.*.tmp")) == []
 
 
@@ -611,7 +944,7 @@ def test_abandoned_dependency_blocks_until_retried_successfully(
     )
 
     assert calls == ["source", "dependent"]
-    states = _state(state_file)["runs"]["2026-06-08"]["steps"]
+    states = _steps(state_file, "natural_date:2026-06-08")
     assert states["source"]["status"] == "success"
     assert states["dependent"]["status"] == "success"
 
@@ -710,7 +1043,7 @@ def test_orchestrator_optional_step_timeout_is_skipped_and_continues(
     )
 
     assert calls == ["optional-timeout", "after-timeout"]
-    states = _state(state_file)["runs"]["2026-06-08"]["steps"]
+    states = _steps(state_file, "natural_date:2026-06-08")
     assert states["optional-timeout"]["status"] == "skipped_timeout"
     assert states["after-timeout"]["status"] == "success"
 
@@ -750,7 +1083,7 @@ def test_orchestrator_optional_step_timeout_stops_when_duckdb_is_locked(
     )
 
     assert calls == ["optional-timeout"]
-    states = _state(state_file)["runs"]["2026-06-08"]["steps"]
+    states = _steps(state_file, "natural_date:2026-06-08")
     assert states["optional-timeout"]["status"] == "failed_resource_locked"
     assert "after-timeout" not in states
 
@@ -792,7 +1125,7 @@ def test_orchestrator_required_step_timeout_fails_and_continues_independent_step
     )
 
     assert calls == ["required-timeout", "after-timeout"]
-    states = _state(state_file)["runs"]["2026-06-08"]["steps"]
+    states = _steps(state_file, "natural_date:2026-06-08")
     assert states["required-timeout"]["status"] == "failed"
     assert states["after-timeout"]["status"] == "success"
 
@@ -900,6 +1233,6 @@ def test_orchestrator_optional_timeout_cleanup_failure_stops(tmp_path: Path, mon
     )
 
     assert calls == ["optional-timeout"]
-    states = _state(state_file)["runs"]["2026-06-08"]["steps"]
+    states = _steps(state_file, "natural_date:2026-06-08")
     assert states["optional-timeout"]["status"] == "failed_timeout_cleanup"
     assert "after-timeout" not in states

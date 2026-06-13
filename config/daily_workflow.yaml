@@ -1,77 +1,146 @@
 steps:
   - id: cleanup
     name: cleanup expired logs
+    schedule_policy: daily
+    state_key_policy: run_instance
+    resume_policy: always_run
+    data_freshness_policy: maintenance
     command: ["{python}", "-m", "src.tools.log_cleanup", "--retention-days", "30"]
     optional: true
 
   - id: calendar
     name: update-baostock-daily calendar
-    command: ["{qdc}", "update-baostock-daily", "--dataset", "baostock_cn_trading_calendar", "--no-build-duckdb-views"]
+    schedule_policy: daily
+    state_key_policy: natural_date
+    resume_policy: skip_if_success
+    data_freshness_policy: market_session
+    command:
+      - "{qdc}"
+      - update-baostock-daily
+      - "--dataset"
+      - baostock_cn_trading_calendar
+      - "--end"
+      - "{candidate_date}"
+      - "--no-build-duckdb-views"
 
   - id: akshare-delist
     name: akshare update delist
-    when: [friday_to_sunday]
-    command: ["{qdc}", "akshare", "update", "--target", "delist", "--no-build-duckdb-views"]
+    schedule_policy: market_window
+    state_key_policy: market_date
+    resume_policy: skip_if_success
+    data_freshness_policy: market_session
+    command: ["{qdc}", "akshare", "update", "--target", "delist", "--end", "{market_date}", "--no-build-duckdb-views"]
 
   - id: akshare-spot-quote
     name: akshare update spot_quote
-    command: ["{qdc}", "akshare", "update", "--target", "spot_quote", "--no-build-duckdb-views"]
+    schedule_policy: market_window
+    state_key_policy: market_date
+    resume_policy: skip_if_success
+    data_freshness_policy: market_session
+    command: ["{qdc}", "akshare", "update", "--target", "spot_quote", "--end", "{market_date}", "--no-build-duckdb-views"]
     optional: true
 
   - id: baostock-unadjusted
     name: update-baostock-daily unadjusted
-    command: ["{qdc}", "update-baostock-daily", "--dataset", "baostock_cn_stock_daily_bar_unadjusted", "--no-build-duckdb-views"]
+    schedule_policy: market_window
+    state_key_policy: market_date
+    resume_policy: skip_if_success
+    data_freshness_policy: market_session
+    command: ["{qdc}", "update-baostock-daily", "--dataset", "baostock_cn_stock_daily_bar_unadjusted", "--end", "{market_date}", "--no-build-duckdb-views"]
 
   - id: baostock-basic
     name: update-baostock-daily stock basic
-    command: ["{qdc}", "update-baostock-daily", "--dataset", "baostock_cn_stock_basic", "--no-build-duckdb-views"]
+    schedule_policy: market_window
+    state_key_policy: market_date
+    resume_policy: skip_if_success
+    data_freshness_policy: market_session
+    command: ["{qdc}", "update-baostock-daily", "--dataset", "baostock_cn_stock_basic", "--end", "{market_date}", "--no-build-duckdb-views"]
 
   - id: baostock-valuation-percentile
     name: update-baostock-valuation-percentile
+    schedule_policy: market_window
+    state_key_policy: market_date
+    resume_policy: skip_if_success
+    data_freshness_policy: market_session
     command: ["{qdc}", "update-baostock-valuation-percentile", "--no-build-duckdb-views"]
-    depends_on: [baostock-unadjusted]
+    depends_on:
+      - step: baostock-unadjusted
+        state_key_policy: market_date
 
   - id: akshare-yjyg-em
     name: akshare update yjyg_em incremental
+    schedule_policy: daily
+    state_key_policy: natural_date
+    resume_policy: skip_if_success
+    data_freshness_policy: natural_daily
     command: ["{qdc}", "akshare", "update", "--target", "yjyg_em", "--mode", "incremental", "--no-build-duckdb-views"]
     optional: true
     timeout_seconds: 900
 
   - id: baostock-adjustment-factor
     name: update-baostock-daily adjustment factor
-    when: [friday_to_sunday]
-    command: ["{qdc}", "update-baostock-daily", "--dataset", "baostock_cn_stock_adjustment_factor", "--no-build-duckdb-views"]
+    schedule_policy: market_window
+    state_key_policy: market_date
+    resume_policy: skip_if_success
+    data_freshness_policy: market_session
+    command: ["{qdc}", "update-baostock-daily", "--dataset", "baostock_cn_stock_adjustment_factor", "--end", "{market_date}", "--no-build-duckdb-views"]
 
   - id: baostock-qfq
     name: update-baostock-daily qfq
-    when: [friday_to_sunday]
-    command: ["{qdc}", "update-baostock-daily", "--dataset", "baostock_cn_stock_daily_bar_qfq", "--no-build-duckdb-views"]
-    depends_on: [baostock-unadjusted, baostock-adjustment-factor]
+    schedule_policy: market_window
+    state_key_policy: market_date
+    resume_policy: skip_if_success
+    data_freshness_policy: market_session
+    command: ["{qdc}", "update-baostock-daily", "--dataset", "baostock_cn_stock_daily_bar_qfq", "--end", "{market_date}", "--no-build-duckdb-views"]
+    depends_on:
+      - step: baostock-unadjusted
+        state_key_policy: market_date
+      - step: baostock-adjustment-factor
+        state_key_policy: market_date
 
   - id: baostock-hfq
     name: update-baostock-daily hfq
-    when: [friday_to_sunday]
-    command: ["{qdc}", "update-baostock-daily", "--dataset", "baostock_cn_stock_daily_bar_hfq", "--no-build-duckdb-views"]
-    depends_on: [baostock-unadjusted, baostock-adjustment-factor]
+    schedule_policy: market_window
+    state_key_policy: market_date
+    resume_policy: skip_if_success
+    data_freshness_policy: market_session
+    command: ["{qdc}", "update-baostock-daily", "--dataset", "baostock_cn_stock_daily_bar_hfq", "--end", "{market_date}", "--no-build-duckdb-views"]
+    depends_on:
+      - step: baostock-unadjusted
+        state_key_policy: market_date
+      - step: baostock-adjustment-factor
+        state_key_policy: market_date
 
   - id: akshare-valuation-full
     name: akshare update valuation full
-    when: [friday_to_sunday]
-    command: ["{qdc}", "akshare", "update", "--target", "valuation", "--mode", "full", "--no-build-duckdb-views"]
+    schedule_policy: market_window
+    state_key_policy: market_date
+    resume_policy: skip_if_success
+    data_freshness_policy: market_session
+    command: ["{qdc}", "akshare", "update", "--target", "valuation", "--mode", "full", "--end", "{market_date}", "--no-build-duckdb-views"]
 
   - id: akshare-report-disclosure
     name: akshare update report_disclosure
-    when: [friday_to_sunday]
+    schedule_policy: daily
+    state_key_policy: natural_date
+    resume_policy: skip_if_success
+    data_freshness_policy: natural_daily
     command: ["{qdc}", "akshare", "update", "--target", "report_disclosure", "--no-build-duckdb-views"]
 
   - id: akshare-yysj-em
     name: akshare update yysj_em
-    when: [friday_to_sunday]
+    schedule_policy: daily
+    state_key_policy: natural_date
+    resume_policy: skip_if_success
+    data_freshness_policy: natural_daily
     command: ["{qdc}", "akshare", "update", "--target", "yysj_em", "--no-build-duckdb-views"]
 
   - id: akshare-daily-bar
     name: akshare update daily_bar incremental all from {hist_start}
-    when: [friday_to_sunday]
+    schedule_policy: market_window
+    state_key_policy: market_date
+    resume_policy: skip_if_success
+    data_freshness_policy: market_session
     command:
       - "{qdc}"
       - akshare
@@ -84,35 +153,66 @@ steps:
       - all
       - "--start"
       - "{hist_start}"
+      - "--end"
+      - "{market_date}"
       - "--no-build-duckdb-views"
 
   - id: sync-qlib
     name: sync-qlib
-    when: [friday_to_sunday]
-    command: ["{qdc}", "sync-qlib", "--no-build-duckdb-views", "--max-runtime-seconds", "7200"]
+    schedule_policy: market_window
+    state_key_policy: market_date
+    resume_policy: skip_if_success
+    data_freshness_policy: market_session
+    command: ["{qdc}", "sync-qlib", "--target-date", "{market_date}", "--allow-weekday", "--no-build-duckdb-views", "--max-runtime-seconds", "7200"]
 
   - id: financial-report
     name: akshare update financial_report incremental
+    schedule_policy: daily
+    state_key_policy: natural_date
+    resume_policy: skip_if_success
+    data_freshness_policy: natural_daily
     command: ["{qdc}", "akshare", "update", "--target", "financial_report", "--mode", "incremental", "--no-build-duckdb-views"]
 
   - id: build-derived
     name: build canonical derived datasets
+    schedule_policy: daily
+    state_key_policy: natural_date
+    resume_policy: skip_if_success
+    data_freshness_policy: natural_daily
     command: ["{qdc}", "build-derived", "--target", "all", "--mode", "incremental", "--no-build-duckdb-views"]
     depends_on:
-      - akshare-spot-quote
-      - baostock-unadjusted
-      - baostock-basic
-      - baostock-valuation-percentile
-      - financial-report
-      - akshare-delist
-      - baostock-adjustment-factor
-      - baostock-qfq
-      - baostock-hfq
-      - akshare-valuation-full
-      - akshare-daily-bar
-      - sync-qlib
+      - step: akshare-spot-quote
+        state_key_policy: market_date
+      - step: baostock-unadjusted
+        state_key_policy: market_date
+      - step: baostock-basic
+        state_key_policy: market_date
+      - step: baostock-valuation-percentile
+        state_key_policy: market_date
+      - step: financial-report
+        state_key_policy: natural_date
+      - step: akshare-delist
+        state_key_policy: market_date
+      - step: baostock-adjustment-factor
+        state_key_policy: market_date
+      - step: baostock-qfq
+        state_key_policy: market_date
+      - step: baostock-hfq
+        state_key_policy: market_date
+      - step: akshare-valuation-full
+        state_key_policy: market_date
+      - step: akshare-daily-bar
+        state_key_policy: market_date
+      - step: sync-qlib
+        state_key_policy: market_date
 
   - id: build-duckdb-views
     name: build-duckdb-views
+    schedule_policy: daily
+    state_key_policy: natural_date
+    resume_policy: skip_if_success
+    data_freshness_policy: natural_daily
     command: ["{qdc}", "build-duckdb-views"]
-    depends_on: [build-derived]
+    depends_on:
+      - step: build-derived
+        state_key_policy: natural_date

@@ -18,8 +18,17 @@ from typing import Any, TextIO
 
 import yaml
 
+from src.pipeline.common import (
+    baostock_cn_trading_calendar_covers_range,
+    baostock_cn_trading_calendar_fetch_start,
+    date_iso,
+    default_candidate_date,
+    latest_trading_day_on_or_before,
+)
 from src.storage.metadata_store import default_metadata_duckdb_file
+from src.storage.parquet_store import ParquetStore
 from src.utils import paths
+from src.utils.config_mgr import ConfigError, ConfigManager
 from src.utils.process_lock import ProcessLockError, acquire_process_lock, is_pid_alive
 
 
@@ -36,13 +45,32 @@ class DailyWorkflowConfigError(ValueError):
 
 
 @dataclass(frozen=True)
+class DailyEffectiveDates:
+    natural_date: date
+    candidate_date: date
+    market_date: date
+    hist_start: date
+    market_date_overridden: bool = False
+
+
+@dataclass(frozen=True)
+class DailyDependency:
+    step_id: str
+    state_key_policy: str | None = None
+
+
+@dataclass(frozen=True)
 class DailyStep:
     id: str
     name: str
     command: tuple[str, ...]
     optional: bool = False
     timeout_seconds: int | None = None
-    depends_on: tuple[str, ...] = ()
+    depends_on: tuple[DailyDependency | str, ...] = ()
+    schedule_policy: str = "daily"
+    state_key_policy: str = "natural_date"
+    resume_policy: str = "skip_if_success"
+    data_freshness_policy: str = "natural_daily"
 
     @property
     def command_text(self) -> str:
@@ -50,6 +78,12 @@ class DailyStep:
 
 
 CommandRunner = Callable[[DailyStep, Path], int]
+SCHEDULE_POLICIES = {"daily", "market_window", "legacy_when"}
+STATE_KEY_POLICIES = {"natural_date", "market_date", "run_instance"}
+RESUME_POLICIES = {"skip_if_success", "always_run"}
+DATA_FRESHNESS_POLICIES = {"market_session", "natural_daily", "disclosure_calendar", "maintenance"}
+FAILED_DEPENDENCY_STATUSES = {"failed", "failed_resource_locked", "failed_timeout_cleanup", "blocked", "abandoned"}
+SATISFIED_DEPENDENCY_STATUSES = {"success", "skipped", "skipped_checkpoint"}
 TIMEOUT_EXIT_CODE = 124
 TIMEOUT_CLEANUP_FAILED_EXIT_CODE = 125
 PROCESS_CLEANUP_WAIT_SECONDS = 30
@@ -273,17 +307,22 @@ DEFAULT_DAILY_WORKFLOW_CONFIG: dict[str, object] = {
 }
 
 
-def daily_steps(today: date | None = None, root: Path | None = None) -> list[DailyStep]:
+def daily_steps(
+    today: date | None = None,
+    root: Path | None = None,
+    effective_dates: DailyEffectiveDates | None = None,
+) -> list[DailyStep]:
     resolved_today = today or date.today()
+    resolved_effective_dates = effective_dates or _calendar_free_effective_dates(resolved_today)
     config = _load_daily_workflow_config((root or paths.ROOT).resolve())
-    return _steps_from_workflow_config(config, resolved_today)
+    return _steps_from_workflow_config(config, resolved_effective_dates)
 
 
-def _daily_steps_for_root(today: date, root: Path) -> list[DailyStep]:
+def _daily_steps_for_root(effective_dates: DailyEffectiveDates, root: Path) -> list[DailyStep]:
     try:
-        return daily_steps(today=today, root=root)
+        return daily_steps(today=effective_dates.natural_date, root=root, effective_dates=effective_dates)
     except TypeError:
-        return daily_steps(today)
+        return daily_steps(effective_dates.natural_date)
 
 
 def _load_daily_workflow_config(root: Path) -> dict[str, object]:
@@ -299,41 +338,66 @@ def _load_daily_workflow_config(root: Path) -> dict[str, object]:
     return loaded
 
 
-def _steps_from_workflow_config(config: dict[str, object], today: date) -> list[DailyStep]:
+def _steps_from_workflow_config(config: dict[str, object], effective_dates: DailyEffectiveDates) -> list[DailyStep]:
     raw_steps = config.get("steps")
     if not isinstance(raw_steps, list):
         raise DailyWorkflowConfigError("Daily workflow config missing required list field: steps")
 
-    context = _workflow_context(today)
+    context = _workflow_context(effective_dates)
     steps: list[DailyStep] = []
     for index, raw_step in enumerate(raw_steps):
         if not isinstance(raw_step, dict):
             raise DailyWorkflowConfigError(f"Daily workflow step #{index + 1} must be a mapping")
         if not bool(raw_step.get("enabled", True)):
             continue
-        if not _day_rule_matches(raw_step.get("when", ["all"]), today):
+        schedule_policy = _enum_value(
+            raw_step,
+            "schedule_policy",
+            "legacy_when" if "when" in raw_step else "daily",
+            SCHEDULE_POLICIES,
+            index,
+        )
+        if not _schedule_policy_matches(schedule_policy, raw_step.get("when", ["all"]), effective_dates):
             continue
         steps.append(_daily_step_from_config(raw_step, context, index))
 
     step_ids = {step.id for step in steps}
     return [
         DailyStep(
-            step.id,
-            step.name,
-            step.command,
+            id=step.id,
+            name=step.name,
+            command=step.command,
             optional=step.optional,
             timeout_seconds=step.timeout_seconds,
-            depends_on=tuple(dependency for dependency in step.depends_on if dependency in step_ids),
+            depends_on=tuple(
+                dependency for dependency in step.depends_on if _dependency_step_id(dependency) in step_ids
+            ),
+            schedule_policy=step.schedule_policy,
+            state_key_policy=step.state_key_policy,
+            resume_policy=step.resume_policy,
+            data_freshness_policy=step.data_freshness_policy,
         )
         for step in steps
     ]
 
 
-def _workflow_context(today: date) -> dict[str, str]:
+def _calendar_free_effective_dates(today: date) -> DailyEffectiveDates:
+    return DailyEffectiveDates(
+        natural_date=today,
+        candidate_date=today,
+        market_date=today,
+        hist_start=today - timedelta(days=30),
+    )
+
+
+def _workflow_context(effective_dates: DailyEffectiveDates) -> dict[str, str]:
     return {
         "python": sys.executable,
-        "today": today.isoformat(),
-        "hist_start": (today - timedelta(days=30)).isoformat(),
+        "today": effective_dates.natural_date.isoformat(),
+        "natural_date": effective_dates.natural_date.isoformat(),
+        "candidate_date": effective_dates.candidate_date.isoformat(),
+        "market_date": effective_dates.market_date.isoformat(),
+        "hist_start": effective_dates.hist_start.isoformat(),
     }
 
 
@@ -343,7 +407,23 @@ def _daily_step_from_config(raw_step: dict[str, object], context: dict[str, str]
     command = _render_command(raw_step.get("command"), context, step_id)
     optional = bool(raw_step.get("optional", False))
     timeout_seconds = _optional_timeout(raw_step.get("timeout_seconds"), step_id)
-    depends_on = _string_list(raw_step.get("depends_on", []), f"{step_id}.depends_on")
+    depends_on = _dependencies(raw_step.get("depends_on", []), step_id)
+    schedule_policy = _enum_value(
+        raw_step,
+        "schedule_policy",
+        "legacy_when" if "when" in raw_step else "daily",
+        SCHEDULE_POLICIES,
+        index,
+    )
+    state_key_policy = _enum_value(raw_step, "state_key_policy", "natural_date", STATE_KEY_POLICIES, index)
+    resume_policy = _enum_value(raw_step, "resume_policy", "skip_if_success", RESUME_POLICIES, index)
+    data_freshness_policy = _enum_value(
+        raw_step,
+        "data_freshness_policy",
+        "natural_daily",
+        DATA_FRESHNESS_POLICIES,
+        index,
+    )
     return DailyStep(
         id=step_id,
         name=name,
@@ -351,6 +431,10 @@ def _daily_step_from_config(raw_step: dict[str, object], context: dict[str, str]
         optional=optional,
         timeout_seconds=timeout_seconds,
         depends_on=tuple(depends_on),
+        schedule_policy=schedule_policy,
+        state_key_policy=state_key_policy,
+        resume_policy=resume_policy,
+        data_freshness_policy=data_freshness_policy,
     )
 
 
@@ -373,6 +457,71 @@ def _optional_timeout(value: object, step_id: str) -> int | None:
     if timeout <= 0:
         raise DailyWorkflowConfigError(f"Daily workflow step {step_id} timeout_seconds must be positive")
     return timeout
+
+
+def _enum_value(
+    raw_step: dict[str, object],
+    field: str,
+    default: str,
+    allowed: set[str],
+    index: int,
+) -> str:
+    value = raw_step.get(field, default)
+    step_label = str(raw_step.get("id", f"#{index + 1}"))
+    if not isinstance(value, str) or value.strip() not in allowed:
+        allowed_text = ", ".join(sorted(allowed))
+        raise DailyWorkflowConfigError(
+            f"Daily workflow step {step_label} has invalid {field}: {value!r}; allowed: {allowed_text}"
+        )
+    return value.strip()
+
+
+def _dependencies(value: object, step_id: str) -> list[DailyDependency]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        return [DailyDependency(value.strip())]
+    if not isinstance(value, list):
+        raise DailyWorkflowConfigError(
+            f"Daily workflow field {step_id}.depends_on must be a string, list of strings, or list of mappings"
+        )
+    output: list[DailyDependency] = []
+    for item in value:
+        if isinstance(item, str):
+            if not item.strip():
+                raise DailyWorkflowConfigError(f"Daily workflow field {step_id}.depends_on contains an empty step id")
+            output.append(DailyDependency(item.strip()))
+            continue
+        if isinstance(item, dict):
+            raw_dependency_step = item.get("step")
+            if not isinstance(raw_dependency_step, str) or not raw_dependency_step.strip():
+                raise DailyWorkflowConfigError(
+                    f"Daily workflow field {step_id}.depends_on mapping missing required string field: step"
+                )
+            raw_policy = item.get("state_key_policy")
+            if raw_policy is not None and (
+                not isinstance(raw_policy, str) or raw_policy.strip() not in STATE_KEY_POLICIES
+            ):
+                allowed_text = ", ".join(sorted(STATE_KEY_POLICIES))
+                raise DailyWorkflowConfigError(
+                    f"Daily workflow dependency {step_id}.{raw_dependency_step} has invalid "
+                    f"state_key_policy: {raw_policy!r}; allowed: {allowed_text}"
+                )
+            output.append(
+                DailyDependency(
+                    raw_dependency_step.strip(),
+                    raw_policy.strip() if isinstance(raw_policy, str) else None,
+                )
+            )
+            continue
+        raise DailyWorkflowConfigError(
+            f"Daily workflow field {step_id}.depends_on must contain only strings or mappings"
+        )
+    return output
+
+
+def _dependency_step_id(dependency: DailyDependency | str) -> str:
+    return dependency.step_id if isinstance(dependency, DailyDependency) else str(dependency)
 
 
 def _string_list(value: object, field_name: str) -> list[str]:
@@ -433,6 +582,103 @@ def _day_rule_matches(raw_rules: object, today: date) -> bool:
     return False
 
 
+def resolve_daily_effective_dates(
+    *,
+    root: Path,
+    today: date | None = None,
+    now: Callable[[], datetime] | None = None,
+    as_of_date: str | date | None = None,
+    market_date: str | date | None = None,
+) -> DailyEffectiveDates:
+    natural_date = today or date.today()
+    config = ConfigManager(root)
+    try:
+        if as_of_date is not None:
+            candidate = _parse_iso_date(as_of_date, "as_of_date")
+        else:
+            candidate = _parse_iso_date(default_candidate_date(config, (now or datetime.now)()), "candidate_date")
+    except ConfigError:
+        candidate = _parse_iso_date(as_of_date, "as_of_date") if as_of_date is not None else natural_date
+
+    if market_date is not None:
+        resolved_market = _parse_iso_date(market_date, "market_date")
+        if resolved_market > candidate:
+            raise ValueError(
+                f"market_date {resolved_market.isoformat()} must be on or before candidate_date {candidate.isoformat()}"
+            )
+        return DailyEffectiveDates(
+            natural_date=natural_date,
+            candidate_date=candidate,
+            market_date=resolved_market,
+            hist_start=resolved_market - timedelta(days=30),
+            market_date_overridden=True,
+        )
+
+    if not (config.config_dir / "settings.yaml").exists():
+        return DailyEffectiveDates(
+            natural_date=natural_date,
+            candidate_date=candidate,
+            market_date=candidate,
+            hist_start=candidate - timedelta(days=30),
+        )
+
+    store = ParquetStore(root=config.root)
+    store.ensure_layout()
+    try:
+        calendar = store.read_dataset("baostock_cn_trading_calendar")
+        if not baostock_cn_trading_calendar_covers_range(calendar, candidate, candidate):
+            _refresh_baostock_cn_trading_calendar(config.root, candidate)
+            calendar = store.read_dataset("baostock_cn_trading_calendar")
+        if not baostock_cn_trading_calendar_covers_range(calendar, candidate, candidate):
+            raise ValueError(
+                "baostock_cn_trading_calendar does not cover candidate_date "
+                f"{candidate.isoformat()} after preflight refresh"
+            )
+        resolved_market = _parse_iso_date(latest_trading_day_on_or_before(calendar, candidate), "market_date")
+    finally:
+        store.close()
+
+    return DailyEffectiveDates(
+        natural_date=natural_date,
+        candidate_date=candidate,
+        market_date=resolved_market,
+        hist_start=resolved_market - timedelta(days=30),
+    )
+
+
+def _refresh_baostock_cn_trading_calendar(root: Path, candidate: date) -> None:
+    from src.sources.baostock.update_daily import update_daily
+
+    update_daily(
+        dataset="baostock_cn_trading_calendar",
+        start=baostock_cn_trading_calendar_fetch_start(candidate.isoformat()),
+        end=candidate.isoformat(),
+        root=root,
+        build_views=False,
+        resume=True,
+        force=False,
+    )
+
+
+def _parse_iso_date(value: str | date, field_name: str) -> date:
+    try:
+        return datetime.strptime(date_iso(value), "%Y-%m-%d").date()
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"Invalid {field_name}: {value!r}; expected YYYY-MM-DD") from exc
+
+
+def _schedule_policy_matches(
+    schedule_policy: str,
+    raw_rules: object,
+    effective_dates: DailyEffectiveDates,
+) -> bool:
+    if schedule_policy in {"daily", "market_window"}:
+        return True
+    if schedule_policy == "legacy_when":
+        return _day_rule_matches(raw_rules, effective_dates.natural_date)
+    raise DailyWorkflowConfigError(f"Unsupported schedule_policy: {schedule_policy}")
+
+
 def run_daily_update(
     *,
     root: Path | None = None,
@@ -441,16 +687,26 @@ def run_daily_update(
     today: date | None = None,
     now: Callable[[], datetime] | None = None,
     force: bool = False,
+    ignore_state: bool = False,
     start_at: str | None = None,
+    as_of_date: str | date | None = None,
+    market_date: str | date | None = None,
     command_runner: CommandRunner | None = None,
 ) -> int:
     base = (root or Path.cwd()).resolve()
-    resolved_today = today or date.today()
-    run_key = resolved_today.isoformat()
+    effective_dates = resolve_daily_effective_dates(
+        root=base,
+        today=today,
+        now=now,
+        as_of_date=as_of_date,
+        market_date=market_date,
+    )
+    run_instance_key = f"run_instance:{(now or datetime.now)().strftime('%Y%m%d_%H%M%S')}"
     resolved_state_file = state_file or base / "data" / "metadata" / "run_update_daily_state.json"
     resolved_log = run_log or _default_run_log(base, now)
     runner = command_runner or (lambda step, log_path: _run_subprocess(step, log_path, base))
-    steps = _daily_steps_for_root(resolved_today, base)
+    steps = _daily_steps_for_root(effective_dates, base)
+    steps_by_id = {step.id: step for step in steps}
     step_ids = [step.id for step in steps]
 
     if start_at is not None and start_at not in step_ids:
@@ -462,7 +718,11 @@ def run_daily_update(
         lock_name="run-update-daily",
         purpose="run-update-daily",
         stale_after_seconds=RUN_UPDATE_DAILY_LOCK_STALE_AFTER_SECONDS,
-        extra_owner={"run_key": run_key},
+        extra_owner={
+            "natural_date": effective_dates.natural_date.isoformat(),
+            "candidate_date": effective_dates.candidate_date.isoformat(),
+            "market_date": effective_dates.market_date.isoformat(),
+        },
     )
     try:
         active_lock = lock_cm.__enter__()
@@ -471,16 +731,27 @@ def run_daily_update(
 
     exc_info: tuple[type[BaseException] | None, BaseException | None, object | None] = (None, None, None)
     try:
-        state = {"runs": {}} if force else _read_state(resolved_state_file)
-        run_state = state.setdefault("runs", {}).setdefault(run_key, {"steps": {}})
-        step_state = run_state.setdefault("steps", {})
+        state = _read_state_for_run(resolved_state_file, reset_if_corrupt=force)
+        state_needs_write = state.get("version") != 2
+        state["version"] = 2
+        state.setdefault("runs", {})
         resolved_log.parent.mkdir(parents=True, exist_ok=True)
-        if _mark_abandoned_running_steps(steps, step_state, resolved_log, now, active_lock.owner):
+        if _mark_abandoned_running_steps_by_key(
+            steps,
+            state,
+            effective_dates,
+            run_instance_key,
+            resolved_log,
+            now,
+            active_lock.owner,
+        ):
+            state_needs_write = False
             _write_state(resolved_state_file, state)
 
         start_seen = start_at is None
         failed_exit_code: int | None = None
         for step in steps:
+            step_state = _step_state_for_step(state, step, effective_dates, run_instance_key)
             if not start_seen:
                 if step.id == start_at:
                     start_seen = True
@@ -489,12 +760,33 @@ def run_daily_update(
                     _emit(resolved_log, now, f"Skipped {step.id} before start-at {start_at}", console=True)
                     continue
 
-            current_status = str(step_state.get(step.id, {}).get("status", "pending"))
-            if start_at is None and current_status == "success":
+            current_status = str(
+                _step_row_for_policy(
+                    state,
+                    step.id,
+                    step.state_key_policy,
+                    effective_dates,
+                    run_instance_key,
+                ).get("status", "pending")
+            )
+            should_skip_success = (
+                start_at is None
+                and not force
+                and not ignore_state
+                and step.resume_policy == "skip_if_success"
+                and current_status == "success"
+            )
+            if should_skip_success:
                 _emit(resolved_log, now, f"Skipped {step.id}; already successful", console=True)
                 continue
 
-            blocked_by = _blocked_dependencies(step, step_state)
+            blocked_by = _blocked_dependencies(
+                step,
+                state,
+                steps_by_id=steps_by_id,
+                effective_dates=effective_dates,
+                run_instance_key=run_instance_key,
+            )
             if blocked_by:
                 _record_step(step_state, step, "blocked", 1, resolved_log, now, blocked_by=blocked_by)
                 _write_state(resolved_state_file, state)
@@ -599,11 +891,19 @@ def run_daily_update(
             _record_step(step_state, step, "success", 0, resolved_log, now)
             _write_state(resolved_state_file, state)
 
-        final_exit_code = _final_exit_code(steps, step_state, failed_exit_code)
+        final_exit_code = _final_exit_code_for_state(
+            steps,
+            state,
+            effective_dates,
+            run_instance_key,
+            failed_exit_code,
+        )
         if final_exit_code == 0:
             _emit(resolved_log, now, "All updates completed successfully", console=True)
         else:
             _emit(resolved_log, now, f"Daily update completed with failures; exit code {final_exit_code}", console=True)
+        if state_needs_write:
+            _write_state(resolved_state_file, state)
         return final_exit_code
     except BaseException:
         exc_info = sys.exc_info()
@@ -739,17 +1039,29 @@ def _locked_duckdb_files(paths: tuple[Path, ...]) -> tuple[Path, ...]:
 
 def _read_state(path: Path) -> dict[str, Any]:
     if not path.exists():
-        return {"runs": {}}
+        return {"version": 2, "runs": {}}
     try:
         state = json.loads(path.read_text(encoding="utf-8"))
     except json.JSONDecodeError as exc:
         raise StateFileError(f"Daily update state file is corrupt: {path}. Re-run with --force to reset it.") from exc
     if not isinstance(state, dict):
         raise StateFileError(f"Daily update state file is invalid: {path}. Re-run with --force to reset it.")
+    if not isinstance(state.get("runs", {}), dict):
+        raise StateFileError(f"Daily update state file is invalid: {path}. Re-run with --force to reset it.")
     return state
 
 
+def _read_state_for_run(path: Path, *, reset_if_corrupt: bool) -> dict[str, Any]:
+    try:
+        return _read_state(path)
+    except StateFileError:
+        if not reset_if_corrupt:
+            raise
+        return {"version": 2, "runs": {}}
+
+
 def _write_state(path: Path, state: dict[str, Any]) -> None:
+    state["version"] = 2
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = json.dumps(state, ensure_ascii=False, indent=2, sort_keys=True)
     tmp_path = path.with_name(f".{path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
@@ -763,6 +1075,121 @@ def _write_state(path: Path, state: dict[str, Any]) -> None:
         if tmp_path.exists():
             with suppress(OSError):
                 tmp_path.unlink()
+
+
+def _state_key_for_policy(
+    policy: str,
+    effective_dates: DailyEffectiveDates,
+    run_instance_key: str,
+) -> str:
+    if policy == "natural_date":
+        return f"natural_date:{effective_dates.natural_date.isoformat()}"
+    if policy == "market_date":
+        return f"market_date:{effective_dates.market_date.isoformat()}"
+    if policy == "run_instance":
+        return run_instance_key
+    raise DailyWorkflowConfigError(f"Unsupported state_key_policy: {policy}")
+
+
+def _state_key_for_step(step: DailyStep, effective_dates: DailyEffectiveDates, run_instance_key: str) -> str:
+    return _state_key_for_policy(step.state_key_policy, effective_dates, run_instance_key)
+
+
+def _run_state_for_key(
+    state: dict[str, Any],
+    state_key: str,
+    *,
+    create: bool,
+) -> dict[str, Any]:
+    runs = state.setdefault("runs", {})
+    if not isinstance(runs, dict):
+        raise StateFileError("Daily update state file is invalid: runs must be a mapping")
+    run_state = runs.get(state_key)
+    if run_state is None and not create and state_key.startswith("natural_date:"):
+        legacy_key = state_key.split(":", 1)[1]
+        run_state = runs.get(legacy_key)
+    if run_state is None:
+        if not create:
+            return {"steps": {}}
+        run_state = {"steps": {}}
+        runs[state_key] = run_state
+    if not isinstance(run_state, dict):
+        if not create:
+            return {"steps": {}}
+        run_state = {"steps": {}}
+        runs[state_key] = run_state
+    run_state.setdefault("steps", {})
+    if not isinstance(run_state["steps"], dict):
+        if not create:
+            return {"steps": {}}
+        run_state["steps"] = {}
+    return run_state
+
+
+def _step_state_for_step(
+    state: dict[str, Any],
+    step: DailyStep,
+    effective_dates: DailyEffectiveDates,
+    run_instance_key: str,
+) -> dict[str, Any]:
+    state_key = _state_key_for_step(step, effective_dates, run_instance_key)
+    return _run_state_for_key(state, state_key, create=True).setdefault("steps", {})
+
+
+def _step_row_for_policy(
+    state: dict[str, Any],
+    step_id: str,
+    policy: str,
+    effective_dates: DailyEffectiveDates,
+    run_instance_key: str,
+) -> dict[str, Any]:
+    state_key = _state_key_for_policy(policy, effective_dates, run_instance_key)
+    run_state = _run_state_for_key(state, state_key, create=False)
+    steps = run_state.get("steps", {})
+    if not isinstance(steps, dict):
+        return {}
+    row = steps.get(step_id, {})
+    if isinstance(row, dict) and row:
+        return row
+    if policy == "natural_date":
+        legacy_key = effective_dates.natural_date.isoformat()
+        legacy_run_state = _run_state_for_key(state, legacy_key, create=False)
+        legacy_steps = legacy_run_state.get("steps", {})
+        if isinstance(legacy_steps, dict):
+            legacy_row = legacy_steps.get(step_id, {})
+            if isinstance(legacy_row, dict):
+                return legacy_row
+    return {}
+
+
+def _mark_abandoned_running_steps_by_key(
+    steps: list[DailyStep],
+    state: dict[str, Any],
+    effective_dates: DailyEffectiveDates,
+    run_instance_key: str,
+    log_path: Path,
+    now: Callable[[], datetime] | None,
+    active_lock_owner: dict[str, object],
+) -> bool:
+    changed = False
+    seen_state_keys: set[str] = set()
+    for step in steps:
+        state_key = _state_key_for_step(step, effective_dates, run_instance_key)
+        if state_key in seen_state_keys:
+            continue
+        seen_state_keys.add(state_key)
+        step_state = _run_state_for_key(state, state_key, create=True).setdefault("steps", {})
+        steps_for_key = [
+            item for item in steps if _state_key_for_step(item, effective_dates, run_instance_key) == state_key
+        ]
+        changed = _mark_abandoned_running_steps(
+            steps_for_key,
+            step_state,
+            log_path,
+            now,
+            active_lock_owner,
+        ) or changed
+    return changed
 
 
 def _record_step(
@@ -861,12 +1288,39 @@ def _parse_timestamp(value: object) -> datetime | None:
         return None
 
 
-def _blocked_dependencies(step: DailyStep, step_state: dict[str, Any]) -> tuple[str, ...]:
+def _blocked_dependencies(
+    step: DailyStep,
+    state_or_step_state: dict[str, Any],
+    *,
+    steps_by_id: dict[str, DailyStep] | None = None,
+    effective_dates: DailyEffectiveDates | None = None,
+    run_instance_key: str | None = None,
+) -> tuple[str, ...]:
     blocked: list[str] = []
     for dependency in step.depends_on:
-        dependency_status = str(step_state.get(dependency, {}).get("status", "pending"))
-        if dependency_status in {"failed", "failed_resource_locked", "failed_timeout_cleanup", "blocked", "abandoned"}:
-            blocked.append(dependency)
+        dependency_id = _dependency_step_id(dependency)
+        if steps_by_id is None or effective_dates is None or run_instance_key is None:
+            dependency_status = str(state_or_step_state.get(dependency_id, {}).get("status", "pending"))
+        else:
+            dependency_step = steps_by_id.get(dependency_id)
+            dependency_policy = (
+                dependency.state_key_policy
+                if isinstance(dependency, DailyDependency) and dependency.state_key_policy is not None
+                else dependency_step.state_key_policy
+                if dependency_step is not None
+                else "natural_date"
+            )
+            dependency_status = str(
+                _step_row_for_policy(
+                    state_or_step_state,
+                    dependency_id,
+                    dependency_policy,
+                    effective_dates,
+                    run_instance_key,
+                ).get("status", "pending")
+            )
+        if dependency_status in FAILED_DEPENDENCY_STATUSES or dependency_status not in SATISFIED_DEPENDENCY_STATUSES:
+            blocked.append(dependency_id)
     return tuple(blocked)
 
 
@@ -882,6 +1336,26 @@ def _final_exit_code(steps: list[DailyStep], step_state: dict[str, Any], failed_
         if str(step_state.get(step.id, {}).get("status")) == "blocked":
             return 1
     return 0
+
+
+def _final_exit_code_for_state(
+    steps: list[DailyStep],
+    state: dict[str, Any],
+    effective_dates: DailyEffectiveDates,
+    run_instance_key: str,
+    failed_exit_code: int | None,
+) -> int:
+    step_state = {
+        step.id: _step_row_for_policy(
+            state,
+            step.id,
+            step.state_key_policy,
+            effective_dates,
+            run_instance_key,
+        )
+        for step in steps
+    }
+    return _final_exit_code(steps, step_state, failed_exit_code)
 
 
 def _append_log(path: Path, text: str) -> None:
