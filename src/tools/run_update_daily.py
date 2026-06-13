@@ -672,8 +672,14 @@ def _schedule_policy_matches(
     raw_rules: object,
     effective_dates: DailyEffectiveDates,
 ) -> bool:
-    if schedule_policy in {"daily", "market_window"}:
+    if schedule_policy == "daily":
         return True
+    if schedule_policy == "market_window":
+        return (
+            effective_dates.natural_date.weekday() in {4, 5, 6}
+            or effective_dates.candidate_date != effective_dates.market_date
+            or effective_dates.market_date_overridden
+        )
     if schedule_policy == "legacy_when":
         return _day_rule_matches(raw_rules, effective_dates.natural_date)
     raise DailyWorkflowConfigError(f"Unsupported schedule_policy: {schedule_policy}")

@@ -33,7 +33,7 @@ steps:
 
   - id: akshare-spot-quote
     name: akshare update spot_quote
-    schedule_policy: market_window
+    schedule_policy: daily
     state_key_policy: market_date
     resume_policy: skip_if_success
     data_freshness_policy: market_session
@@ -42,7 +42,7 @@ steps:
 
   - id: baostock-unadjusted
     name: update-baostock-daily unadjusted
-    schedule_policy: market_window
+    schedule_policy: daily
     state_key_policy: market_date
     resume_policy: skip_if_success
     data_freshness_policy: market_session
@@ -50,7 +50,7 @@ steps:
 
   - id: baostock-basic
     name: update-baostock-daily stock basic
-    schedule_policy: market_window
+    schedule_policy: daily
     state_key_policy: market_date
     resume_policy: skip_if_success
     data_freshness_policy: market_session
@@ -58,7 +58,7 @@ steps:
 
   - id: baostock-valuation-percentile
     name: update-baostock-valuation-percentile
-    schedule_policy: market_window
+    schedule_policy: daily
     state_key_policy: market_date
     resume_policy: skip_if_success
     data_freshness_policy: market_session

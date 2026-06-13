@@ -77,6 +77,57 @@ steps:
     )
 
 
+def _write_market_heavy_workflow(root: Path, *, include_build: bool = True) -> None:
+    build_step = (
+        """
+  - id: build-derived
+    name: build
+    schedule_policy: daily
+    state_key_policy: natural_date
+    resume_policy: skip_if_success
+    data_freshness_policy: natural_daily
+    command: ["cmd", "build"]
+    depends_on:
+      - step: market-heavy
+        state_key_policy: market_date
+      - step: financial
+        state_key_policy: natural_date
+""".rstrip()
+        if include_build
+        else ""
+    )
+    config_dir = root / "config"
+    config_dir.mkdir(exist_ok=True)
+    (config_dir / "daily_workflow.yaml").write_text(
+        f"""
+steps:
+  - id: cleanup
+    name: cleanup
+    schedule_policy: daily
+    state_key_policy: run_instance
+    resume_policy: always_run
+    data_freshness_policy: maintenance
+    command: ["cmd", "cleanup"]
+  - id: market-heavy
+    name: market-heavy
+    schedule_policy: market_window
+    state_key_policy: market_date
+    resume_policy: skip_if_success
+    data_freshness_policy: market_session
+    command: ["cmd", "market-heavy", "--end", "{{market_date}}", "--start", "{{hist_start}}"]
+  - id: financial
+    name: financial
+    schedule_policy: daily
+    state_key_policy: natural_date
+    resume_policy: skip_if_success
+    data_freshness_policy: natural_daily
+    command: ["cmd", "financial"]
+{build_step}
+""".lstrip(),
+        encoding="utf-8",
+    )
+
+
 def _write_calendar(root: Path, rows: list[tuple[str, str]]) -> None:
     _write_settings(root)
     store = ParquetStore(root=root)
@@ -88,6 +139,258 @@ def _write_calendar(root: Path, rows: list[tuple[str, str]]) -> None:
         )
     finally:
         store.close()
+
+
+def test_weekday_after_cutoff_does_not_schedule_market_window_heavy_step(tmp_path: Path) -> None:
+    _write_market_heavy_workflow(tmp_path, include_build=False)
+    _write_calendar(tmp_path, [("2026-06-09", "1")])
+    calls: list[str] = []
+
+    assert run_update_daily.run_daily_update(
+        root=tmp_path,
+        state_file=tmp_path / "state.json",
+        run_log=tmp_path / "run.log",
+        today=date(2026, 6, 9),
+        now=lambda: datetime(2026, 6, 9, 18, 0),
+        command_runner=lambda step, log_path: calls.append(step.id) or 0,
+    ) == 0
+
+    assert "market-heavy" not in calls
+    assert "financial" in calls
+
+
+def test_friday_holiday_reuses_thursday_market_state_for_build_derived(tmp_path: Path) -> None:
+    _write_market_heavy_workflow(tmp_path)
+    _write_calendar(
+        tmp_path,
+        [
+            ("2026-06-11", "1"),
+            ("2026-06-12", "0"),
+            ("2026-06-13", "0"),
+            ("2026-06-14", "0"),
+        ],
+    )
+    state_file = tmp_path / "state.json"
+    calls: list[str] = []
+
+    assert run_update_daily.run_daily_update(
+        root=tmp_path,
+        state_file=state_file,
+        run_log=tmp_path / "run.log",
+        today=date(2026, 6, 11),
+        as_of_date="2026-06-11",
+        market_date="2026-06-11",
+        now=lambda: datetime(2026, 6, 11, 18, 0),
+        command_runner=lambda step, log_path: calls.append(step.id) or 0,
+    ) == 0
+    assert "market-heavy" in calls
+    assert _steps(state_file, "market_date:2026-06-11")["market-heavy"]["status"] == "success"
+
+    calls.clear()
+    effective_dates = run_update_daily.resolve_daily_effective_dates(
+        root=tmp_path,
+        today=date(2026, 6, 12),
+        as_of_date="2026-06-12",
+    )
+    assert effective_dates.market_date == date(2026, 6, 11)
+    assert run_update_daily.run_daily_update(
+        root=tmp_path,
+        state_file=state_file,
+        run_log=tmp_path / "run.log",
+        today=date(2026, 6, 12),
+        as_of_date="2026-06-12",
+        now=lambda: datetime(2026, 6, 12, 18, 0),
+        command_runner=lambda step, log_path: calls.append(step.id) or 0,
+    ) == 0
+
+    assert "market-heavy" not in calls
+    assert "financial" in calls
+    assert "build-derived" in calls
+    friday_states = _steps(state_file, "natural_date:2026-06-12")
+    assert friday_states["financial"]["status"] == "success"
+    assert friday_states["build-derived"]["status"] == "success"
+
+
+def test_friday_holiday_backfills_previous_market_date_when_state_is_missing(tmp_path: Path) -> None:
+    _write_market_heavy_workflow(tmp_path)
+    _write_calendar(tmp_path, [("2026-06-11", "1"), ("2026-06-12", "0")])
+    state_file = tmp_path / "state.json"
+    calls: list[str] = []
+    commands: dict[str, tuple[str, ...]] = {}
+
+    def runner(step: run_update_daily.DailyStep, log_path: Path) -> int:
+        del log_path
+        calls.append(step.id)
+        commands[step.id] = step.command
+        return 0
+
+    assert run_update_daily.run_daily_update(
+        root=tmp_path,
+        state_file=state_file,
+        run_log=tmp_path / "run.log",
+        today=date(2026, 6, 12),
+        as_of_date="2026-06-12",
+        now=lambda: datetime(2026, 6, 12, 18, 0),
+        command_runner=runner,
+    ) == 0
+
+    assert "market-heavy" in calls
+    assert commands["market-heavy"][commands["market-heavy"].index("--end") + 1] == "2026-06-11"
+    assert _steps(state_file, "market_date:2026-06-11")["market-heavy"]["status"] == "success"
+    assert _steps(state_file, "natural_date:2026-06-12")["financial"]["status"] == "success"
+
+
+def test_holiday_monday_reuses_previous_friday_market_state(tmp_path: Path) -> None:
+    _write_market_heavy_workflow(tmp_path, include_build=False)
+    _write_calendar(
+        tmp_path,
+        [
+            ("2026-06-12", "1"),
+            ("2026-06-13", "0"),
+            ("2026-06-14", "0"),
+            ("2026-06-15", "0"),
+        ],
+    )
+    state_file = tmp_path / "state.json"
+    calls: list[str] = []
+
+    assert run_update_daily.run_daily_update(
+        root=tmp_path,
+        state_file=state_file,
+        run_log=tmp_path / "run.log",
+        today=date(2026, 6, 12),
+        as_of_date="2026-06-12",
+        market_date="2026-06-12",
+        command_runner=lambda step, log_path: calls.append(step.id) or 0,
+    ) == 0
+    calls.clear()
+
+    effective_dates = run_update_daily.resolve_daily_effective_dates(
+        root=tmp_path,
+        today=date(2026, 6, 15),
+        as_of_date="2026-06-15",
+    )
+    assert effective_dates.market_date == date(2026, 6, 12)
+    assert run_update_daily.run_daily_update(
+        root=tmp_path,
+        state_file=state_file,
+        run_log=tmp_path / "run.log",
+        today=date(2026, 6, 15),
+        as_of_date="2026-06-15",
+        command_runner=lambda step, log_path: calls.append(step.id) or 0,
+    ) == 0
+
+    assert "market-heavy" not in calls
+    assert "financial" in calls
+    assert _steps(state_file, "natural_date:2026-06-15")["financial"]["status"] == "success"
+
+
+def test_trading_monday_before_cutoff_targets_previous_friday_market_date(tmp_path: Path) -> None:
+    _write_market_heavy_workflow(tmp_path, include_build=False)
+    _write_calendar(
+        tmp_path,
+        [
+            ("2026-06-12", "1"),
+            ("2026-06-13", "0"),
+            ("2026-06-14", "0"),
+            ("2026-06-15", "1"),
+        ],
+    )
+    state_file = tmp_path / "state.json"
+    calls: list[str] = []
+    commands: dict[str, tuple[str, ...]] = {}
+
+    def runner(step: run_update_daily.DailyStep, log_path: Path) -> int:
+        del log_path
+        calls.append(step.id)
+        commands[step.id] = step.command
+        return 0
+
+    effective_dates = run_update_daily.resolve_daily_effective_dates(
+        root=tmp_path,
+        today=date(2026, 6, 15),
+        now=lambda: datetime(2026, 6, 15, 17, 59),
+    )
+    assert effective_dates.candidate_date == date(2026, 6, 14)
+    assert effective_dates.market_date == date(2026, 6, 12)
+
+    assert run_update_daily.run_daily_update(
+        root=tmp_path,
+        state_file=state_file,
+        run_log=tmp_path / "run.log",
+        today=date(2026, 6, 15),
+        now=lambda: datetime(2026, 6, 15, 17, 59),
+        command_runner=runner,
+    ) == 0
+
+    assert "market-heavy" in calls
+    assert commands["market-heavy"][commands["market-heavy"].index("--end") + 1] == "2026-06-12"
+    assert _steps(state_file, "market_date:2026-06-12")["market-heavy"]["status"] == "success"
+
+
+def test_trading_monday_after_cutoff_filters_market_window_and_keeps_build_unblocked(tmp_path: Path) -> None:
+    _write_market_heavy_workflow(tmp_path)
+    _write_calendar(tmp_path, [("2026-06-15", "1")])
+    state_file = tmp_path / "state.json"
+    calls: list[str] = []
+
+    effective_dates = run_update_daily.resolve_daily_effective_dates(
+        root=tmp_path,
+        today=date(2026, 6, 15),
+        now=lambda: datetime(2026, 6, 15, 18, 0),
+    )
+    assert effective_dates.candidate_date == date(2026, 6, 15)
+    assert effective_dates.market_date == date(2026, 6, 15)
+
+    assert run_update_daily.run_daily_update(
+        root=tmp_path,
+        state_file=state_file,
+        run_log=tmp_path / "run.log",
+        today=date(2026, 6, 15),
+        now=lambda: datetime(2026, 6, 15, 18, 0),
+        command_runner=lambda step, log_path: calls.append(step.id) or 0,
+    ) == 0
+
+    assert "market-heavy" not in calls
+    assert "financial" in calls
+    assert "build-derived" in calls
+    monday_states = _steps(state_file, "natural_date:2026-06-15")
+    assert monday_states["build-derived"]["status"] == "success"
+
+
+def test_market_date_override_forces_market_window_step(tmp_path: Path) -> None:
+    _write_market_heavy_workflow(tmp_path, include_build=False)
+    state_file = tmp_path / "state.json"
+    calls: list[str] = []
+    commands: dict[str, tuple[str, ...]] = {}
+
+    effective_dates = run_update_daily.resolve_daily_effective_dates(
+        root=tmp_path,
+        today=date(2026, 6, 9),
+        as_of_date="2026-06-09",
+        market_date="2026-06-08",
+    )
+    assert effective_dates.market_date_overridden is True
+
+    def runner(step: run_update_daily.DailyStep, log_path: Path) -> int:
+        del log_path
+        calls.append(step.id)
+        commands[step.id] = step.command
+        return 0
+
+    assert run_update_daily.run_daily_update(
+        root=tmp_path,
+        state_file=state_file,
+        run_log=tmp_path / "run.log",
+        today=date(2026, 6, 9),
+        as_of_date="2026-06-09",
+        market_date="2026-06-08",
+        command_runner=runner,
+    ) == 0
+
+    assert "market-heavy" in calls
+    assert commands["market-heavy"][commands["market-heavy"].index("--end") + 1] == "2026-06-08"
+    assert _steps(state_file, "market_date:2026-06-08")["market-heavy"]["status"] == "success"
 
 
 def test_orchestrator_resumes_after_successful_steps(tmp_path: Path) -> None:
@@ -186,6 +489,7 @@ def test_market_date_success_is_reused_on_weekend_and_holiday_monday(tmp_path: P
     ) == 0
     assert "market" not in calls
     assert "financial" in calls
+    assert _steps(state_file, "natural_date:2026-06-14")["financial"]["status"] == "success"
 
     calls.clear()
     assert run_update_daily.run_daily_update(
@@ -200,6 +504,7 @@ def test_market_date_success_is_reused_on_weekend_and_holiday_monday(tmp_path: P
     ) == 0
     assert "market" not in calls
     assert "financial" in calls
+    assert _steps(state_file, "natural_date:2026-06-15")["financial"]["status"] == "success"
     assert _steps(state_file, "natural_date:2026-06-15")["build-derived"]["status"] == "success"
 
 
@@ -249,8 +554,9 @@ def test_monday_cutoff_resolves_previous_or_current_market_date(tmp_path: Path) 
         now=lambda: datetime(2026, 6, 8, 18, 0),
         command_runner=lambda step, log_path: calls.append(step.id) or 0,
     ) == 0
-    assert "market" in calls
-    assert _steps(state_file, "market_date:2026-06-08")["market"]["status"] == "success"
+    assert "market" not in calls
+    assert calls == ["cleanup"]
+    assert _steps(state_file, "natural_date:2026-06-08")["financial"]["status"] == "success"
 
 
 def test_build_derived_depends_on_market_and_natural_state_keys(tmp_path: Path) -> None:
@@ -535,15 +841,17 @@ def test_orchestrator_force_and_start_at_control_resume(tmp_path: Path) -> None:
     assert "calendar" not in calls
 
 
-def test_orchestrator_market_window_keeps_market_steps_schedulable() -> None:
+def test_orchestrator_market_window_schedules_heavy_steps_only_in_window() -> None:
     friday = [step.id for step in run_update_daily.daily_steps(date(2026, 6, 5))]
     monday = [step.id for step in run_update_daily.daily_steps(date(2026, 6, 8))]
 
     assert "baostock-qfq" in friday
     assert "akshare-valuation-full" in friday
     assert "akshare-yjyg-em" in friday
-    assert "baostock-qfq" in monday
-    assert "akshare-valuation-full" in monday
+    assert "baostock-unadjusted" in monday
+    assert "baostock-valuation-percentile" in monday
+    assert "baostock-qfq" not in monday
+    assert "akshare-valuation-full" not in monday
     assert "akshare-yjyg-em" in monday
     assert "financial-report" in monday
 
@@ -575,25 +883,36 @@ def test_daily_steps_include_yjyg_em_before_build_views_on_weekday() -> None:
 def test_daily_steps_build_derived_all_before_views(today: date) -> None:
     steps = run_update_daily.daily_steps(today)
     by_id = {step.id: step for step in steps}
+    expected_dependencies = (
+        (
+            "akshare-spot-quote",
+            "baostock-unadjusted",
+            "baostock-basic",
+            "baostock-valuation-percentile",
+            "financial-report",
+            "akshare-delist",
+            "baostock-adjustment-factor",
+            "baostock-qfq",
+            "baostock-hfq",
+            "akshare-valuation-full",
+            "akshare-daily-bar",
+            "sync-qlib",
+        )
+        if today.weekday() in {4, 5, 6}
+        else (
+            "akshare-spot-quote",
+            "baostock-unadjusted",
+            "baostock-basic",
+            "baostock-valuation-percentile",
+            "financial-report",
+        )
+    )
 
     assert "build-derived" in by_id
     assert "build-security-master" not in by_id
     assert steps.index(by_id["financial-report"]) < steps.index(by_id["build-derived"])
     assert steps.index(by_id["build-derived"]) < steps.index(by_id["build-duckdb-views"])
-    assert _dependency_ids(by_id["build-derived"]) == (
-        "akshare-spot-quote",
-        "baostock-unadjusted",
-        "baostock-basic",
-        "baostock-valuation-percentile",
-        "financial-report",
-        "akshare-delist",
-        "baostock-adjustment-factor",
-        "baostock-qfq",
-        "baostock-hfq",
-        "akshare-valuation-full",
-        "akshare-daily-bar",
-        "sync-qlib",
-    )
+    assert _dependency_ids(by_id["build-derived"]) == expected_dependencies
     assert _dependency_ids(by_id["build-duckdb-views"]) == ("build-derived",)
     assert by_id["build-derived"].command[1:] == (
         "-m",
@@ -611,8 +930,9 @@ def test_daily_steps_load_weekday_steps_from_config() -> None:
     steps = run_update_daily.daily_steps(date(2026, 6, 8), root=Path(__file__).resolve().parents[1])
     by_id = {step.id: step for step in steps}
 
-    assert by_id["baostock-qfq"].schedule_policy == "market_window"
-    assert by_id["baostock-qfq"].state_key_policy == "market_date"
+    assert by_id["baostock-unadjusted"].schedule_policy == "daily"
+    assert by_id["baostock-unadjusted"].state_key_policy == "market_date"
+    assert "baostock-qfq" not in by_id
     assert by_id["build-derived"].command[1:] == (
         "-m",
         "src.cli",

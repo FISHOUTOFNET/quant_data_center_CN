@@ -86,6 +86,49 @@ qdc build-derived --target valuation --security-id SH.600000 --mode incremental 
 
 If any required upstream step fails or is blocked during the daily run, `build-derived` will be blocked and the final exit code will be non-zero, so Windows Task Scheduler or external monitors can alert on partial failures.
 
+### Daily workflow dates and state
+
+`qdc run-update-daily` resolves four effective dates before it builds the step list:
+
+- `natural_date`: the calendar date of the workflow run, used by disclosure, financial-report, derived, and view steps.
+- `candidate_date`: the date to resolve against the trading calendar. Before 18:00 local time it is the previous natural date; at or after 18:00 it is the current natural date. `--as-of-date` overrides this value.
+- `market_date`: the latest trading day on or before `candidate_date`, resolved from `baostock_cn_trading_calendar`. `--market-date` overrides it for repair or backfill runs.
+- `hist_start`: `market_date - 30 days`, used by incremental historical market updates.
+
+The workflow state file is version 2 and stores step status by state key:
+
+```text
+natural_date:YYYY-MM-DD
+market_date:YYYY-MM-DD
+run_instance:YYYYMMDD_HHMMSS
+```
+
+Market trading-day tasks use `state_key_policy=market_date`, so a weekend or holiday can reuse a successful previous trading day. Natural-day disclosure and financial tasks use `state_key_policy=natural_date`, so they still run for the current calendar date. Maintenance tasks such as log cleanup use `state_key_policy=run_instance` with `resume_policy=always_run`.
+
+The configured task groups are:
+
+- Market trading-day tasks that are low-cost or required daily: `akshare-spot-quote`, `baostock-unadjusted`, `baostock-basic`, `baostock-valuation-percentile`. These use `schedule_policy=daily` with `state_key_policy=market_date`.
+- Weekend and holiday market-window heavy tasks: `akshare-delist`, `baostock-adjustment-factor`, `baostock-qfq`, `baostock-hfq`, `akshare-valuation-full`, `akshare-daily-bar`, `sync-qlib`. These use `schedule_policy=market_window` with `state_key_policy=market_date`.
+- Natural-day disclosure and financial tasks: `akshare-yjyg-em`, `akshare-report-disclosure`, `akshare-yysj-em`, `financial-report`.
+- Derived and view tasks: `build-derived`, then `build-duckdb-views`, both keyed by `natural_date`.
+
+`schedule_policy=market_window` enters the workflow only when the natural date is Friday, Saturday, or Sunday, when `candidate_date != market_date` because the candidate is not a trading day, or when `--market-date` explicitly overrides the resolved trading date. On an ordinary Monday to Thursday trading day after 18:00, heavy market-window tasks are not scheduled. Dependencies on steps that are not scheduled for the current run are filtered from downstream steps, so `build-derived` is not blocked by qfq/hfq/sync-qlib on ordinary trading days.
+
+Examples:
+
+```powershell
+qdc run-update-daily
+qdc run-update-daily --as-of-date 2026-06-15
+qdc run-update-daily --market-date 2026-06-12
+qdc run-update-daily --ignore-state
+qdc run-update-daily --force
+qdc run-update-daily --start-at baostock-qfq
+```
+
+Use `--ignore-state` to execute the selected workflow even if prior success state exists. Use `--force` to rerun and also reset a corrupt state file. Use `--start-at` to skip earlier scheduled steps. If the requested step is outside the current schedule window, combine it with `--market-date` for an explicit market-date repair run.
+
+For holidays, `market_date` falls back to the latest trading day. If Friday is a holiday, the workflow uses Thursday's `market_date`: successful market steps for Thursday are reused, missing ones are backfilled with command arguments such as `--end 2026-06-11`, and natural-day disclosure and financial tasks still run under `natural_date:Friday`. The same rule applies to a holiday Monday, which reuses or backfills the previous Friday market state.
+
 Physical paths:
 
 ```text
@@ -308,7 +351,7 @@ qdc build-duckdb-views
 
 ## 配置
 
-主要配置在 `config/settings.yaml`。每日 workflow 配置在 `config/daily_workflow.yaml`；每个 step 声明 `id`、`name`、`command`、`depends_on`、`optional`、`timeout_seconds`、`when` 和 `enabled`。`when` 支持 `weekday`、`weekend`、`friday_to_sunday` 和具体英文星期名；命令可使用 `{python}`、`{qdc}`、`{today}`、`{hist_start}` 变量。修改 workflow 后可先运行 `qdc run-update-daily --help` 和相关单测确认配置可解析。
+主要配置在 `config/settings.yaml`。每日 workflow 配置在 `config/daily_workflow.yaml`；每个 step 声明 `id`、`name`、`command`、`depends_on`、`optional`、`timeout_seconds`、`enabled`、`schedule_policy`、`state_key_policy`、`resume_policy` 和 `data_freshness_policy`。`schedule_policy` 支持 `daily`、`market_window` 和兼容旧配置的 `legacy_when`；`legacy_when` 的 `when` 支持 `weekday`、`weekend`、`friday_to_sunday` 和具体英文星期名。命令可使用 `{python}`、`{qdc}`、`{today}`、`{natural_date}`、`{candidate_date}`、`{market_date}`、`{hist_start}` 变量。修改 workflow 后可先运行 `qdc run-update-daily --help` 和相关单测确认配置可解析。
 
 常用项：
 
