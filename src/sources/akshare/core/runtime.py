@@ -161,7 +161,11 @@ class AkShareRuntime:
         retries = int(
             _config_get(self._config, "api.akshare.max_retries", _config_get(self._config, "pipeline.max_retries", 3))
         )
-        raw_jitter = _config_get(self._config, "api.akshare.jitter_seconds", [0, 0])
+        raw_jitter = _config_get(
+            self._config,
+            f"api.akshare.endpoints.{endpoint}.jitter_seconds",
+            _config_get(self._config, "api.akshare.jitter_seconds", [0, 0]),
+        )
         jitter = _parse_jitter(raw_jitter)
         default_threshold = 1 if endpoint == "stock_zh_a_spot" else 5
         default_cooldown_minutes = 180 if endpoint == "stock_zh_a_spot" else 30

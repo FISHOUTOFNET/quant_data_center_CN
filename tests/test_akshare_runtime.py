@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import time
 from datetime import datetime
+from pathlib import Path
 
 import pandas as pd
 import pytest
 
 from src.sources.akshare.client import AkShareCircuitOpen, AkShareNetworkError
 from src.sources.akshare.core.runtime import AkShareRuntime
+from src.utils.config_mgr import ConfigManager
 
 
 class FakeConfig:
@@ -48,6 +50,68 @@ def test_akshare_runtime_retries_failures_and_returns_response() -> None:
     assert response.params == {"symbol": "600000"}
     assert response.akshare_version == "fake-1"
     assert response.data.loc[0, "mapped"] == 2
+
+
+def test_akshare_runtime_endpoint_jitter_override_disables_stock_value_sleep() -> None:
+    sleep_calls = []
+    runtime = AkShareRuntime(
+        config=FakeConfig(
+            {
+                "api.akshare.max_retries": 1,
+                "api.akshare.jitter_seconds": [10, 10],
+                "api.akshare.endpoints.stock_value_em.jitter_seconds": [0, 0],
+            }
+        ),
+        ak_module=FakeAk(),
+        sleep=sleep_calls.append,
+        random_uniform=lambda low, high: high,
+    )
+
+    response = runtime.fetch("stock_value_em", {}, lambda: pd.DataFrame([{"value": 1}]), lambda df: df)
+
+    assert response.endpoint == "stock_value_em"
+    assert sleep_calls == []
+
+
+def test_akshare_runtime_endpoint_without_jitter_override_uses_global_jitter() -> None:
+    sleep_calls = []
+    runtime = AkShareRuntime(
+        config=FakeConfig(
+            {
+                "api.akshare.max_retries": 1,
+                "api.akshare.jitter_seconds": [10, 10],
+            }
+        ),
+        ak_module=FakeAk(),
+        sleep=sleep_calls.append,
+        random_uniform=lambda low, high: high,
+    )
+
+    response = runtime.fetch("stock_zh_a_hist", {}, lambda: pd.DataFrame([{"value": 1}]), lambda df: df)
+
+    assert response.endpoint == "stock_zh_a_hist"
+    assert sleep_calls == [10]
+
+
+def test_akshare_runtime_dataset_named_jitter_key_does_not_affect_endpoint() -> None:
+    sleep_calls = []
+    runtime = AkShareRuntime(
+        config=FakeConfig(
+            {
+                "api.akshare.max_retries": 1,
+                "api.akshare.jitter_seconds": [10, 10],
+                "api.akshare.endpoints.akshare_cn_stock_valuation_eastmoney.jitter_seconds": [0, 0],
+            }
+        ),
+        ak_module=FakeAk(),
+        sleep=sleep_calls.append,
+        random_uniform=lambda low, high: high,
+    )
+
+    response = runtime.fetch("stock_value_em", {}, lambda: pd.DataFrame([{"value": 1}]), lambda df: df)
+
+    assert response.endpoint == "stock_value_em"
+    assert sleep_calls == [10]
 
 
 def test_akshare_runtime_endpoint_timeout_override_opens_circuit() -> None:
@@ -108,3 +172,14 @@ def test_akshare_runtime_close_shuts_down_timeout_executor(monkeypatch) -> None:
     runtime.close()
 
     assert created[0].shutdown_calls == [{"wait": False, "cancel_futures": True}]
+
+
+def test_default_akshare_settings_have_stock_value_endpoint_jitter_override() -> None:
+    config = ConfigManager(root=Path(__file__).resolve().parents[1])
+
+    assert config.get("api.akshare.jitter_seconds") == [1, 5]
+    assert config.get("api.akshare.endpoints.stock_value_em.jitter_seconds") == [0, 0]
+    assert config.get("api.akshare.endpoints.stock_value_em.failure_threshold") == 5
+    assert config.get("api.akshare.endpoints.stock_value_em.cooldown_minutes") == 30
+    assert config.get("api.akshare.endpoints.akshare_cn_stock_valuation_eastmoney.jitter_seconds") is None
+    assert config.get("api.akshare.endpoints.akshare_cn_stock_valuation_eastmoney.failure_threshold") is None

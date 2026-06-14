@@ -108,8 +108,9 @@ Market trading-day tasks use `state_key_policy=market_date`, so a weekend or hol
 
 The configured task groups are:
 
-- Market trading-day tasks that are low-cost or required daily: `akshare-spot-quote`, `baostock-unadjusted`, `baostock-basic`, `baostock-valuation-percentile`. These use `schedule_policy=daily` with `state_key_policy=market_date`.
-- Weekend and holiday market-window heavy tasks: `akshare-delist`, `baostock-adjustment-factor`, `baostock-qfq`, `baostock-hfq`, `akshare-valuation-full`, `akshare-daily-bar`, `sync-qlib`. These use `schedule_policy=market_window` with `state_key_policy=market_date`.
+- Market trading-day tasks that are low-cost or required daily: `akshare-spot-quote`, `baostock-basic`, `baostock-valuation-percentile`. These use `schedule_policy=daily` with `state_key_policy=market_date`.
+- `baostock-market-session` is a daily step with `state_key_policy=market_date` and `resume_policy=always_run`. It depends on `baostock-basic`. On an ordinary trading day (Monday–Thursday after 18:00), it only updates unadjusted daily bars (`unadjusted_only` mode). On a market-window day (Friday–Sunday, or when `candidate_date != market_date`, or when `--market-date` is explicitly overridden), it runs in `adjusted_market_session` mode, updating unadjusted, qfq, and hfq daily bars and processing adjustment factors as needed.
+- Weekend and holiday market-window heavy tasks: `akshare-delist`, `akshare-valuation-full`, `akshare-daily-bar`, `sync-qlib`. These use `schedule_policy=market_window` with `state_key_policy=market_date`.
 - Natural-day disclosure and financial tasks: `akshare-yjyg-em`, `akshare-report-disclosure`, `akshare-yysj-em`, `financial-report`.
 - Derived and view tasks: `build-derived`, then `build-duckdb-views`, both keyed by `natural_date`.
 
@@ -123,10 +124,10 @@ qdc run-update-daily --as-of-date 2026-06-15
 qdc run-update-daily --market-date 2026-06-12
 qdc run-update-daily --ignore-state
 qdc run-update-daily --force
-qdc run-update-daily --start-at baostock-qfq
+qdc run-update-daily --start-at baostock-market-session
 ```
 
-Use `--ignore-state` to execute the selected workflow even if prior success state exists. Use `--force` to rerun and also reset a corrupt state file. Use `--start-at` to skip earlier scheduled steps. If the requested step is outside the current schedule window, combine it with `--market-date` for an explicit market-date repair run.
+Use `--ignore-state` to execute the selected workflow even if prior success state exists. Use `--force` to rerun and also reset a corrupt state file. Use `--start-at` to skip earlier scheduled steps. If the requested step is outside the current schedule window, combine it with `--market-date` for an explicit market-date repair run. To re-run qfq/hfq specifically, use `qdc update-baostock-market-session` with a market-window date (e.g. Friday) or explicitly pass `--market-date-overridden` to trigger `adjusted_market_session` mode; do not use `--start-at` with the old step names `baostock-qfq` or `baostock-hfq`.
 
 For holidays, `market_date` falls back to the latest trading day. If Friday is a holiday, the workflow uses Thursday's `market_date`: successful market steps for Thursday are reused, missing ones are backfilled with command arguments such as `--end 2026-06-11`, and natural-day disclosure and financial tasks still run under `natural_date:Friday`. The same rule applies to a holiday Monday, which reuses or backfills the previous Friday market state.
 
@@ -160,6 +161,33 @@ qdc repair-baostock-daily --code sh.600000 --start 2024-01-01 --end 2024-04-26 -
 ```
 
 `update-baostock-daily` 默认只把 `baostock_cn_stock_daily_bar_unadjusted` 作为显式目标；交易日历和股票基础信息仍会按解析交易窗口和默认股票池的需要自动补齐。前复权、后复权和复权因子可以通过对应 `--dataset` 独立更新；计算前/后复权时，如果当前交易日的复权因子 checkpoint 缺失，会先更新复权因子。该命令默认在 18:00 前使用前一自然日作为候选日，18:00 后使用当天，并通过本地交易日历回退到最近交易日。
+
+### Baostock market-session
+
+`qdc update-baostock-market-session` 是 `run-update-daily` 中 `baostock-market-session` 步骤对应的独立 CLI 入口。它根据传入的日期参数自动判断运行模式：
+
+- **普通交易日模式**（`unadjusted_only`）：周一至周四 18:00 后，`natural_date == candidate_date == market_date` 且未覆盖 `--market-date` 时，只更新 `baostock_cn_stock_daily_bar_unadjusted`。
+- **market-window 模式**（`adjusted_market_session`）：周五至周日、`candidate_date != market_date`、或 `--market-date-overridden` 时，更新 unadjusted / qfq / hfq 全部日线，并按需处理 `baostock_cn_stock_adjustment_factor`。
+
+每次运行完成后写入 manifest 文件 `data/metadata/manifests/baostock_market_session/{market_date}.json`，记录 `session_mode`、处理股票代码、成功/失败/跳过详情。
+
+普通交易日模式示例：
+
+```powershell
+qdc update-baostock-market-session --end 2026-06-10 --natural-date 2026-06-10 --candidate-date 2026-06-10 --market-date 2026-06-10
+```
+
+market-window 模式示例（周五触发 adjusted market-session）：
+
+```powershell
+qdc update-baostock-market-session --end 2026-06-12 --natural-date 2026-06-12 --candidate-date 2026-06-12 --market-date 2026-06-12
+```
+
+显式触发 adjusted market-session（非 market-window 日期）：
+
+```powershell
+qdc update-baostock-market-session --end 2026-06-10 --natural-date 2026-06-10 --candidate-date 2026-06-10 --market-date 2026-06-10 --market-date-overridden
+```
 
 ### Baostock 估值分位
 
@@ -368,6 +396,7 @@ qdc build-duckdb-views
 - `api.akshare.max_retries`：AkShare 最大重试次数。
 - `api.akshare.workers`：AkShare 并发任务数。
 - `api.akshare.jitter_seconds`：请求前随机延迟。
+- `api.akshare.endpoints.<endpoint>.jitter_seconds`：可覆盖全局 `api.akshare.jitter_seconds`；`stock_value_em` 默认关闭 per-call jitter，因为 valuation full 本身逐股票调用较慢，但失败后的 retry/cooldown 仍保留。
 - `api.akshare.endpoints.<name>.failure_threshold` / `cooldown_minutes`：端点熔断配置。
 - `datasets.akshare_cn_stock_valuation_eastmoney.active_only`：partial 模式是否只取 active AkShare 股票池。
 - `datasets.akshare_cn_stock_financial_report_sina.close_after_time`：财报增量在该时间后按下一自然日披露处理，默认 `18:00`。

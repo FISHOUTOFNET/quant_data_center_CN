@@ -28,6 +28,7 @@ api:
         source: eastmoney
         failure_threshold: 5
         cooldown_minutes: 30
+        jitter_seconds: [0, 0]
       stock_zh_a_gbjg_em:
         source: eastmoney
         failure_threshold: 3

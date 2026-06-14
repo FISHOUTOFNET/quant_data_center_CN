@@ -17,8 +17,8 @@ class ContractConfig:
         values = {
             "api.akshare.max_retries": 3,
             "api.akshare.jitter_seconds": [0, 0],
-            "api.akshare.endpoints.akshare_cn_stock_valuation_eastmoney.failure_threshold": 3,
-            "api.akshare.endpoints.akshare_cn_stock_valuation_eastmoney.cooldown_minutes": 1,
+            "api.akshare.endpoints.stock_value_em.failure_threshold": 3,
+            "api.akshare.endpoints.stock_value_em.cooldown_minutes": 1,
         }
         return values.get(dotted_key, default)
 

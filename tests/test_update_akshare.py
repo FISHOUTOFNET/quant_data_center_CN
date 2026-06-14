@@ -668,7 +668,7 @@ def _write_settings(root) -> None:
                 "    workers: 3",
                 "    jitter_seconds: [0, 0]",
                 "    endpoints:",
-                "      akshare_cn_stock_valuation_eastmoney:",
+                "      stock_value_em:",
                 "        failure_threshold: 2",
                 "        cooldown_minutes: 1",
                 "datasets:",
