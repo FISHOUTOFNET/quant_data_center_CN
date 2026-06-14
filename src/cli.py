@@ -13,6 +13,7 @@ from src.commands.baostock import register_baostock_commands
 from src.commands.daily import register_daily_commands
 from src.commands.derived import register_derived_commands
 from src.commands.duckdb import register_duckdb_commands
+from src.commands.manifest import register_manifest_commands
 from src.commands.qlib import register_qlib_commands
 from src.utils import paths
 from src.utils.logging import logger
@@ -46,6 +47,7 @@ register_baostock_commands(cli)
 register_daily_commands(cli)
 register_derived_commands(cli)
 register_duckdb_commands(cli)
+register_manifest_commands(cli)
 register_qlib_commands(cli)
 
 

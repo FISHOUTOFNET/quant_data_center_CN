@@ -18,6 +18,13 @@ from src.sources.derived.common import (
     create_derived_partition_staging_area,
     refresh_derived_registry,
 )
+from src.sources.derived.manifest import (
+    cleanup_stale_derived_manifests,
+    current_source_signature_for_security,
+    delete_derived_partition_manifest,
+    source_partition_pairs_for_security,
+    upsert_derived_partition_manifest,
+)
 from src.sources.derived.security_master import build_security_master
 from src.storage.dataset_catalog import DATASET_CATALOG
 from src.storage.duckdb_store import DuckDBStore
@@ -62,6 +69,7 @@ def build_cn_stock_daily_bar(
 
     rows = 0
     partitions = 0
+    signatures: dict[str, tuple[str, str, pd.DataFrame]] = {}
     try:
         master = _read_or_build_master(store, now)
         partition_cache = _build_daily_source_partition_cache(store)
@@ -74,6 +82,11 @@ def build_cn_stock_daily_bar(
             security_df = _materialize_security_daily_bar(store, security, updated_at, partition_cache)
             if security_df.empty:
                 continue
+            signature, master_hash, _ = current_source_signature_for_security(
+                store,
+                security,
+                _daily_source_partition_pairs(store, security),
+            )
             result = write_store.write_dataset(
                 "cn_stock_daily_bar",
                 security_df,
@@ -82,7 +95,18 @@ def build_cn_stock_daily_bar(
             )
             rows += result.row_count
             partitions += result.updated_partitions
+            signatures[security_id] = (signature, master_hash, security_df)
         commit_derived_dataset_staging(staging)
+        for security_id, (signature, master_hash, df) in signatures.items():
+            upsert_derived_partition_manifest(
+                store,
+                "cn_stock_daily_bar",
+                security_id,
+                df,
+                signature,
+                master_hash,
+            )
+        cleanup_stale_derived_manifests(store, "cn_stock_daily_bar")
     except Exception:
         cleanup_derived_dataset_staging(staging)
         raise
@@ -128,7 +152,13 @@ def _build_cn_stock_daily_bar_partitions(
             security_df = _materialize_security_daily_bar(store, security, updated_at, partition_cache)
             if security_df.empty:
                 commit_derived_partition_staging(staging, delete_partition=True)
+                delete_derived_partition_manifest(store, "cn_stock_daily_bar", security_id)
             else:
+                signature, master_hash, _ = current_source_signature_for_security(
+                    store,
+                    security,
+                    _daily_source_partition_pairs(store, security),
+                )
                 result = write_store.write_dataset(
                     "cn_stock_daily_bar",
                     security_df,
@@ -138,6 +168,14 @@ def _build_cn_stock_daily_bar_partitions(
                 rows += result.row_count
                 partitions += result.updated_partitions
                 commit_derived_partition_staging(staging)
+                upsert_derived_partition_manifest(
+                    store,
+                    "cn_stock_daily_bar",
+                    security_id,
+                    security_df,
+                    signature,
+                    master_hash,
+                )
         except Exception:
             cleanup_derived_partition_staging(staging)
             raise
@@ -171,6 +209,17 @@ def _build_daily_source_partition_cache(store: ParquetStore) -> dict[str, set[st
             continue
         partition_cache[dataset_id] = set(store.list_dataset_partitions(dataset_id))
     return partition_cache
+
+
+def _daily_source_partition_pairs(store: ParquetStore, security: pd.Series):
+    return source_partition_pairs_for_security(
+        store,
+        security,
+        (
+            *((dataset_id, "baostock_code") for dataset_id in BAOSTOCK_DAILY_SOURCES),
+            *((dataset_id, "akshare_code") for dataset_id in AKSHARE_DAILY_SOURCES),
+        ),
+    )
 
 
 def _read_partition_or_empty_cached(

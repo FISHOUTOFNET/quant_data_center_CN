@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import shutil
 from datetime import date, datetime
 
 import pandas as pd
@@ -116,6 +117,62 @@ def test_build_cn_stock_daily_bar_success_promotes_staging_dataset(tmp_path, dai
     assert date(2023, 12, 29) not in set(loaded["date"])
     assert _temporary_dataset_dirs(tmp_path, ".staging", "cn_stock_daily_bar") == []
     assert _temporary_dataset_dirs(tmp_path, ".backup", "cn_stock_daily_bar") == []
+
+
+def test_derived_partition_commit_writes_signature_manifest(tmp_path, daily_sample) -> None:
+    store = ParquetStore(root=tmp_path)
+    store.write_dataset("cn_security_master", _master())
+    store.write_dataset("baostock_cn_stock_daily_bar_unadjusted", daily_sample(), {"code": "sh.600000"})
+
+    build_cn_stock_daily_bar(root=tmp_path, build_views=False, refresh_registry=False, now=lambda: NOW)
+
+    manifest = store.read_dataset_partition_manifest("cn_stock_daily_bar")
+    assert len(manifest) == 1
+    row = manifest.iloc[0]
+    assert row["partition_value"] == "SH.600000"
+    assert row["source_signature"]
+    assert row["master_row_hash"]
+
+
+def test_delete_partition_removes_derived_manifest(tmp_path, daily_sample) -> None:
+    store = ParquetStore(root=tmp_path)
+    store.write_dataset("cn_security_master", _master())
+    store.write_dataset("baostock_cn_stock_daily_bar_unadjusted", daily_sample(), {"code": "sh.600000"})
+    build_cn_stock_daily_bar(root=tmp_path, build_views=False, refresh_registry=False, now=lambda: NOW)
+    shutil.rmtree(tmp_path / "data" / "parquet" / "baostock_cn_stock_daily_bar_unadjusted" / "code=sh.600000")
+
+    build_cn_stock_daily_bar(
+        root=tmp_path,
+        security_ids=("SH.600000",),
+        build_views=False,
+        refresh_registry=False,
+        now=lambda: NOW,
+    )
+
+    assert not store.dataset_exists("cn_stock_daily_bar", {"security_id": "SH.600000"})
+    assert store.read_dataset_partition_manifest("cn_stock_daily_bar").empty
+
+
+def test_full_rebuild_removes_stale_derived_manifest(tmp_path, daily_sample) -> None:
+    store = ParquetStore(root=tmp_path)
+    store.write_dataset("cn_security_master", _master())
+    store.write_dataset(
+        "cn_stock_daily_bar",
+        _canonical_daily_bar(close=2.0, date_value=date(2023, 12, 29)).assign(
+            security_id="SZ.000001",
+            code="000001",
+            exchange="SZ",
+        ),
+        {"security_id": "SZ.000001"},
+        mode="replace",
+    )
+    store.write_dataset("baostock_cn_stock_daily_bar_unadjusted", daily_sample(), {"code": "sh.600000"})
+
+    build_cn_stock_daily_bar(root=tmp_path, build_views=False, refresh_registry=False, now=lambda: NOW)
+
+    manifest = store.read_dataset_partition_manifest("cn_stock_daily_bar")
+    assert set(manifest["partition_value"].astype(str)) == {"SH.600000"}
+    assert not store.dataset_exists("cn_stock_daily_bar", {"security_id": "SZ.000001"})
 
 
 def test_build_cn_stock_daily_bar_incremental_preserves_unaffected_partition(tmp_path, daily_sample) -> None:

@@ -7,7 +7,13 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
+import pandas as pd
+
 from src.sources.derived.common import build_derived_file_lock, refresh_derived_registry
+from src.sources.derived.manifest import (
+    current_source_signature_for_security,
+    source_partition_pairs_for_security,
+)
 from src.sources.derived.security_master import build_security_master
 from src.sources.derived.stock_daily_bar import (
     AKSHARE_DAILY_SOURCES,
@@ -153,7 +159,12 @@ def _resolve_incremental_plan(
             full_targets.append(target)
             reasons[target] = f"{dataset_id} has not been built yet"
             continue
-        security_ids = _changed_security_ids_for_target(store, master, target, changed_since)
+        try:
+            security_ids = _changed_security_ids_for_target(store, master, target, changed_since)
+        except RuntimeError as exc:
+            full_targets.append(target)
+            reasons[target] = str(exc)
+            continue
         security_ids_by_target[target] = security_ids
         logger.info(
             "Derived incremental build target={} changed_security_count={} security_ids={}",
@@ -168,65 +179,89 @@ def _resolve_incremental_plan(
 
 def _changed_security_ids_for_target(
     store: ParquetStore,
-    master,
+    master: pd.DataFrame,
     target: str,
     changed_since: datetime | None,
 ) -> tuple[str, ...]:
     changed: set[str] = set()
+    target_dataset = DATASET_BY_TARGET[target]
+    target_manifests = store.read_dataset_partition_manifest(target_dataset)
     for _, security in master.iterrows():
         security_id = _clean_string(security.get("security_id"))
         if not security_id:
             continue
-        source_paths = _source_paths_for_security(store, security, target)
-        if not source_paths:
+        source_pairs = _source_partition_pairs_for_security(store, security, target)
+        target_path = store.dataset_path(target_dataset, {"security_id": security_id})
+        target_exists = target_path.exists()
+        if not source_pairs:
+            if target_exists:
+                changed.add(security_id)
             continue
-        target_path = store.dataset_path(DATASET_BY_TARGET[target], {"security_id": security_id})
-        target_mtime = _path_mtime(target_path)
-        if target_mtime is None:
+        if not target_exists:
             changed.add(security_id)
             continue
-        for source_path in source_paths:
-            source_mtime = _path_mtime(source_path)
-            if source_mtime is None:
-                continue
-            if changed_since is not None and source_mtime >= changed_since:
-                changed.add(security_id)
-                break
-            if changed_since is None and source_mtime > target_mtime:
-                changed.add(security_id)
-                break
+
+        current_signature, current_master_hash, source_rows = current_source_signature_for_security(
+            store,
+            security,
+            source_pairs,
+        )
+        target_manifest = _target_manifest_row(target_manifests, security_id)
+        if target_manifest is None:
+            changed.add(security_id)
+            continue
+
+        target_signature = _clean_string(target_manifest.get("source_signature"))
+        target_master_hash = _clean_string(target_manifest.get("master_row_hash"))
+        if (
+            not target_signature
+            or current_signature != target_signature
+            or current_master_hash != target_master_hash
+            or _source_updated_since(source_rows, changed_since)
+        ):
+            changed.add(security_id)
     return tuple(sorted(changed))
 
 
-def _source_paths_for_security(store: ParquetStore, security, target: str) -> tuple[Path, ...]:
-    paths: list[Path] = []
-    baostock_code = _clean_string(security.get("baostock_code"))
-    akshare_code = _clean_string(security.get("akshare_code"))
+def _source_partition_pairs_for_security(store: ParquetStore, security: pd.Series, target: str):
     if target == "daily_bar":
-        if baostock_code:
-            paths.extend(
-                store.dataset_path(dataset_id, {"code": baostock_code})
-                for dataset_id in BAOSTOCK_DAILY_SOURCES
-                if store.dataset_exists(dataset_id, {"code": baostock_code})
-            )
-        if akshare_code:
-            paths.extend(
-                store.dataset_path(dataset_id, {"code": akshare_code})
-                for dataset_id in AKSHARE_DAILY_SOURCES
-                if store.dataset_exists(dataset_id, {"code": akshare_code})
-            )
-    elif target == "valuation":
-        if akshare_code and store.dataset_exists(AKSHARE_VALUATION_DATASET, {"code": akshare_code}):
-            paths.append(store.dataset_path(AKSHARE_VALUATION_DATASET, {"code": akshare_code}))
-        if baostock_code and store.dataset_exists(BAOSTOCK_PERCENTILE_DATASET, {"code": baostock_code}):
-            paths.append(store.dataset_path(BAOSTOCK_PERCENTILE_DATASET, {"code": baostock_code}))
-    return tuple(paths)
+        return source_partition_pairs_for_security(
+            store,
+            security,
+            (
+                *((dataset_id, "baostock_code") for dataset_id in BAOSTOCK_DAILY_SOURCES),
+                *((dataset_id, "akshare_code") for dataset_id in AKSHARE_DAILY_SOURCES),
+            ),
+        )
+    if target == "valuation":
+        return source_partition_pairs_for_security(
+            store,
+            security,
+            (
+                (AKSHARE_VALUATION_DATASET, "akshare_code"),
+                (BAOSTOCK_PERCENTILE_DATASET, "baostock_code"),
+            ),
+        )
+    return ()
 
 
-def _path_mtime(path: Path) -> datetime | None:
-    if not path.exists():
+def _target_manifest_row(manifests: pd.DataFrame, security_id: str) -> pd.Series | None:
+    if manifests.empty:
         return None
-    return datetime.fromtimestamp(path.stat().st_mtime)
+    matched = manifests.loc[
+        (manifests["partition_column"].astype("string") == "security_id")
+        & (manifests["partition_value"].astype("string") == security_id)
+    ]
+    if matched.empty:
+        return None
+    return matched.iloc[-1]
+
+
+def _source_updated_since(source_rows: pd.DataFrame, changed_since: datetime | None) -> bool:
+    if changed_since is None or source_rows.empty or "updated_at" not in source_rows.columns:
+        return False
+    updated_at = pd.to_datetime(source_rows["updated_at"], errors="coerce")
+    return bool((updated_at >= pd.Timestamp(changed_since)).any())
 
 
 def _normalize_security_ids(security_ids: tuple[str, ...] | None) -> tuple[str, ...]:

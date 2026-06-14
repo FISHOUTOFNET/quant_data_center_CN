@@ -13,7 +13,6 @@ from src.storage.parquet_store import ParquetStore
 from src.tools import run_update_daily
 from src.utils.process_lock import acquire_process_lock
 
-
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -158,14 +157,17 @@ def test_weekday_after_cutoff_does_not_schedule_market_window_heavy_step(tmp_pat
     _write_calendar(tmp_path, [("2026-06-09", "1")])
     calls: list[str] = []
 
-    assert run_update_daily.run_daily_update(
-        root=tmp_path,
-        state_file=tmp_path / "state.json",
-        run_log=tmp_path / "run.log",
-        today=date(2026, 6, 9),
-        now=lambda: datetime(2026, 6, 9, 18, 0),
-        command_runner=lambda step, log_path: calls.append(step.id) or 0,
-    ) == 0
+    assert (
+        run_update_daily.run_daily_update(
+            root=tmp_path,
+            state_file=tmp_path / "state.json",
+            run_log=tmp_path / "run.log",
+            today=date(2026, 6, 9),
+            now=lambda: datetime(2026, 6, 9, 18, 0),
+            command_runner=lambda step, log_path: calls.append(step.id) or 0,
+        )
+        == 0
+    )
 
     assert "market-heavy" not in calls
     assert "financial" in calls
@@ -185,16 +187,19 @@ def test_friday_holiday_reuses_thursday_market_state_for_build_derived(tmp_path:
     state_file = tmp_path / "state.json"
     calls: list[str] = []
 
-    assert run_update_daily.run_daily_update(
-        root=tmp_path,
-        state_file=state_file,
-        run_log=tmp_path / "run.log",
-        today=date(2026, 6, 11),
-        as_of_date="2026-06-11",
-        market_date="2026-06-11",
-        now=lambda: datetime(2026, 6, 11, 18, 0),
-        command_runner=lambda step, log_path: calls.append(step.id) or 0,
-    ) == 0
+    assert (
+        run_update_daily.run_daily_update(
+            root=tmp_path,
+            state_file=state_file,
+            run_log=tmp_path / "run.log",
+            today=date(2026, 6, 11),
+            as_of_date="2026-06-11",
+            market_date="2026-06-11",
+            now=lambda: datetime(2026, 6, 11, 18, 0),
+            command_runner=lambda step, log_path: calls.append(step.id) or 0,
+        )
+        == 0
+    )
     assert "market-heavy" in calls
     assert _steps(state_file, "market_date:2026-06-11")["market-heavy"]["status"] == "success"
 
@@ -205,15 +210,18 @@ def test_friday_holiday_reuses_thursday_market_state_for_build_derived(tmp_path:
         as_of_date="2026-06-12",
     )
     assert effective_dates.market_date == date(2026, 6, 11)
-    assert run_update_daily.run_daily_update(
-        root=tmp_path,
-        state_file=state_file,
-        run_log=tmp_path / "run.log",
-        today=date(2026, 6, 12),
-        as_of_date="2026-06-12",
-        now=lambda: datetime(2026, 6, 12, 18, 0),
-        command_runner=lambda step, log_path: calls.append(step.id) or 0,
-    ) == 0
+    assert (
+        run_update_daily.run_daily_update(
+            root=tmp_path,
+            state_file=state_file,
+            run_log=tmp_path / "run.log",
+            today=date(2026, 6, 12),
+            as_of_date="2026-06-12",
+            now=lambda: datetime(2026, 6, 12, 18, 0),
+            command_runner=lambda step, log_path: calls.append(step.id) or 0,
+        )
+        == 0
+    )
 
     assert "market-heavy" not in calls
     assert "financial" in calls
@@ -236,15 +244,18 @@ def test_friday_holiday_backfills_previous_market_date_when_state_is_missing(tmp
         commands[step.id] = step.command
         return 0
 
-    assert run_update_daily.run_daily_update(
-        root=tmp_path,
-        state_file=state_file,
-        run_log=tmp_path / "run.log",
-        today=date(2026, 6, 12),
-        as_of_date="2026-06-12",
-        now=lambda: datetime(2026, 6, 12, 18, 0),
-        command_runner=runner,
-    ) == 0
+    assert (
+        run_update_daily.run_daily_update(
+            root=tmp_path,
+            state_file=state_file,
+            run_log=tmp_path / "run.log",
+            today=date(2026, 6, 12),
+            as_of_date="2026-06-12",
+            now=lambda: datetime(2026, 6, 12, 18, 0),
+            command_runner=runner,
+        )
+        == 0
+    )
 
     assert "market-heavy" in calls
     assert commands["market-heavy"][commands["market-heavy"].index("--end") + 1] == "2026-06-11"
@@ -266,15 +277,18 @@ def test_holiday_monday_reuses_previous_friday_market_state(tmp_path: Path) -> N
     state_file = tmp_path / "state.json"
     calls: list[str] = []
 
-    assert run_update_daily.run_daily_update(
-        root=tmp_path,
-        state_file=state_file,
-        run_log=tmp_path / "run.log",
-        today=date(2026, 6, 12),
-        as_of_date="2026-06-12",
-        market_date="2026-06-12",
-        command_runner=lambda step, log_path: calls.append(step.id) or 0,
-    ) == 0
+    assert (
+        run_update_daily.run_daily_update(
+            root=tmp_path,
+            state_file=state_file,
+            run_log=tmp_path / "run.log",
+            today=date(2026, 6, 12),
+            as_of_date="2026-06-12",
+            market_date="2026-06-12",
+            command_runner=lambda step, log_path: calls.append(step.id) or 0,
+        )
+        == 0
+    )
     calls.clear()
 
     effective_dates = run_update_daily.resolve_daily_effective_dates(
@@ -283,14 +297,17 @@ def test_holiday_monday_reuses_previous_friday_market_state(tmp_path: Path) -> N
         as_of_date="2026-06-15",
     )
     assert effective_dates.market_date == date(2026, 6, 12)
-    assert run_update_daily.run_daily_update(
-        root=tmp_path,
-        state_file=state_file,
-        run_log=tmp_path / "run.log",
-        today=date(2026, 6, 15),
-        as_of_date="2026-06-15",
-        command_runner=lambda step, log_path: calls.append(step.id) or 0,
-    ) == 0
+    assert (
+        run_update_daily.run_daily_update(
+            root=tmp_path,
+            state_file=state_file,
+            run_log=tmp_path / "run.log",
+            today=date(2026, 6, 15),
+            as_of_date="2026-06-15",
+            command_runner=lambda step, log_path: calls.append(step.id) or 0,
+        )
+        == 0
+    )
 
     assert "market-heavy" not in calls
     assert "financial" in calls
@@ -326,14 +343,17 @@ def test_trading_monday_before_cutoff_targets_previous_friday_market_date(tmp_pa
     assert effective_dates.candidate_date == date(2026, 6, 14)
     assert effective_dates.market_date == date(2026, 6, 12)
 
-    assert run_update_daily.run_daily_update(
-        root=tmp_path,
-        state_file=state_file,
-        run_log=tmp_path / "run.log",
-        today=date(2026, 6, 15),
-        now=lambda: datetime(2026, 6, 15, 17, 59),
-        command_runner=runner,
-    ) == 0
+    assert (
+        run_update_daily.run_daily_update(
+            root=tmp_path,
+            state_file=state_file,
+            run_log=tmp_path / "run.log",
+            today=date(2026, 6, 15),
+            now=lambda: datetime(2026, 6, 15, 17, 59),
+            command_runner=runner,
+        )
+        == 0
+    )
 
     assert "market-heavy" in calls
     assert commands["market-heavy"][commands["market-heavy"].index("--end") + 1] == "2026-06-12"
@@ -354,14 +374,17 @@ def test_trading_monday_after_cutoff_filters_market_window_and_keeps_build_unblo
     assert effective_dates.candidate_date == date(2026, 6, 15)
     assert effective_dates.market_date == date(2026, 6, 15)
 
-    assert run_update_daily.run_daily_update(
-        root=tmp_path,
-        state_file=state_file,
-        run_log=tmp_path / "run.log",
-        today=date(2026, 6, 15),
-        now=lambda: datetime(2026, 6, 15, 18, 0),
-        command_runner=lambda step, log_path: calls.append(step.id) or 0,
-    ) == 0
+    assert (
+        run_update_daily.run_daily_update(
+            root=tmp_path,
+            state_file=state_file,
+            run_log=tmp_path / "run.log",
+            today=date(2026, 6, 15),
+            now=lambda: datetime(2026, 6, 15, 18, 0),
+            command_runner=lambda step, log_path: calls.append(step.id) or 0,
+        )
+        == 0
+    )
 
     assert "market-heavy" not in calls
     assert "financial" in calls
@@ -390,15 +413,18 @@ def test_market_date_override_forces_market_window_step(tmp_path: Path) -> None:
         commands[step.id] = step.command
         return 0
 
-    assert run_update_daily.run_daily_update(
-        root=tmp_path,
-        state_file=state_file,
-        run_log=tmp_path / "run.log",
-        today=date(2026, 6, 9),
-        as_of_date="2026-06-09",
-        market_date="2026-06-08",
-        command_runner=runner,
-    ) == 0
+    assert (
+        run_update_daily.run_daily_update(
+            root=tmp_path,
+            state_file=state_file,
+            run_log=tmp_path / "run.log",
+            today=date(2026, 6, 9),
+            as_of_date="2026-06-09",
+            market_date="2026-06-08",
+            command_runner=runner,
+        )
+        == 0
+    )
 
     assert "market-heavy" in calls
     assert commands["market-heavy"][commands["market-heavy"].index("--end") + 1] == "2026-06-08"
@@ -462,60 +488,72 @@ def test_market_date_success_is_reused_on_weekend_and_holiday_monday(tmp_path: P
         calls.append(step.id)
         return 0
 
-    assert run_update_daily.run_daily_update(
-        root=tmp_path,
-        state_file=state_file,
-        run_log=log_file,
-        today=date(2026, 6, 12),
-        as_of_date="2026-06-12",
-        market_date="2026-06-12",
-        now=lambda: datetime(2026, 6, 12, 18, 0),
-        command_runner=runner,
-    ) == 0
+    assert (
+        run_update_daily.run_daily_update(
+            root=tmp_path,
+            state_file=state_file,
+            run_log=log_file,
+            today=date(2026, 6, 12),
+            as_of_date="2026-06-12",
+            market_date="2026-06-12",
+            now=lambda: datetime(2026, 6, 12, 18, 0),
+            command_runner=runner,
+        )
+        == 0
+    )
     assert "market" in calls
     assert _steps(state_file, "market_date:2026-06-12")["market"]["status"] == "success"
 
     calls.clear()
-    assert run_update_daily.run_daily_update(
-        root=tmp_path,
-        state_file=state_file,
-        run_log=log_file,
-        today=date(2026, 6, 13),
-        as_of_date="2026-06-13",
-        market_date="2026-06-12",
-        now=lambda: datetime(2026, 6, 13, 18, 0),
-        command_runner=runner,
-    ) == 0
+    assert (
+        run_update_daily.run_daily_update(
+            root=tmp_path,
+            state_file=state_file,
+            run_log=log_file,
+            today=date(2026, 6, 13),
+            as_of_date="2026-06-13",
+            market_date="2026-06-12",
+            now=lambda: datetime(2026, 6, 13, 18, 0),
+            command_runner=runner,
+        )
+        == 0
+    )
     assert "market" not in calls
     assert "financial" in calls
     assert _steps(state_file, "natural_date:2026-06-13")["financial"]["status"] == "success"
 
     calls.clear()
-    assert run_update_daily.run_daily_update(
-        root=tmp_path,
-        state_file=state_file,
-        run_log=log_file,
-        today=date(2026, 6, 14),
-        as_of_date="2026-06-14",
-        market_date="2026-06-12",
-        now=lambda: datetime(2026, 6, 14, 18, 0),
-        command_runner=runner,
-    ) == 0
+    assert (
+        run_update_daily.run_daily_update(
+            root=tmp_path,
+            state_file=state_file,
+            run_log=log_file,
+            today=date(2026, 6, 14),
+            as_of_date="2026-06-14",
+            market_date="2026-06-12",
+            now=lambda: datetime(2026, 6, 14, 18, 0),
+            command_runner=runner,
+        )
+        == 0
+    )
     assert "market" not in calls
     assert "financial" in calls
     assert _steps(state_file, "natural_date:2026-06-14")["financial"]["status"] == "success"
 
     calls.clear()
-    assert run_update_daily.run_daily_update(
-        root=tmp_path,
-        state_file=state_file,
-        run_log=log_file,
-        today=date(2026, 6, 15),
-        as_of_date="2026-06-15",
-        market_date="2026-06-12",
-        now=lambda: datetime(2026, 6, 15, 18, 0),
-        command_runner=runner,
-    ) == 0
+    assert (
+        run_update_daily.run_daily_update(
+            root=tmp_path,
+            state_file=state_file,
+            run_log=log_file,
+            today=date(2026, 6, 15),
+            as_of_date="2026-06-15",
+            market_date="2026-06-12",
+            now=lambda: datetime(2026, 6, 15, 18, 0),
+            command_runner=runner,
+        )
+        == 0
+    )
     assert "market" not in calls
     assert "financial" in calls
     assert _steps(state_file, "natural_date:2026-06-15")["financial"]["status"] == "success"
@@ -537,37 +575,46 @@ def test_monday_cutoff_resolves_previous_or_current_market_date(tmp_path: Path) 
     log_file = tmp_path / "run.log"
     calls: list[str] = []
 
-    assert run_update_daily.run_daily_update(
-        root=tmp_path,
-        state_file=state_file,
-        run_log=log_file,
-        today=date(2026, 6, 5),
-        as_of_date="2026-06-05",
-        market_date="2026-06-05",
-        now=lambda: datetime(2026, 6, 5, 18, 0),
-        command_runner=lambda step, log_path: calls.append(step.id) or 0,
-    ) == 0
+    assert (
+        run_update_daily.run_daily_update(
+            root=tmp_path,
+            state_file=state_file,
+            run_log=log_file,
+            today=date(2026, 6, 5),
+            as_of_date="2026-06-05",
+            market_date="2026-06-05",
+            now=lambda: datetime(2026, 6, 5, 18, 0),
+            command_runner=lambda step, log_path: calls.append(step.id) or 0,
+        )
+        == 0
+    )
     calls.clear()
 
-    assert run_update_daily.run_daily_update(
-        root=tmp_path,
-        state_file=state_file,
-        run_log=log_file,
-        today=date(2026, 6, 8),
-        now=lambda: datetime(2026, 6, 8, 17, 59),
-        command_runner=lambda step, log_path: calls.append(step.id) or 0,
-    ) == 0
+    assert (
+        run_update_daily.run_daily_update(
+            root=tmp_path,
+            state_file=state_file,
+            run_log=log_file,
+            today=date(2026, 6, 8),
+            now=lambda: datetime(2026, 6, 8, 17, 59),
+            command_runner=lambda step, log_path: calls.append(step.id) or 0,
+        )
+        == 0
+    )
     assert "market" not in calls
 
     calls.clear()
-    assert run_update_daily.run_daily_update(
-        root=tmp_path,
-        state_file=state_file,
-        run_log=log_file,
-        today=date(2026, 6, 8),
-        now=lambda: datetime(2026, 6, 8, 18, 0),
-        command_runner=lambda step, log_path: calls.append(step.id) or 0,
-    ) == 0
+    assert (
+        run_update_daily.run_daily_update(
+            root=tmp_path,
+            state_file=state_file,
+            run_log=log_file,
+            today=date(2026, 6, 8),
+            now=lambda: datetime(2026, 6, 8, 18, 0),
+            command_runner=lambda step, log_path: calls.append(step.id) or 0,
+        )
+        == 0
+    )
     assert "market" not in calls
     assert calls == ["cleanup"]
     assert _steps(state_file, "natural_date:2026-06-08")["financial"]["status"] == "success"
@@ -590,16 +637,19 @@ def test_build_derived_depends_on_market_and_natural_state_keys(tmp_path: Path) 
     )
     calls: list[str] = []
 
-    assert run_update_daily.run_daily_update(
-        root=tmp_path,
-        state_file=state_file,
-        run_log=tmp_path / "run.log",
-        today=date(2026, 6, 13),
-        as_of_date="2026-06-13",
-        market_date="2026-06-12",
-        start_at="build-derived",
-        command_runner=lambda step, log_path: calls.append(step.id) or 0,
-    ) == 0
+    assert (
+        run_update_daily.run_daily_update(
+            root=tmp_path,
+            state_file=state_file,
+            run_log=tmp_path / "run.log",
+            today=date(2026, 6, 13),
+            as_of_date="2026-06-13",
+            market_date="2026-06-12",
+            start_at="build-derived",
+            command_runner=lambda step, log_path: calls.append(step.id) or 0,
+        )
+        == 0
+    )
 
     assert calls == ["build-derived"]
     assert _steps(state_file, "natural_date:2026-06-13")["build-derived"]["status"] == "success"
@@ -635,16 +685,19 @@ def test_force_reruns_successful_market_date_step(tmp_path: Path) -> None:
     )
     calls: list[str] = []
 
-    assert run_update_daily.run_daily_update(
-        root=tmp_path,
-        state_file=state_file,
-        run_log=tmp_path / "run.log",
-        today=date(2026, 6, 13),
-        as_of_date="2026-06-13",
-        market_date="2026-06-12",
-        force=True,
-        command_runner=lambda step, log_path: calls.append(step.id) or 0,
-    ) == 0
+    assert (
+        run_update_daily.run_daily_update(
+            root=tmp_path,
+            state_file=state_file,
+            run_log=tmp_path / "run.log",
+            today=date(2026, 6, 13),
+            as_of_date="2026-06-13",
+            market_date="2026-06-12",
+            force=True,
+            command_runner=lambda step, log_path: calls.append(step.id) or 0,
+        )
+        == 0
+    )
 
     assert "market" in calls
 
@@ -672,15 +725,18 @@ steps:
     )
     calls: list[str] = []
 
-    assert run_update_daily.run_daily_update(
-        root=tmp_path,
-        state_file=state_file,
-        run_log=tmp_path / "run.log",
-        today=date(2026, 6, 13),
-        as_of_date="2026-06-13",
-        market_date="2026-06-12",
-        command_runner=lambda step, log_path: calls.append(step.id) or 0,
-    ) == 0
+    assert (
+        run_update_daily.run_daily_update(
+            root=tmp_path,
+            state_file=state_file,
+            run_log=tmp_path / "run.log",
+            today=date(2026, 6, 13),
+            as_of_date="2026-06-13",
+            market_date="2026-06-12",
+            command_runner=lambda step, log_path: calls.append(step.id) or 0,
+        )
+        == 0
+    )
 
     assert calls == []
     assert _state(state_file)["version"] == 2

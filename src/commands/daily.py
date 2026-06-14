@@ -6,7 +6,12 @@ from pathlib import Path
 
 import click
 
-from src.tools.run_update_daily import DailyWorkflowConfigError, RunDailyUpdateLockError, StateFileError, run_daily_update
+from src.tools.run_update_daily import (
+    DailyWorkflowConfigError,
+    RunDailyUpdateLockError,
+    StateFileError,
+    run_daily_update,
+)
 from src.utils import paths
 
 

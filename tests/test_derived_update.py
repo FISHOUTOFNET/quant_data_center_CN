@@ -1,12 +1,19 @@
 from __future__ import annotations
 
 import json
+import os
+from datetime import date, datetime
 from pathlib import Path
 
+import pandas as pd
 import pytest
 
 from src.sources.derived import update as update_module
 from src.sources.derived.common import BuildDerivedLockError, build_derived_file_lock
+from src.sources.derived.stock_daily_bar import build_cn_stock_daily_bar
+from src.storage.parquet_store import ParquetStore
+
+NOW = datetime(2024, 1, 5, 12, 0)
 
 
 @pytest.mark.parametrize(
@@ -171,3 +178,125 @@ def test_build_derived_incremental_falls_back_to_full_when_target_missing(
     )
 
     assert calls == [("security_master", None), ("daily_bar", None)]
+
+
+def test_incremental_detects_source_business_change_with_old_mtime(tmp_path: Path, daily_sample) -> None:
+    store = ParquetStore(root=tmp_path)
+    store.write_dataset("cn_security_master", _master())
+    source_path = store.write_dataset(
+        "baostock_cn_stock_daily_bar_unadjusted", daily_sample(), {"code": "sh.600000"}
+    ).primary_path
+    build_cn_stock_daily_bar(root=tmp_path, build_views=False, refresh_registry=False, now=lambda: NOW)
+    old_mtime = source_path.stat().st_mtime
+
+    changed_source = daily_sample()
+    changed_source.loc[0, "close"] = 9.9
+    store.write_dataset("baostock_cn_stock_daily_bar_unadjusted", changed_source, {"code": "sh.600000"})
+    os.utime(source_path, (old_mtime, old_mtime))
+
+    changed = update_module._changed_security_ids_for_target(
+        store, store.read_dataset("cn_security_master"), "daily_bar", None
+    )
+
+    assert changed == ("SH.600000",)
+
+
+def test_incremental_ignores_touch_when_semantic_hash_unchanged(tmp_path: Path, daily_sample) -> None:
+    store = ParquetStore(root=tmp_path)
+    store.write_dataset("cn_security_master", _master())
+    source_path = store.write_dataset(
+        "baostock_cn_stock_daily_bar_unadjusted", daily_sample(), {"code": "sh.600000"}
+    ).primary_path
+    build_cn_stock_daily_bar(root=tmp_path, build_views=False, refresh_registry=False, now=lambda: NOW)
+
+    os.utime(source_path, None)
+
+    changed = update_module._changed_security_ids_for_target(
+        store, store.read_dataset("cn_security_master"), "daily_bar", None
+    )
+
+    assert changed == ()
+
+
+def test_incremental_ignores_fetched_at_only_change(tmp_path: Path) -> None:
+    store = ParquetStore(root=tmp_path)
+    master = _master().assign(baostock_code="", akshare_code="600000")
+    store.write_dataset("cn_security_master", master)
+    store.write_dataset(
+        "akshare_cn_stock_daily_bar_unadjusted", _akshare_daily("2024-01-03 12:00:00"), {"code": "600000"}
+    )
+    build_cn_stock_daily_bar(root=tmp_path, build_views=False, refresh_registry=False, now=lambda: NOW)
+
+    store.write_dataset(
+        "akshare_cn_stock_daily_bar_unadjusted", _akshare_daily("2024-01-04 12:00:00"), {"code": "600000"}
+    )
+
+    changed = update_module._changed_security_ids_for_target(
+        store, store.read_dataset("cn_security_master"), "daily_bar", None
+    )
+
+    assert changed == ()
+
+
+def test_incremental_detects_master_row_hash_change(tmp_path: Path, daily_sample) -> None:
+    store = ParquetStore(root=tmp_path)
+    store.write_dataset("cn_security_master", _master())
+    store.write_dataset("baostock_cn_stock_daily_bar_unadjusted", daily_sample(), {"code": "sh.600000"})
+    build_cn_stock_daily_bar(root=tmp_path, build_views=False, refresh_registry=False, now=lambda: NOW)
+    changed_master = store.read_dataset("cn_security_master")
+    changed_master.loc[0, "name"] = "Renamed Bank"
+
+    changed = update_module._changed_security_ids_for_target(store, changed_master, "daily_bar", None)
+
+    assert changed == ("SH.600000",)
+
+
+def _master() -> pd.DataFrame:
+    return pd.DataFrame(
+        [
+            {
+                "security_id": "SH.600000",
+                "code": "600000",
+                "exchange": "SH",
+                "name": "PF Bank",
+                "security_type": "1",
+                "board": "main",
+                "baostock_code": "sh.600000",
+                "akshare_code": "600000",
+                "qlib_symbol": "sh600000",
+                "ipo_date": date(1999, 11, 10),
+                "delist_date": None,
+                "listing_status": "active",
+                "is_active": True,
+                "source_priority": "mixed",
+                "latest_source_date": date(2024, 1, 5),
+                "updated_at": NOW,
+            }
+        ]
+    )
+
+
+def _akshare_daily(fetched_at: str) -> pd.DataFrame:
+    return pd.DataFrame(
+        [
+            {
+                "date": date(2024, 1, 2),
+                "code": "600000",
+                "source_symbol": "600000",
+                "open": 8.1,
+                "high": 8.4,
+                "low": 8.0,
+                "close": 8.2,
+                "volume": 1000,
+                "amount": 8200.0,
+                "amplitude": 1.0,
+                "pct_change": 2.5,
+                "price_change": 0.2,
+                "turnover_rate": 0.1,
+                "adjustment": "unadjusted",
+                "source_endpoint": "stock_zh_a_hist",
+                "quality_status": "daily_bar_confirmed",
+                "fetched_at": pd.Timestamp(fetched_at),
+            }
+        ]
+    )

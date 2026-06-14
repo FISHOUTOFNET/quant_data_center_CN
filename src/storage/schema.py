@@ -473,10 +473,34 @@ PIPELINE_CHECKPOINTS_SCHEMA = pa.schema(
     ]
 )
 
+DATASET_PARTITION_MANIFEST_SCHEMA = pa.schema(
+    [
+        pa.field("dataset", pa.string()),
+        pa.field("partition_column", pa.string()),
+        pa.field("partition_value", pa.string()),
+        pa.field("output_path", pa.string()),
+        pa.field("row_count", pa.int64()),
+        pa.field("min_date", pa.string()),
+        pa.field("max_date", pa.string()),
+        pa.field("content_hash", pa.string()),
+        pa.field("semantic_hash", pa.string()),
+        pa.field("schema_hash", pa.string()),
+        pa.field("source_signature", pa.string()),
+        pa.field("master_row_hash", pa.string()),
+        pa.field("file_size_bytes", pa.int64()),
+        pa.field("file_mtime", pa.timestamp("ms")),
+        pa.field("run_id", pa.string()),
+        pa.field("writer_pid", pa.int64()),
+        pa.field("writer_thread", pa.string()),
+        pa.field("updated_at", pa.timestamp("ms")),
+    ]
+)
+
 METADATA_SCHEMAS: Mapping[str, pa.Schema] = {
     "pipeline_runs": PIPELINE_RUNS_SCHEMA,
     "dataset_update_status": DATASET_UPDATE_STATUS_SCHEMA,
     "pipeline_checkpoints": PIPELINE_CHECKPOINTS_SCHEMA,
+    "dataset_partition_manifest": DATASET_PARTITION_MANIFEST_SCHEMA,
 }
 
 DATASET_SCHEMAS: Mapping[str, pa.Schema] = {

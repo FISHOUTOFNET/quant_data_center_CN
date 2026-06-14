@@ -67,6 +67,7 @@ qdc build-derived --target valuation --security-id SH.600000
 qdc build-security-master
 qdc run-update-daily
 qdc build-duckdb-views
+qdc rebuild-partition-manifest --dataset all
 qdc migrate-metadata-duckdb
 ```
 
@@ -74,7 +75,7 @@ The source layer remains unchanged: `baostock_*`, `akshare_*`, and `qlib_*` data
 
 The curated local layer contains `cn_stock_daily_bar` and `cn_stock_valuation`. They are materialized by `security_id` partition and are intended for research, backtesting, and Qlib feature engineering. The daily workflow (`qdc run-update-daily`) runs `qdc build-derived --target all --mode incremental --no-build-duckdb-views` after all required upstream steps succeed, then runs `qdc build-duckdb-views` to refresh query views.
 
-`build-derived` supports two modes. `--mode incremental` is the default and is used by the daily workflow; it refreshes `cn_security_master` in full because it is small, then rebuilds only changed `security_id` partitions for `cn_stock_daily_bar` and `cn_stock_valuation`. Change detection uses local metadata and Parquet partition mtimes, never a network call. If the changed partition set cannot be determined reliably, the affected target falls back to full and logs a warning. `--mode full` preserves the previous full-rebuild behavior and is the manual repair path.
+`build-derived` supports two modes. `--mode incremental` is the default and is used by the daily workflow; it refreshes `cn_security_master` in full because it is small, then rebuilds only changed `security_id` partitions for `cn_stock_daily_bar` and `cn_stock_valuation`. Change detection uses `dataset_partition_manifest.source_signature`, which is derived from source partition `semantic_hash` values plus the relevant `cn_security_master` row hash; it no longer depends on Parquet file mtimes. If the changed partition set cannot be determined reliably, the affected target falls back to full and logs a warning. `--mode full` preserves the previous full-rebuild behavior and is the manual repair path.
 
 Manual repair examples:
 
@@ -300,8 +301,16 @@ data/
 DuckDB is split by responsibility:
 
 - Query views live in `data/duckdb/quant.duckdb` and are rebuilt by `qdc build-duckdb-views`.
-- Pipeline metadata lives in `data/metadata/qdc_metadata.duckdb`: `pipeline_runs`, `dataset_update_status`, and `pipeline_checkpoints`.
+- Pipeline metadata lives in `data/metadata/qdc_metadata.duckdb`: `pipeline_runs`, `dataset_update_status`, `pipeline_checkpoints`, and the core write ledger `dataset_partition_manifest`.
 - Existing metadata tables in an old `data/duckdb/quant.duckdb` can be copied with `qdc migrate-metadata-duckdb`; the migration is idempotent and skips missing old tables.
+
+`dataset_partition_manifest` is core pipeline metadata, not an optional registry. `content_hash` records complete partition content for audit. `semantic_hash` excludes non-business collection timestamps such as `fetched_at` and `updated_at` and is used for derived incremental dependency checks. After first upgrading an existing checkout, run:
+
+```powershell
+qdc rebuild-partition-manifest --dataset all
+```
+
+This backfills source partition manifests from local `data/parquet` files without network access. Derived partition `source_signature` values may be empty after a CLI backfill and will be filled by the next derived rebuild.
 
 ## 查询示例
 
@@ -404,7 +413,7 @@ failed step are recorded as `blocked`. The final process exit code remains
 non-zero when any required step failed or was blocked, so Windows Task Scheduler
 and external monitors can still alert on partial failures.
 
-The daily orchestration flow is configured in `config/daily_workflow.yaml`: upstream source updates → `qdc build-derived --target all --mode incremental --no-build-duckdb-views` → `qdc build-duckdb-views`. The `build-derived` step depends on required upstream steps, refreshes `cn_security_master`, and incrementally rebuilds affected `cn_stock_daily_bar` / `cn_stock_valuation` partitions.
+The daily orchestration flow is configured in `config/daily_workflow.yaml`: upstream source updates → `qdc build-derived --target all --mode incremental --no-build-duckdb-views` → `qdc build-duckdb-views`. The `build-derived` step depends on required upstream steps, refreshes `cn_security_master`, and incrementally rebuilds affected `cn_stock_daily_bar` / `cn_stock_valuation` partitions using manifest `source_signature` comparisons.
 
 查询任务状态：
 

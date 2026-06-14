@@ -14,6 +14,7 @@ import pandas as pd
 import pyarrow as pa
 
 from src.storage.schema import (
+    DATASET_PARTITION_MANIFEST_SCHEMA,
     DATASET_UPDATE_STATUS_SCHEMA,
     PIPELINE_CHECKPOINTS_SCHEMA,
     PIPELINE_RUNS_SCHEMA,
@@ -26,7 +27,7 @@ from src.utils.logging import logger
 CHECKPOINT_KEY_COLUMNS = ["pipeline", "dataset", "code", "start_date", "end_date"]
 DUCKDB_METADATA_CONNECT_MAX_RETRIES = 5
 DUCKDB_METADATA_CONNECT_RETRY_DELAY = 0.5
-METADATA_TABLES = ("pipeline_runs", "dataset_update_status", "pipeline_checkpoints")
+METADATA_TABLES = ("pipeline_runs", "dataset_update_status", "pipeline_checkpoints", "dataset_partition_manifest")
 _DB_LOCKS: WeakValueDictionary[Path, RLock] = WeakValueDictionary()
 _DB_LOCKS_GUARD = RLock()
 
@@ -107,6 +108,27 @@ class DuckDBMetadataStore:
                 )
                 """,
                 "INSERT INTO pipeline_checkpoints SELECT * FROM incoming",
+            )
+
+    def upsert_dataset_partition_manifest(self, df: pd.DataFrame) -> None:
+        incoming = _clean_dataframe_for_schema(df, DATASET_PARTITION_MANIFEST_SCHEMA)
+        if incoming.empty:
+            return
+        with self._connection() as conn:
+            self._register_and_execute(
+                conn,
+                incoming,
+                """
+                DELETE FROM dataset_partition_manifest
+                WHERE EXISTS (
+                    SELECT 1
+                    FROM incoming
+                    WHERE incoming.dataset = dataset_partition_manifest.dataset
+                      AND incoming.partition_column = dataset_partition_manifest.partition_column
+                      AND incoming.partition_value = dataset_partition_manifest.partition_value
+                )
+                """,
+                "INSERT INTO dataset_partition_manifest SELECT * FROM incoming",
             )
 
     def persist_update_metadata(
@@ -212,6 +234,29 @@ class DuckDBMetadataStore:
                 PIPELINE_CHECKPOINTS_SCHEMA,
             )
 
+    def read_dataset_partition_manifest(self, dataset: str | None = None) -> pd.DataFrame:
+        with self._connection() as conn:
+            if dataset is None:
+                df = conn.execute("SELECT * FROM dataset_partition_manifest").df()
+            else:
+                df = conn.execute(
+                    "SELECT * FROM dataset_partition_manifest WHERE dataset = ?",
+                    [dataset],
+                ).df()
+            return _clean_dataframe_for_schema(df, DATASET_PARTITION_MANIFEST_SCHEMA)
+
+    def delete_dataset_partition_manifest(self, dataset: str, partition_column: str, partition_value: str) -> None:
+        with self._connection() as conn:
+            conn.execute(
+                """
+                DELETE FROM dataset_partition_manifest
+                WHERE dataset = ?
+                  AND partition_column = ?
+                  AND partition_value = ?
+                """,
+                [dataset, partition_column, partition_value],
+            )
+
     def initialize(self) -> None:
         with self._connection():
             return
@@ -300,6 +345,30 @@ class DuckDBMetadataStore:
                 output_path VARCHAR,
                 updated_at TIMESTAMP,
                 error_stack VARCHAR
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS dataset_partition_manifest (
+                dataset VARCHAR,
+                partition_column VARCHAR,
+                partition_value VARCHAR,
+                output_path VARCHAR,
+                row_count BIGINT,
+                min_date VARCHAR,
+                max_date VARCHAR,
+                content_hash VARCHAR,
+                semantic_hash VARCHAR,
+                schema_hash VARCHAR,
+                source_signature VARCHAR,
+                master_row_hash VARCHAR,
+                file_size_bytes BIGINT,
+                file_mtime TIMESTAMP,
+                run_id VARCHAR,
+                writer_pid BIGINT,
+                writer_thread VARCHAR,
+                updated_at TIMESTAMP
             )
             """
         )
@@ -433,6 +502,15 @@ def migrate_metadata_duckdb(
                 if not checkpoints.empty:
                     target_store.upsert_pipeline_checkpoints(checkpoints)
                 migrated["pipeline_checkpoints"] = len(checkpoints)
+
+            if _duckdb_table_exists(source_conn, "dataset_partition_manifest"):
+                manifests = _clean_dataframe_for_schema(
+                    source_conn.execute("SELECT * FROM dataset_partition_manifest").df(),
+                    DATASET_PARTITION_MANIFEST_SCHEMA,
+                )
+                if not manifests.empty:
+                    target_store.upsert_dataset_partition_manifest(manifests)
+                migrated["dataset_partition_manifest"] = len(manifests)
     finally:
         target_store.close()
     logger.info(

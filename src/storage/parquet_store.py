@@ -27,6 +27,7 @@ from src.storage.dataset_catalog import (
     normalize_adjustment,
 )
 from src.storage.metadata_store import DuckDBMetadataStore
+from src.storage.partition_manifest import dataset_partition_manifest_row
 from src.storage.schema import field_names
 from src.utils import paths
 from src.utils.logging import logger
@@ -456,7 +457,7 @@ class ParquetStore:
             incoming = self._deduplicate_dataset_frame(definition, incoming)
             incoming = self._sort_dataset_frame(definition, incoming)
             definition.validator(incoming)
-        self._write_prepared_dataset(definition, incoming, path)
+        self._write_prepared_dataset(definition, incoming, path, partition)
         return DatasetWriteResult(
             paths=(path,),
             row_count=len(incoming),
@@ -532,7 +533,7 @@ class ParquetStore:
         combined = self._deduplicate_dataset_frame(definition, combined)
         combined = self._sort_dataset_frame(definition, combined)
         definition.validator(combined)
-        self._write_prepared_dataset(definition, combined, path)
+        self._write_prepared_dataset(definition, combined, path, partition)
         return DatasetWriteResult(
             paths=(path,),
             row_count=len(fresh),
@@ -540,9 +541,16 @@ class ParquetStore:
             skipped_partitions=0,
         )
 
-    def _write_prepared_dataset(self, definition: DatasetDefinition, df: pd.DataFrame, path: Path) -> None:
+    def _write_prepared_dataset(
+        self,
+        definition: DatasetDefinition,
+        df: pd.DataFrame,
+        path: Path,
+        partition: Partition,
+    ) -> None:
         self._cleanup_legacy_partitions(definition)
         self.atomic_write(df, definition.schema, path)
+        self._upsert_partition_manifest_after_write(definition, df, path, partition)
         self._mark_dataset_dirty(definition.id)
         run_id, pid, thread = pipeline_log_values()
         logger.info(
@@ -553,6 +561,69 @@ class ParquetStore:
             definition.id,
             len(df),
             path,
+        )
+
+    def _upsert_partition_manifest_after_write(
+        self,
+        definition: DatasetDefinition,
+        df: pd.DataFrame,
+        path: Path,
+        partition: Partition,
+        *,
+        source_signature_value: str = "",
+        master_row_hash_value: str = "",
+    ) -> None:
+        if self._is_staging_path(path):
+            return
+        partition_column = definition.partition_column or ""
+        partition_value = self._partition_value(definition, partition)
+        run_id, pid, thread = pipeline_log_values()
+        writer_pid = int(pid) if isinstance(pid, int | str) else 0
+        row = dataset_partition_manifest_row(
+            dataset=definition.id,
+            partition_column=partition_column,
+            partition_value=partition_value,
+            output_path=path,
+            root=self.root,
+            df=df,
+            schema=definition.schema,
+            source_signature_value=source_signature_value,
+            master_row_hash_value=master_row_hash_value,
+            run_id=str(run_id),
+            writer_pid=writer_pid,
+            writer_thread=str(thread),
+        )
+        self.upsert_dataset_partition_manifest(pd.DataFrame([row]))
+
+    def upsert_written_dataset_partition_manifest(
+        self,
+        dataset_id: str,
+        df: pd.DataFrame,
+        partition: Partition = None,
+        *,
+        source_signature_value: str = "",
+        master_row_hash_value: str = "",
+    ) -> Path:
+        definition = dataset_definition(dataset_id)
+        path = self.dataset_path(definition.id, partition)
+        if not path.exists():
+            raise FileNotFoundError(f"Cannot write manifest for missing partition: {path}")
+        cleaned = self.prepare_dataset_frame(definition.id, df, partition)
+        self._upsert_partition_manifest_after_write(
+            definition,
+            cleaned,
+            path,
+            partition,
+            source_signature_value=source_signature_value,
+            master_row_hash_value=master_row_hash_value,
+        )
+        return self.metadata_path("dataset_partition_manifest")
+
+    def _is_staging_path(self, path: Path) -> bool:
+        staging_dir = (self.root / "data" / "parquet" / ".staging").resolve()
+        candidates = (self.parquet_dir.resolve(), path.resolve())
+        return any(".staging" in candidate.parts for candidate in candidates) or any(
+            _is_relative_to(candidate, staging_dir) for candidate in candidates
         )
 
     def _partition_value(self, definition: DatasetDefinition, partition: Partition) -> str:
@@ -646,6 +717,17 @@ class ParquetStore:
         self._metadata_store.upsert_pipeline_checkpoints(df)
         return path
 
+    def upsert_dataset_partition_manifest(self, df: pd.DataFrame) -> Path:
+        path = self.metadata_path("dataset_partition_manifest")
+        self._metadata_store.upsert_dataset_partition_manifest(df)
+        return path
+
+    def read_dataset_partition_manifest(self, dataset: str | None = None) -> pd.DataFrame:
+        return self._metadata_store.read_dataset_partition_manifest(dataset)
+
+    def delete_dataset_partition_manifest(self, dataset: str, partition_column: str, partition_value: str) -> None:
+        self._metadata_store.delete_dataset_partition_manifest(dataset, partition_column, partition_value)
+
     def persist_update_metadata(
         self,
         run_rows: list[dict[str, object]],
@@ -715,3 +797,11 @@ class ParquetStore:
 
     def initialize_empty_metadata(self) -> None:
         self._metadata_store.initialize()
+
+
+def _is_relative_to(path: Path, parent: Path) -> bool:
+    try:
+        path.relative_to(parent)
+    except ValueError:
+        return False
+    return True

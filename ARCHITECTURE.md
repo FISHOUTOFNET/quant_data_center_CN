@@ -74,7 +74,7 @@ Daily incremental rebuild:
 qdc build-derived --target all --mode incremental --no-build-duckdb-views
 ```
 
-`--mode incremental` is the daily default. It refreshes `cn_security_master` in full because master is small, then uses local metadata and Parquet partition mtimes to map changed source partitions to affected `security_id` values. `cn_stock_daily_bar` and `cn_stock_valuation` then stage and atomically promote only those partitions. If the changed set cannot be determined reliably, the affected target safely falls back to full and logs a warning.
+`--mode incremental` is the daily default. It refreshes `cn_security_master` in full because master is small, then compares `dataset_partition_manifest.source_signature` for each derived partition. A source signature is computed from the participating source partition `semantic_hash` values plus the relevant `cn_security_master` row hash, so business-data changes and master mapping changes are detected without reading Parquet file mtimes. `cn_stock_daily_bar` and `cn_stock_valuation` then stage and atomically promote only those partitions. If the changed set cannot be determined reliably, the affected target safely falls back to full and logs a warning.
 
 Single-partition repair:
 
@@ -203,7 +203,9 @@ data/
 
 - `data/duckdb/quant.duckdb` is the query-view database owned by `DuckDBStore.build_views()`.
 - `data/metadata/qdc_metadata.duckdb` is the pipeline metadata database owned by `DuckDBMetadataStore`.
-- Old metadata tables left in `data/duckdb/quant.duckdb` are not modified by default. Run `qdc migrate-metadata-duckdb` to copy `pipeline_runs`, `dataset_update_status`, and `pipeline_checkpoints` into the new metadata database. The migration is idempotent and skips missing old tables.
+- `dataset_partition_manifest` is core pipeline metadata and a partition-level storage write ledger, not an optional registry. It records `content_hash` for complete-content audit and `semantic_hash` for derived dependency checks; semantic hashes exclude non-business collection timestamps such as `fetched_at` and `updated_at`.
+- Old metadata tables left in `data/duckdb/quant.duckdb` are not modified by default. Run `qdc migrate-metadata-duckdb` to copy metadata tables into the new metadata database. The migration is idempotent and skips missing old tables.
+- After upgrading an existing local data directory, run `qdc rebuild-partition-manifest --dataset all` to backfill source partition manifests from local `data/parquet` files without network access. Use `--include-derived` only when you intentionally want to rebuild derived ledger rows; derived `source_signature` values are normally refreshed by `build-derived`.
 
 写入策略：
 
@@ -221,6 +223,7 @@ data/
 - `pipeline_runs`：每个任务的运行记录。
 - `dataset_update_status`：每个数据集/代码的最近状态。
 - `pipeline_checkpoints`：续传判断依据。
+- `dataset_partition_manifest`：每个正式 Parquet 分区的核心写入 ledger，也是 derived incremental 的依赖判定依据。
 
 `--resume` 默认开启，只有 checkpoint 成功且目标文件仍存在时才跳过。`--force` 会忽略 checkpoint 重新执行。
 

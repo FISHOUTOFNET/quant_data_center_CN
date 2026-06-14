@@ -218,11 +218,13 @@ def test_metadata_migration_copies_legacy_tables_idempotently(tmp_path) -> None:
         "pipeline_runs": 1,
         "dataset_update_status": 1,
         "pipeline_checkpoints": 0,
+        "dataset_partition_manifest": 0,
     }
     assert second["migrated_rows"] == {
         "pipeline_runs": 0,
         "dataset_update_status": 1,
         "pipeline_checkpoints": 0,
+        "dataset_partition_manifest": 0,
     }
     assert len(metadata.read_pipeline_runs()) == 1
     assert len(metadata.read_dataset_update_status()) == 1

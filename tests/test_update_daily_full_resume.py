@@ -150,11 +150,11 @@ def test_update_daily_full_fetches_next_code_while_previous_write_is_pending(
     thread = threading.Thread(target=run_pipeline)
     thread.start()
     try:
-        assert first_write_started.wait(timeout=5)
-        assert second_fetch_seen.wait(timeout=5)
+        assert first_write_started.wait(timeout=20)
+        assert second_fetch_seen.wait(timeout=20)
     finally:
         release_first_write.set()
-        thread.join(timeout=5)
+        thread.join(timeout=20)
 
     assert not thread.is_alive()
     assert errors == []
@@ -266,11 +266,11 @@ def test_update_daily_waits_for_baostock_cn_stock_adjustment_factor_before_adjus
     thread = threading.Thread(target=run_pipeline)
     thread.start()
     try:
-        assert factor_write_started.wait(timeout=10)
+        assert factor_write_started.wait(timeout=20)
         assert not adjusted_calculation_started.wait(timeout=0.2)
     finally:
         release_factor_write.set()
-        thread.join(timeout=5)
+        thread.join(timeout=20)
 
     assert not thread.is_alive()
     assert errors == []

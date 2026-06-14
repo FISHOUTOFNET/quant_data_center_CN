@@ -1194,13 +1194,16 @@ def _mark_abandoned_running_steps_by_key(
         steps_for_key = [
             item for item in steps if _state_key_for_step(item, effective_dates, run_instance_key) == state_key
         ]
-        changed = _mark_abandoned_running_steps(
-            steps_for_key,
-            step_state,
-            log_path,
-            now,
-            active_lock_owner,
-        ) or changed
+        changed = (
+            _mark_abandoned_running_steps(
+                steps_for_key,
+                step_state,
+                log_path,
+                now,
+                active_lock_owner,
+            )
+            or changed
+        )
     return changed
 
 
