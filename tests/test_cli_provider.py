@@ -17,6 +17,7 @@ def test_cli_help_exposes_core_commands_and_not_registry_server() -> None:
     for command in [
         "akshare",
         "update-baostock-daily",
+        "update-baostock-market-session",
         "update-baostock-valuation-percentile",
         "repair-baostock-daily",
         "run-update-daily",

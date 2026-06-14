@@ -29,7 +29,7 @@ def register_daily_commands(root: click.Group) -> None:
         is_flag=True,
         help="Do not skip steps from workflow success state, but still read and update the state file.",
     )
-    @click.option("--start-at", default=None, help="Start at a specific daily step id, e.g. baostock-qfq.")
+    @click.option("--start-at", default=None, help="Start at a specific daily step id, e.g. baostock-market-session.")
     @click.option("--as-of-date", default=None, help="Candidate date for market-date resolution, YYYY-MM-DD.")
     @click.option("--market-date", default=None, help="Override resolved market date for repair/backfill, YYYY-MM-DD.")
     @click.option("--state-file", type=click.Path(path_type=Path), default=None, help="Daily step state JSON path.")

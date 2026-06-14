@@ -40,14 +40,6 @@ steps:
     command: ["{qdc}", "akshare", "update", "--target", "spot_quote", "--end", "{market_date}", "--no-build-duckdb-views"]
     optional: true
 
-  - id: baostock-unadjusted
-    name: update-baostock-daily unadjusted
-    schedule_policy: daily
-    state_key_policy: market_date
-    resume_policy: skip_if_success
-    data_freshness_policy: market_session
-    command: ["{qdc}", "update-baostock-daily", "--dataset", "baostock_cn_stock_daily_bar_unadjusted", "--end", "{market_date}", "--no-build-duckdb-views"]
-
   - id: baostock-basic
     name: update-baostock-daily stock basic
     schedule_policy: daily
@@ -55,6 +47,28 @@ steps:
     resume_policy: skip_if_success
     data_freshness_policy: market_session
     command: ["{qdc}", "update-baostock-daily", "--dataset", "baostock_cn_stock_basic", "--end", "{market_date}", "--no-build-duckdb-views"]
+
+  - id: baostock-market-session
+    name: update-baostock-market-session
+    schedule_policy: daily
+    state_key_policy: market_date
+    resume_policy: always_run
+    data_freshness_policy: market_session
+    command:
+      - "{qdc}"
+      - update-baostock-market-session
+      - "--end"
+      - "{market_date}"
+      - "--natural-date"
+      - "{natural_date}"
+      - "--candidate-date"
+      - "{candidate_date}"
+      - "--market-date"
+      - "{market_date}"
+      - "--no-build-duckdb-views"
+    depends_on:
+      - step: baostock-basic
+        state_key_policy: market_date
 
   - id: baostock-valuation-percentile
     name: update-baostock-valuation-percentile
@@ -64,7 +78,7 @@ steps:
     data_freshness_policy: market_session
     command: ["{qdc}", "update-baostock-valuation-percentile", "--no-build-duckdb-views"]
     depends_on:
-      - step: baostock-unadjusted
+      - step: baostock-market-session
         state_key_policy: market_date
 
   - id: akshare-yjyg-em
@@ -76,40 +90,6 @@ steps:
     command: ["{qdc}", "akshare", "update", "--target", "yjyg_em", "--mode", "incremental", "--no-build-duckdb-views"]
     optional: true
     timeout_seconds: 900
-
-  - id: baostock-adjustment-factor
-    name: update-baostock-daily adjustment factor
-    schedule_policy: market_window
-    state_key_policy: market_date
-    resume_policy: skip_if_success
-    data_freshness_policy: market_session
-    command: ["{qdc}", "update-baostock-daily", "--dataset", "baostock_cn_stock_adjustment_factor", "--end", "{market_date}", "--no-build-duckdb-views"]
-
-  - id: baostock-qfq
-    name: update-baostock-daily qfq
-    schedule_policy: market_window
-    state_key_policy: market_date
-    resume_policy: skip_if_success
-    data_freshness_policy: market_session
-    command: ["{qdc}", "update-baostock-daily", "--dataset", "baostock_cn_stock_daily_bar_qfq", "--end", "{market_date}", "--no-build-duckdb-views"]
-    depends_on:
-      - step: baostock-unadjusted
-        state_key_policy: market_date
-      - step: baostock-adjustment-factor
-        state_key_policy: market_date
-
-  - id: baostock-hfq
-    name: update-baostock-daily hfq
-    schedule_policy: market_window
-    state_key_policy: market_date
-    resume_policy: skip_if_success
-    data_freshness_policy: market_session
-    command: ["{qdc}", "update-baostock-daily", "--dataset", "baostock_cn_stock_daily_bar_hfq", "--end", "{market_date}", "--no-build-duckdb-views"]
-    depends_on:
-      - step: baostock-unadjusted
-        state_key_policy: market_date
-      - step: baostock-adjustment-factor
-        state_key_policy: market_date
 
   - id: akshare-valuation-full
     name: akshare update valuation full
@@ -183,21 +163,15 @@ steps:
     depends_on:
       - step: akshare-spot-quote
         state_key_policy: market_date
-      - step: baostock-unadjusted
-        state_key_policy: market_date
       - step: baostock-basic
+        state_key_policy: market_date
+      - step: baostock-market-session
         state_key_policy: market_date
       - step: baostock-valuation-percentile
         state_key_policy: market_date
       - step: financial-report
         state_key_policy: natural_date
       - step: akshare-delist
-        state_key_policy: market_date
-      - step: baostock-adjustment-factor
-        state_key_policy: market_date
-      - step: baostock-qfq
-        state_key_policy: market_date
-      - step: baostock-hfq
         state_key_policy: market_date
       - step: akshare-valuation-full
         state_key_policy: market_date

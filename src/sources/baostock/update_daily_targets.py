@@ -24,6 +24,8 @@ from src.sources.common.market_data import MarketDataProvider
 from src.storage.parquet_store import ParquetStore
 from src.utils.logging import logger
 
+BAOSTOCK_MARKET_SESSION_DAILY_TARGET = "baostock_market_session_daily"
+
 
 def _daily_target_plans(
     store: ParquetStore,
@@ -146,6 +148,8 @@ def _checkpoint_lookup_succeeded(
 def _dataset_targets(dataset: str) -> tuple[bool, bool, bool, list[str]]:
     if dataset == "all":
         return True, True, True, list(DAILY_BAR_DATASETS)
+    if dataset == BAOSTOCK_MARKET_SESSION_DAILY_TARGET:
+        return False, False, False, list(DAILY_BAR_DATASETS)
     if dataset == "baostock_cn_trading_calendar":
         return True, False, False, []
     if dataset == "baostock_cn_stock_basic":

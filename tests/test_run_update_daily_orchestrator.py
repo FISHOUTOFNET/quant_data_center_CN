@@ -455,7 +455,7 @@ def test_orchestrator_resumes_after_successful_steps(tmp_path: Path) -> None:
     )
     first_run = list(calls)
     assert first_run[0] == "cleanup"
-    assert "baostock-qfq" in first_run
+    assert "baostock-market-session" in first_run
 
     calls.clear()
     assert (
@@ -470,11 +470,52 @@ def test_orchestrator_resumes_after_successful_steps(tmp_path: Path) -> None:
         == 0
     )
 
-    assert calls == ["cleanup"]
+    assert calls == ["cleanup", "baostock-market-session"]
     natural_states = _steps(state_file, "natural_date:2026-06-05")
     market_states = _steps(state_file, "market_date:2026-06-05")
     assert natural_states["calendar"]["status"] == "success"
-    assert market_states["baostock-qfq"]["status"] == "success"
+    assert market_states["baostock-market-session"]["status"] == "success"
+
+
+def test_baostock_market_session_always_runs_after_same_market_date_regular_day_success(tmp_path: Path) -> None:
+    _write_repo_workflow(tmp_path)
+    state_file = tmp_path / "state.json"
+    log_file = tmp_path / "run.log"
+    calls: list[str] = []
+
+    assert (
+        run_update_daily.run_daily_update(
+            root=tmp_path,
+            state_file=state_file,
+            run_log=log_file,
+            today=date(2026, 6, 10),
+            as_of_date="2026-06-10",
+            market_date="2026-06-10",
+            now=lambda: datetime(2026, 6, 10, 18, 0),
+            command_runner=lambda step, log_path: calls.append(step.id) or 0,
+        )
+        == 0
+    )
+    assert "baostock-market-session" in calls
+    assert _steps(state_file, "market_date:2026-06-10")["baostock-market-session"]["status"] == "success"
+
+    calls.clear()
+    assert (
+        run_update_daily.run_daily_update(
+            root=tmp_path,
+            state_file=state_file,
+            run_log=log_file,
+            today=date(2026, 6, 12),
+            as_of_date="2026-06-10",
+            market_date="2026-06-10",
+            now=lambda: datetime(2026, 6, 12, 18, 0),
+            command_runner=lambda step, log_path: calls.append(step.id) or 0,
+        )
+        == 0
+    )
+
+    assert "baostock-market-session" in calls
+    assert not {"baostock-unadjusted", "baostock-adjustment-factor", "baostock-qfq", "baostock-hfq"} & set(calls)
 
 
 def test_market_date_success_is_reused_on_weekend_and_holiday_monday(tmp_path: Path) -> None:
@@ -879,7 +920,7 @@ def test_orchestrator_force_and_start_at_control_resume(tmp_path: Path) -> None:
                         "steps": {
                             "cleanup": {"status": "success"},
                             "calendar": {"status": "success"},
-                            "baostock-qfq": {"status": "success"},
+                            "baostock-market-session": {"status": "success"},
                         }
                     }
                 }
@@ -908,12 +949,12 @@ def test_orchestrator_force_and_start_at_control_resume(tmp_path: Path) -> None:
             state_file=state_file,
             run_log=log_file,
             today=date(2026, 6, 5),
-            start_at="baostock-qfq",
+            start_at="baostock-market-session",
             command_runner=lambda step, log_path: calls.append(step.id) or 0,
         )
         == 0
     )
-    assert calls[0] == "baostock-qfq"
+    assert calls[0] == "baostock-market-session"
     assert "calendar" not in calls
 
 
@@ -921,11 +962,12 @@ def test_orchestrator_market_window_schedules_heavy_steps_only_in_window() -> No
     friday = [step.id for step in run_update_daily.daily_steps(date(2026, 6, 5), root=REPO_ROOT)]
     monday = [step.id for step in run_update_daily.daily_steps(date(2026, 6, 8), root=REPO_ROOT)]
 
-    assert "baostock-qfq" in friday
+    assert "baostock-market-session" in friday
     assert "akshare-valuation-full" in friday
     assert "akshare-yjyg-em" in friday
-    assert "baostock-unadjusted" in monday
+    assert "baostock-market-session" in monday
     assert "baostock-valuation-percentile" in monday
+    assert "baostock-qfq" not in friday
     assert "baostock-qfq" not in monday
     assert "akshare-valuation-full" not in monday
     assert "akshare-yjyg-em" in monday
@@ -962,14 +1004,11 @@ def test_daily_steps_build_derived_all_before_views(today: date) -> None:
     expected_dependencies = (
         (
             "akshare-spot-quote",
-            "baostock-unadjusted",
             "baostock-basic",
+            "baostock-market-session",
             "baostock-valuation-percentile",
             "financial-report",
             "akshare-delist",
-            "baostock-adjustment-factor",
-            "baostock-qfq",
-            "baostock-hfq",
             "akshare-valuation-full",
             "akshare-daily-bar",
             "sync-qlib",
@@ -977,8 +1016,8 @@ def test_daily_steps_build_derived_all_before_views(today: date) -> None:
         if today.weekday() in {4, 5, 6}
         else (
             "akshare-spot-quote",
-            "baostock-unadjusted",
             "baostock-basic",
+            "baostock-market-session",
             "baostock-valuation-percentile",
             "financial-report",
         )
@@ -1006,8 +1045,11 @@ def test_daily_steps_load_weekday_steps_from_config() -> None:
     steps = run_update_daily.daily_steps(date(2026, 6, 8), root=REPO_ROOT)
     by_id = {step.id: step for step in steps}
 
-    assert by_id["baostock-unadjusted"].schedule_policy == "daily"
-    assert by_id["baostock-unadjusted"].state_key_policy == "market_date"
+    assert by_id["baostock-market-session"].schedule_policy == "daily"
+    assert by_id["baostock-market-session"].state_key_policy == "market_date"
+    assert by_id["baostock-market-session"].resume_policy == "always_run"
+    assert _dependency_ids(by_id["baostock-market-session"]) == ("baostock-basic",)
+    assert steps.index(by_id["baostock-basic"]) < steps.index(by_id["baostock-market-session"])
     assert "baostock-qfq" not in by_id
     assert by_id["build-derived"].command[1:] == (
         "-m",
@@ -1025,7 +1067,8 @@ def test_daily_steps_load_weekend_steps_from_config() -> None:
     steps = run_update_daily.daily_steps(date(2026, 6, 6), root=REPO_ROOT)
     by_id = {step.id: step for step in steps}
 
-    assert "baostock-qfq" in by_id
+    assert "baostock-market-session" in by_id
+    assert "baostock-qfq" not in by_id
     assert "--start" in by_id["akshare-daily-bar"].command
     assert "2026-05-07" in by_id["akshare-daily-bar"].command
     assert "--end" in by_id["akshare-daily-bar"].command
@@ -1063,7 +1106,7 @@ def test_run_daily_update_records_yjyg_em_step_on_weekday(tmp_path: Path) -> Non
     assert states["akshare-yjyg-em"]["status"] == "success"
 
 
-@pytest.mark.parametrize("failed_step", ["baostock-unadjusted", "baostock-valuation-percentile"])
+@pytest.mark.parametrize("failed_step", ["baostock-market-session", "baostock-valuation-percentile"])
 def test_core_baostock_failure_blocks_build_derived(tmp_path: Path, failed_step: str) -> None:
     _write_repo_workflow(tmp_path)
     state_file = tmp_path / "state.json"
