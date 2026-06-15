@@ -128,6 +128,7 @@ class DuckDBStore:
             *[self._generic_dataset_view_sql(definition) for definition in qlib_definitions()],
             self._generic_dataset_view_sql(CN_SECURITY_MASTER_DATASET),
             self._generic_dataset_view_sql(CN_STOCK_DAILY_BAR_DATASET),
+            self._research_daily_bar_view_sql(),
             self._generic_dataset_view_sql(CN_STOCK_VALUATION_DATASET),
             self._baostock_cn_stock_basic_view_sql(),
             self._baostock_cn_trading_calendar_view_sql(),
@@ -154,6 +155,219 @@ class DuckDBStore:
                 f"SELECT * FROM read_parquet('{pattern}', hive_partitioning = true, union_by_name = true);"
             )
         return self._empty_view_sql(view_name, BAOSTOCK_CN_STOCK_ADJUSTMENT_FACTOR_DATASET.schema)
+
+    def _research_daily_bar_view_sql(self) -> str:
+        return """
+CREATE OR REPLACE VIEW v_cn_stock_daily_bar_research AS
+WITH daily AS (
+    SELECT
+        CAST(date AS DATE) AS date,
+        upper(regexp_extract(CAST(code AS VARCHAR), '^(sh|sz|bj)\\.', 1))
+            || '.'
+            || regexp_extract(CAST(code AS VARCHAR), '(\\d{6})', 1) AS security_id,
+        code,
+        upper(regexp_extract(CAST(code AS VARCHAR), '^(sh|sz|bj)\\.', 1)) AS exchange,
+        CAST(NULL AS VARCHAR) AS name,
+        'unadjusted' AS adjustment,
+        open,
+        high,
+        low,
+        close,
+        prev_close,
+        CAST(volume AS DOUBLE) AS volume,
+        amount,
+        turnover_rate,
+        pct_change,
+        trade_status,
+        is_st,
+        TRUE AS is_active
+    FROM v_baostock_cn_stock_daily_bar_unadjusted
+    UNION ALL
+    SELECT
+        CAST(date AS DATE) AS date,
+        upper(regexp_extract(CAST(code AS VARCHAR), '^(sh|sz|bj)\\.', 1))
+            || '.'
+            || regexp_extract(CAST(code AS VARCHAR), '(\\d{6})', 1) AS security_id,
+        code,
+        upper(regexp_extract(CAST(code AS VARCHAR), '^(sh|sz|bj)\\.', 1)) AS exchange,
+        CAST(NULL AS VARCHAR) AS name,
+        'qfq' AS adjustment,
+        open,
+        high,
+        low,
+        close,
+        prev_close,
+        CAST(volume AS DOUBLE) AS volume,
+        amount,
+        turnover_rate,
+        pct_change,
+        trade_status,
+        is_st,
+        TRUE AS is_active
+    FROM v_baostock_cn_stock_daily_bar_qfq
+    UNION ALL
+    SELECT
+        CAST(date AS DATE) AS date,
+        upper(regexp_extract(CAST(code AS VARCHAR), '^(sh|sz|bj)\\.', 1))
+            || '.'
+            || regexp_extract(CAST(code AS VARCHAR), '(\\d{6})', 1) AS security_id,
+        code,
+        upper(regexp_extract(CAST(code AS VARCHAR), '^(sh|sz|bj)\\.', 1)) AS exchange,
+        CAST(NULL AS VARCHAR) AS name,
+        'hfq' AS adjustment,
+        open,
+        high,
+        low,
+        close,
+        prev_close,
+        CAST(volume AS DOUBLE) AS volume,
+        amount,
+        turnover_rate,
+        pct_change,
+        trade_status,
+        is_st,
+        TRUE AS is_active
+    FROM v_baostock_cn_stock_daily_bar_hfq
+),
+pivoted AS (
+    SELECT
+        date,
+        regexp_extract(CAST(code AS VARCHAR), '(\\d{6})', 1) AS code6,
+        max(code) FILTER (WHERE adjustment = 'unadjusted') AS code,
+        max(security_id) FILTER (WHERE adjustment = 'unadjusted') AS security_id,
+        max(exchange) FILTER (WHERE adjustment = 'unadjusted') AS exchange,
+        max(name) FILTER (WHERE adjustment = 'unadjusted') AS name,
+        max(open) FILTER (WHERE adjustment = 'unadjusted') AS open,
+        max(high) FILTER (WHERE adjustment = 'unadjusted') AS high,
+        max(low) FILTER (WHERE adjustment = 'unadjusted') AS low,
+        max(close) FILTER (WHERE adjustment = 'unadjusted') AS close,
+        max(prev_close) FILTER (WHERE adjustment = 'unadjusted') AS prev_close,
+        max(volume) FILTER (WHERE adjustment = 'unadjusted') AS volume,
+        max(amount) FILTER (WHERE adjustment = 'unadjusted') AS amount,
+        max(turnover_rate) FILTER (WHERE adjustment = 'unadjusted') AS turnover_rate,
+        max(pct_change) FILTER (WHERE adjustment = 'unadjusted') AS pct_change,
+        max(trade_status) FILTER (WHERE adjustment = 'unadjusted') AS trade_status,
+        max(is_st) FILTER (WHERE adjustment = 'unadjusted') AS is_st,
+        max(
+            CASE
+                WHEN adjustment = 'unadjusted'
+                 AND lower(CAST(is_active AS VARCHAR)) IN ('true', '1', '1.0', 'yes')
+                    THEN TRUE
+                WHEN adjustment = 'unadjusted'
+                 AND lower(CAST(is_active AS VARCHAR)) IN ('false', '0', '0.0', 'no')
+                    THEN FALSE
+                ELSE NULL
+            END
+        ) AS is_active,
+        max(open) FILTER (WHERE adjustment = 'qfq') AS qfq_open,
+        max(high) FILTER (WHERE adjustment = 'qfq') AS qfq_high,
+        max(low) FILTER (WHERE adjustment = 'qfq') AS qfq_low,
+        max(close) FILTER (WHERE adjustment = 'qfq') AS qfq_close,
+        max(prev_close) FILTER (WHERE adjustment = 'qfq') AS qfq_prev_close,
+        max(open) FILTER (WHERE adjustment = 'hfq') AS hfq_open,
+        max(high) FILTER (WHERE adjustment = 'hfq') AS hfq_high,
+        max(low) FILTER (WHERE adjustment = 'hfq') AS hfq_low,
+        max(close) FILTER (WHERE adjustment = 'hfq') AS hfq_close,
+        max(prev_close) FILTER (WHERE adjustment = 'hfq') AS hfq_prev_close,
+        count(*) FILTER (WHERE adjustment = 'unadjusted') AS unadjusted_rows
+    FROM daily
+    GROUP BY date, code6
+),
+base AS (
+    SELECT *
+    FROM pivoted
+    WHERE unadjusted_rows > 0
+),
+factor_events AS (
+    SELECT
+        regexp_extract(CAST(code AS VARCHAR), '(\\d{6})', 1) AS code6,
+        CAST(dividend_operate_date AS DATE) AS date,
+        max(adjustment_factor) AS adjustment_factor,
+        max(forward_adjust_factor) AS forward_adjust_factor,
+        max(backward_adjust_factor) AS backward_adjust_factor,
+        TRUE AS has_factor_event
+    FROM v_baostock_cn_stock_adjustment_factor
+    GROUP BY code6, date
+),
+joined AS (
+    SELECT
+        base.date,
+        base.security_id,
+        base.code,
+        base.exchange,
+        base.name,
+        base.open,
+        base.high,
+        base.low,
+        base.close,
+        base.prev_close,
+        base.volume,
+        base.amount,
+        base.turnover_rate,
+        base.pct_change,
+        base.trade_status,
+        base.is_st,
+        base.is_active,
+        base.qfq_open,
+        base.qfq_high,
+        base.qfq_low,
+        base.qfq_close,
+        base.qfq_prev_close,
+        base.hfq_open,
+        base.hfq_high,
+        base.hfq_low,
+        base.hfq_close,
+        base.hfq_prev_close,
+        factor_events.adjustment_factor,
+        factor_events.forward_adjust_factor,
+        factor_events.backward_adjust_factor,
+        coalesce(factor_events.has_factor_event, FALSE) AS has_factor_event
+    FROM base
+    LEFT JOIN factor_events
+        ON factor_events.code6 = base.code6
+       AND factor_events.date = base.date
+)
+SELECT
+    date,
+    security_id,
+    code,
+    exchange,
+    name,
+    open,
+    high,
+    low,
+    close,
+    prev_close,
+    volume,
+    amount,
+    turnover_rate,
+    pct_change,
+    trade_status,
+    is_st,
+    is_active,
+    qfq_open,
+    qfq_high,
+    qfq_low,
+    qfq_close,
+    qfq_prev_close,
+    hfq_open,
+    hfq_high,
+    hfq_low,
+    hfq_close,
+    hfq_prev_close,
+    adjustment_factor,
+    forward_adjust_factor,
+    backward_adjust_factor,
+    CASE
+        WHEN has_factor_event THEN TRUE
+        WHEN adjustment_factor IS NOT NULL
+         AND lag(adjustment_factor) OVER (PARTITION BY code ORDER BY date) IS NOT NULL
+         AND adjustment_factor <> lag(adjustment_factor) OVER (PARTITION BY code ORDER BY date)
+            THEN TRUE
+        ELSE FALSE
+    END AS corporate_action_flag
+FROM joined;
+""".strip()
 
     def _partitioned_dataset_view_sql(self, definition: DatasetDefinition) -> str:
         dataset_dir = self.parquet_dir / definition.name
