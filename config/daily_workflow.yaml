@@ -169,14 +169,13 @@ steps:
         state_key_policy: market_date
       - step: baostock-valuation-percentile
         state_key_policy: market_date
-      - step: financial-report
-        state_key_policy: natural_date
       - step: akshare-delist
         state_key_policy: market_date
       - step: akshare-valuation-full
         state_key_policy: market_date
       - step: akshare-daily-bar
         state_key_policy: market_date
+        soft: true
       - step: sync-qlib
         state_key_policy: market_date
 

@@ -57,6 +57,7 @@ class DailyEffectiveDates:
 class DailyDependency:
     step_id: str
     state_key_policy: str | None = None
+    soft: bool = False
 
 
 @dataclass(frozen=True)
@@ -263,10 +264,9 @@ DEFAULT_DAILY_WORKFLOW_CONFIG: dict[str, object] = {
                 "baostock-basic",
                 "baostock-market-session",
                 "baostock-valuation-percentile",
-                "financial-report",
                 "akshare-delist",
                 "akshare-valuation-full",
-                "akshare-daily-bar",
+                {"step": "akshare-daily-bar", "soft": True},
                 "sync-qlib",
             ],
         },
@@ -483,10 +483,17 @@ def _dependencies(value: object, step_id: str) -> list[DailyDependency]:
                     f"Daily workflow dependency {step_id}.{raw_dependency_step} has invalid "
                     f"state_key_policy: {raw_policy!r}; allowed: {allowed_text}"
                 )
+            raw_soft = item.get("soft")
+            if raw_soft is not None and not isinstance(raw_soft, bool):
+                raise DailyWorkflowConfigError(
+                    f"Daily workflow dependency {step_id}.{raw_dependency_step} has invalid "
+                    f"soft field: {raw_soft!r}; must be a boolean"
+                )
             output.append(
                 DailyDependency(
                     raw_dependency_step.strip(),
                     raw_policy.strip() if isinstance(raw_policy, str) else None,
+                    bool(raw_soft) if raw_soft is not None else False,
                 )
             )
             continue
@@ -779,6 +786,20 @@ def run_daily_update(
                     console=True,
                 )
                 continue
+
+            # Log soft dependencies that are not satisfied (they don't block but indicate degraded input)
+            for dep in step.depends_on:
+                if not (isinstance(dep, DailyDependency) and dep.soft):
+                    continue
+                dep_id = _dependency_step_id(dep)
+                dep_status = str(state.get(dep_id, {}).get("status", "pending")) if isinstance(state, dict) else "pending"
+                if dep_status not in SATISFIED_DEPENDENCY_STATUSES:
+                    _emit(
+                        resolved_log,
+                        now,
+                        f"Warning: {step.id} soft dependency {dep_id} has status {dep_status}; proceeding anyway",
+                        console=False,
+                    )
 
             _record_step(step_state, step, "running", None, resolved_log, now)
             _write_state(resolved_state_file, state)
@@ -1284,6 +1305,7 @@ def _blocked_dependencies(
     blocked: list[str] = []
     for dependency in step.depends_on:
         dependency_id = _dependency_step_id(dependency)
+        is_soft = isinstance(dependency, DailyDependency) and dependency.soft
         if steps_by_id is None or effective_dates is None or run_instance_key is None:
             dependency_status = str(state_or_step_state.get(dependency_id, {}).get("status", "pending"))
         else:
@@ -1305,7 +1327,10 @@ def _blocked_dependencies(
                 ).get("status", "pending")
             )
         if dependency_status in FAILED_DEPENDENCY_STATUSES or dependency_status not in SATISFIED_DEPENDENCY_STATUSES:
-            blocked.append(dependency_id)
+            if is_soft:
+                pass  # Soft dependencies never block; warning emitted by caller
+            else:
+                blocked.append(dependency_id)
     return tuple(blocked)
 
 

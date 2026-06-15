@@ -1007,7 +1007,6 @@ def test_daily_steps_build_derived_all_before_views(today: date) -> None:
             "baostock-basic",
             "baostock-market-session",
             "baostock-valuation-percentile",
-            "financial-report",
             "akshare-delist",
             "akshare-valuation-full",
             "akshare-daily-bar",
@@ -1019,13 +1018,11 @@ def test_daily_steps_build_derived_all_before_views(today: date) -> None:
             "baostock-basic",
             "baostock-market-session",
             "baostock-valuation-percentile",
-            "financial-report",
         )
     )
 
     assert "build-derived" in by_id
     assert "build-security-master" not in by_id
-    assert steps.index(by_id["financial-report"]) < steps.index(by_id["build-derived"])
     assert steps.index(by_id["build-derived"]) < steps.index(by_id["build-duckdb-views"])
     assert _dependency_ids(by_id["build-derived"]) == expected_dependencies
     assert _dependency_ids(by_id["build-duckdb-views"]) == ("build-derived",)
@@ -1130,7 +1127,7 @@ def test_core_baostock_failure_blocks_build_derived(tmp_path: Path, failed_step:
     assert failed_step in states["build-derived"]["blocked_by"]
 
 
-def test_weekend_daily_bar_failure_blocks_build_derived(tmp_path: Path) -> None:
+def test_weekend_daily_bar_failure_does_not_block_build_derived(tmp_path: Path) -> None:
     _write_repo_workflow(tmp_path)
     state_file = tmp_path / "state.json"
     log_file = tmp_path / "run.log"
@@ -1147,10 +1144,12 @@ def test_weekend_daily_bar_failure_blocks_build_derived(tmp_path: Path) -> None:
         == 7
     )
 
-    assert "build-derived" not in calls
+    # akshare-daily-bar is a soft dependency of build-derived, so it should still run
+    assert "build-derived" in calls
+    assert "build-duckdb-views" in calls
     states = _steps(state_file, "natural_date:2026-06-06")
-    assert states["build-derived"]["status"] == "blocked"
-    assert states["build-derived"]["blocked_by"] == ["akshare-daily-bar"]
+    assert states["build-derived"]["status"] == "success"
+    assert states["build-duckdb-views"]["status"] == "success"
 
 
 def test_optional_plain_skipped_does_not_block_build_derived(tmp_path: Path) -> None:
@@ -1185,6 +1184,33 @@ def test_failed_optional_hard_status_blocks_followup(status: str) -> None:
     step_state = {"optional-source": {"status": status}}
 
     assert run_update_daily._blocked_dependencies(step, step_state) == ("optional-source",)
+
+
+@pytest.mark.parametrize("status", ["failed", "failed_resource_locked", "failed_timeout_cleanup", "blocked", "abandoned"])
+def test_soft_dependency_failure_does_not_block(status: str) -> None:
+    soft_dep = run_update_daily.DailyDependency("soft-source", soft=True)
+    hard_dep = run_update_daily.DailyDependency("hard-source")
+    step = run_update_daily.DailyStep("derived", "derived", ("cmd",), depends_on=(soft_dep, hard_dep))
+    step_state = {"soft-source": {"status": status}, "hard-source": {"status": "success"}}
+
+    assert run_update_daily._blocked_dependencies(step, step_state) == ()
+
+
+def test_soft_dependency_pending_does_not_block() -> None:
+    soft_dep = run_update_daily.DailyDependency("soft-source", soft=True)
+    step = run_update_daily.DailyStep("derived", "derived", ("cmd",), depends_on=(soft_dep,))
+    step_state = {"soft-source": {"status": "pending"}}
+
+    assert run_update_daily._blocked_dependencies(step, step_state) == ()
+
+
+def test_soft_and_hard_dependency_both_failed_blocks_on_hard_only() -> None:
+    soft_dep = run_update_daily.DailyDependency("soft-source", soft=True)
+    hard_dep = run_update_daily.DailyDependency("hard-source")
+    step = run_update_daily.DailyStep("derived", "derived", ("cmd",), depends_on=(soft_dep, hard_dep))
+    step_state = {"soft-source": {"status": "failed"}, "hard-source": {"status": "failed"}}
+
+    assert run_update_daily._blocked_dependencies(step, step_state) == ("hard-source",)
 
 
 def test_weekend_akshare_valuation_failure_blocks_build_derived(tmp_path: Path) -> None:
