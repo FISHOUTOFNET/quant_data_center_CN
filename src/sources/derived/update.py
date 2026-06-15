@@ -49,6 +49,7 @@ def build_derived_datasets(
     *,
     root: Path | None = None,
     targets: tuple[str, ...] = ("all",),
+    exclude_targets: tuple[str, ...] = (),
     mode: BuildMode = "incremental",
     security_ids: tuple[str, ...] | None = None,
     changed_since: datetime | None = None,
@@ -63,7 +64,7 @@ def build_derived_datasets(
         raise ValueError("--security-id is only supported with --mode incremental")
 
     store = ParquetStore(root=root)
-    expanded = _expand_targets(targets)
+    expanded = _expand_targets(targets, exclude_targets=exclude_targets)
     if any(target in expanded for target in ("daily_bar", "valuation")) and "security_master" not in expanded:
         expanded = ("security_master", *expanded)
 
@@ -103,7 +104,13 @@ def build_derived_datasets(
         return results
 
 
-def _expand_targets(targets: tuple[str, ...]) -> tuple[str, ...]:
+def _expand_targets(targets: tuple[str, ...], *, exclude_targets: tuple[str, ...] = ()) -> tuple[str, ...]:
+    unsupported_excludes = tuple(target for target in exclude_targets if target != "daily_bar")
+    if unsupported_excludes:
+        raise ValueError(f"Unsupported derived exclude target: {unsupported_excludes[0]}")
+    if "daily_bar" in exclude_targets and "daily_bar" in targets:
+        raise ValueError("cannot exclude explicitly requested target: daily_bar")
+
     requested: list[str] = []
     for target in targets:
         if target == "all":
@@ -117,7 +124,7 @@ def _expand_targets(targets: tuple[str, ...]) -> tuple[str, ...]:
     for target in TARGET_ORDER:
         if target in requested and target not in deduped:
             deduped.append(target)
-    return tuple(deduped)
+    return tuple(target for target in deduped if target not in exclude_targets)
 
 
 def _target_security_ids(

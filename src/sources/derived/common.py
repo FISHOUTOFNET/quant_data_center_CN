@@ -147,7 +147,21 @@ def commit_derived_dataset_staging(area: DerivedDatasetStagingArea) -> None:
         area.staging_dataset_dir.rename(area.final_dir)
     except Exception as exc:
         _restore_staging_swap(area, backup_created)
-        raise RuntimeError(f"Failed to promote staged derived dataset {area.dataset_id}") from exc
+        context = {
+            "dataset_id": area.dataset_id,
+            "staging_root": str(area.staging_root),
+            "staging_dataset_dir": str(area.staging_dataset_dir),
+            "final_dir": str(area.final_dir),
+            "backup_dir": str(area.backup_dir),
+            "backup_created": backup_created,
+            "original_exception_type": type(exc).__name__,
+            "original_exception_repr": repr(exc),
+        }
+        logger.exception("Failed to promote staged derived dataset; context={}", context)
+        raise RuntimeError(
+            "Failed to promote staged derived dataset; "
+            + "; ".join(f"{key}={value}" for key, value in context.items())
+        ) from exc
     finally:
         if backup_created and area.backup_dir.exists():
             shutil.rmtree(area.backup_dir, ignore_errors=True)
@@ -170,10 +184,38 @@ def commit_derived_partition_staging(area: DerivedPartitionStagingArea, *, delet
             area.staging_partition_dir.rename(area.final_partition_dir)
     except Exception as exc:
         if backup_created and area.backup_dir.exists() and not area.final_partition_dir.exists():
-            with suppress(Exception):
+            try:
                 area.backup_dir.rename(area.final_partition_dir)
+            except Exception as restore_exc:
+                logger.exception(
+                    "Failed to restore derived partition backup after promote failure; "
+                    "dataset_id={} partition_column={} partition_value={} backup_dir={} final_partition_dir={} "
+                    "restore_exception_type={} restore_exception_repr={}",
+                    area.dataset_id,
+                    area.partition_column,
+                    area.partition_value,
+                    area.backup_dir,
+                    area.final_partition_dir,
+                    type(restore_exc).__name__,
+                    repr(restore_exc),
+                )
+        context = {
+            "dataset_id": area.dataset_id,
+            "partition_column": area.partition_column,
+            "partition_value": area.partition_value,
+            "delete_partition": delete_partition,
+            "staging_root": str(area.staging_root),
+            "staging_partition_dir": str(area.staging_partition_dir),
+            "final_partition_dir": str(area.final_partition_dir),
+            "backup_dir": str(area.backup_dir),
+            "backup_created": backup_created,
+            "original_exception_type": type(exc).__name__,
+            "original_exception_repr": repr(exc),
+        }
+        logger.exception("Failed to promote staged derived partition; context={}", context)
         raise RuntimeError(
-            f"Failed to promote staged derived partition {area.dataset_id}/{area.partition_value}"
+            "Failed to promote staged derived partition; "
+            + "; ".join(f"{key}={value}" for key, value in context.items())
         ) from exc
     finally:
         if backup_created and area.backup_dir.exists():

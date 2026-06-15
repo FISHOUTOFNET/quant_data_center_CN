@@ -11,7 +11,7 @@ import time
 import uuid
 from collections.abc import Callable
 from contextlib import suppress
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any, TextIO
@@ -84,7 +84,7 @@ STATE_KEY_POLICIES = {"natural_date", "market_date", "run_instance"}
 RESUME_POLICIES = {"skip_if_success", "always_run"}
 DATA_FRESHNESS_POLICIES = {"market_session", "natural_daily", "disclosure_calendar", "maintenance"}
 FAILED_DEPENDENCY_STATUSES = {"failed", "failed_resource_locked", "failed_timeout_cleanup", "blocked", "abandoned"}
-SATISFIED_DEPENDENCY_STATUSES = {"success", "skipped", "skipped_checkpoint"}
+SATISFIED_DEPENDENCY_STATUSES = {"success", "success_degraded", "skipped", "skipped_checkpoint"}
 TIMEOUT_EXIT_CODE = 124
 TIMEOUT_CLEANUP_FAILED_EXIT_CODE = 125
 PROCESS_CLEANUP_WAIT_SECONDS = 30
@@ -787,26 +787,84 @@ def run_daily_update(
                 )
                 continue
 
+            effective_step = step
+            degraded_success_reason: str | None = None
+            blocked_reason: str | None = None
+            upstream_degraded_reason = _upstream_degraded_success_reason(
+                step,
+                state,
+                steps_by_id=steps_by_id,
+                effective_dates=effective_dates,
+                run_instance_key=run_instance_key,
+            )
+
             # Log soft dependencies that are not satisfied (they don't block but indicate degraded input)
             for dep in step.depends_on:
                 if not (isinstance(dep, DailyDependency) and dep.soft):
                     continue
-                dep_id = _dependency_step_id(dep)
-                dep_status = str(state.get(dep_id, {}).get("status", "pending")) if isinstance(state, dict) else "pending"
+                dep_id, dep_status, readable_state_key = _resolved_dependency_status(
+                    dep,
+                    state,
+                    steps_by_id=steps_by_id,
+                    effective_dates=effective_dates,
+                    run_instance_key=run_instance_key,
+                )
                 if dep_status not in SATISFIED_DEPENDENCY_STATUSES:
+                    degraded_step = _degraded_build_derived_step_for_akshare_daily_bar(
+                        step,
+                        dep_id,
+                        dep_status,
+                        readable_state_key,
+                    )
+                    if degraded_step is not None:
+                        if degraded_step == "blocked":
+                            blocked_reason = (
+                                "degraded: cannot build target=daily_bar because "
+                                f"{dep_id} status={dep_status} for {readable_state_key}"
+                            )
+                            _emit(
+                                resolved_log,
+                                now,
+                                f"Warning: {step.id} soft dependency {dep_id} has status {dep_status} "
+                                f"for {readable_state_key}; cannot run explicit target=daily_bar while "
+                                "AkShare daily_bar input is degraded",
+                                console=False,
+                            )
+                        else:
+                            effective_step = degraded_step
+                            degraded_success_reason = (
+                                "degraded: excluded target=daily_bar because "
+                                f"{dep_id} status={dep_status} for {readable_state_key}"
+                            )
+                            _emit(
+                                resolved_log,
+                                now,
+                                f"Warning: {step.id} soft dependency {dep_id} has status {dep_status} "
+                                f"for {readable_state_key}; proceeding in degraded mode and excluding "
+                                "target=daily_bar dataset=cn_stock_daily_bar",
+                                console=False,
+                            )
+                        continue
                     _emit(
                         resolved_log,
                         now,
-                        f"Warning: {step.id} soft dependency {dep_id} has status {dep_status}; proceeding anyway",
+                        f"Warning: {step.id} soft dependency {dep_id} has status {dep_status} "
+                        f"for {readable_state_key}; proceeding anyway",
                         console=False,
                     )
 
-            _record_step(step_state, step, "running", None, resolved_log, now)
-            _write_state(resolved_state_file, state)
-            _emit(resolved_log, now, f"Running {step.id} ({step.name})... log={resolved_log}", console=True)
-            _emit(resolved_log, now, f"Command: {step.command_text}", console=False)
+            if blocked_reason is not None:
+                _record_step(step_state, effective_step, "blocked", 1, resolved_log, now, reason=blocked_reason)
+                _write_state(resolved_state_file, state)
+                _emit(resolved_log, now, f"Blocked {step.id}; {blocked_reason}", console=True)
+                continue
 
-            exit_code = int(runner(step, resolved_log))
+            _record_step(step_state, effective_step, "running", None, resolved_log, now)
+            _write_state(resolved_state_file, state)
+            _emit(resolved_log, now, f"Running {effective_step.id} ({effective_step.name})... log={resolved_log}", console=True)
+            _emit(resolved_log, now, f"Command: {effective_step.command_text}", console=False)
+
+            exit_code = int(runner(effective_step, resolved_log))
             if exit_code != 0:
                 timed_out = exit_code == TIMEOUT_EXIT_CODE and step.timeout_seconds is not None
                 timeout_cleanup_failed = (
@@ -817,14 +875,14 @@ def run_daily_update(
                         if step.optional:
                             _record_step(
                                 step_state,
-                                step,
+                                effective_step,
                                 "failed_timeout_cleanup",
                                 exit_code,
                                 resolved_log,
                                 now,
                             )
                         else:
-                            _record_step(step_state, step, "failed", exit_code, resolved_log, now)
+                            _record_step(step_state, effective_step, "failed", exit_code, resolved_log, now)
                         _write_state(resolved_state_file, state)
                         _emit(
                             resolved_log,
@@ -841,14 +899,14 @@ def run_daily_update(
                         if step.optional:
                             _record_step(
                                 step_state,
-                                step,
+                                effective_step,
                                 "failed_resource_locked",
                                 exit_code,
                                 resolved_log,
                                 now,
                             )
                         else:
-                            _record_step(step_state, step, "failed", exit_code, resolved_log, now)
+                            _record_step(step_state, effective_step, "failed", exit_code, resolved_log, now)
                         _write_state(resolved_state_file, state)
                         _emit(
                             resolved_log,
@@ -872,7 +930,7 @@ def run_daily_update(
                         reason,
                         console=True,
                     )
-                    _record_step(step_state, step, status, exit_code, resolved_log, now)
+                    _record_step(step_state, effective_step, status, exit_code, resolved_log, now)
                     _write_state(resolved_state_file, state)
                     continue
                 if timed_out:
@@ -884,14 +942,35 @@ def run_daily_update(
                     )
                 else:
                     _emit(resolved_log, now, f"{step.name} failed with error code {exit_code}", console=True)
-                _record_step(step_state, step, "failed", exit_code, resolved_log, now)
+                _record_step(step_state, effective_step, "failed", exit_code, resolved_log, now)
                 _write_state(resolved_state_file, state)
                 if failed_exit_code is None:
                     failed_exit_code = exit_code
                 continue
 
-            _emit(resolved_log, now, f"Completed {step.id} ({step.name})", console=True)
-            _record_step(step_state, step, "success", 0, resolved_log, now)
+            _emit(resolved_log, now, f"Completed {effective_step.id} ({effective_step.name})", console=True)
+            if degraded_success_reason is not None:
+                _record_step(
+                    step_state,
+                    effective_step,
+                    "success_degraded",
+                    0,
+                    resolved_log,
+                    now,
+                    reason=degraded_success_reason,
+                )
+            elif upstream_degraded_reason is not None:
+                _record_step(
+                    step_state,
+                    effective_step,
+                    "success_degraded",
+                    0,
+                    resolved_log,
+                    now,
+                    reason=upstream_degraded_reason,
+                )
+            else:
+                _record_step(step_state, effective_step, "success", 0, resolved_log, now)
             _write_state(resolved_state_file, state)
 
         final_exit_code = _final_exit_code_for_state(
@@ -1294,6 +1373,116 @@ def _parse_timestamp(value: object) -> datetime | None:
         return None
 
 
+def _resolved_dependency_status(
+    dependency: DailyDependency | str,
+    state: dict[str, Any],
+    *,
+    steps_by_id: dict[str, DailyStep],
+    effective_dates: DailyEffectiveDates,
+    run_instance_key: str,
+) -> tuple[str, str, str]:
+    dependency_id = _dependency_step_id(dependency)
+    dependency_step = steps_by_id.get(dependency_id)
+    dependency_policy = (
+        dependency.state_key_policy
+        if isinstance(dependency, DailyDependency) and dependency.state_key_policy is not None
+        else dependency_step.state_key_policy
+        if dependency_step is not None
+        else "natural_date"
+    )
+    dependency_status = str(
+        _step_row_for_policy(
+            state,
+            dependency_id,
+            dependency_policy,
+            effective_dates,
+            run_instance_key,
+        ).get("status", "pending")
+    )
+    return (
+        dependency_id,
+        dependency_status,
+        _state_key_for_policy(dependency_policy, effective_dates, run_instance_key),
+    )
+
+
+def _upstream_degraded_success_reason(
+    step: DailyStep,
+    state: dict[str, Any],
+    *,
+    steps_by_id: dict[str, DailyStep],
+    effective_dates: DailyEffectiveDates,
+    run_instance_key: str,
+) -> str | None:
+    for dependency in step.depends_on:
+        dependency_id, dependency_status, _ = _resolved_dependency_status(
+            dependency,
+            state,
+            steps_by_id=steps_by_id,
+            effective_dates=effective_dates,
+            run_instance_key=run_instance_key,
+        )
+        if dependency_status == "success_degraded":
+            return f"degraded: upstream dependency {dependency_id} completed with success_degraded"
+    return None
+
+
+def _degraded_build_derived_step_for_akshare_daily_bar(
+    step: DailyStep,
+    dependency_id: str,
+    dependency_status: str,
+    readable_state_key: str,
+) -> DailyStep | str | None:
+    del dependency_status, readable_state_key
+    if step.id != "build-derived" or dependency_id != "akshare-daily-bar":
+        return None
+
+    requested_targets = _build_derived_requested_targets(step.command)
+    if "all" not in requested_targets and "daily_bar" not in requested_targets:
+        return None
+    if _build_derived_command_excludes_daily_bar(step.command):
+        return step
+    if "daily_bar" in requested_targets and "all" not in requested_targets:
+        return "blocked"
+    return replace(step, command=_append_build_derived_exclude_daily_bar(step.command))
+
+
+def _build_derived_requested_targets(command: tuple[str, ...]) -> tuple[str, ...]:
+    targets: list[str] = []
+    index = 0
+    while index < len(command):
+        arg = command[index]
+        if arg == "--target" and index + 1 < len(command):
+            targets.append(command[index + 1])
+            index += 2
+            continue
+        if arg.startswith("--target="):
+            targets.append(arg.split("=", 1)[1])
+        index += 1
+    return tuple(targets or ["all"])
+
+
+def _build_derived_command_excludes_daily_bar(command: tuple[str, ...]) -> bool:
+    index = 0
+    while index < len(command):
+        arg = command[index]
+        if arg == "--exclude-target" and index + 1 < len(command) and command[index + 1] == "daily_bar":
+            return True
+        if arg == "--exclude-target=daily_bar":
+            return True
+        index += 1
+    return False
+
+
+def _append_build_derived_exclude_daily_bar(command: tuple[str, ...]) -> tuple[str, ...]:
+    addition = ("--exclude-target", "daily_bar")
+    try:
+        insert_at = command.index("--no-build-duckdb-views")
+    except ValueError:
+        return (*command, *addition)
+    return (*command[:insert_at], *addition, *command[insert_at:])
+
+
 def _blocked_dependencies(
     step: DailyStep,
     state_or_step_state: dict[str, Any],
@@ -1309,22 +1498,12 @@ def _blocked_dependencies(
         if steps_by_id is None or effective_dates is None or run_instance_key is None:
             dependency_status = str(state_or_step_state.get(dependency_id, {}).get("status", "pending"))
         else:
-            dependency_step = steps_by_id.get(dependency_id)
-            dependency_policy = (
-                dependency.state_key_policy
-                if isinstance(dependency, DailyDependency) and dependency.state_key_policy is not None
-                else dependency_step.state_key_policy
-                if dependency_step is not None
-                else "natural_date"
-            )
-            dependency_status = str(
-                _step_row_for_policy(
-                    state_or_step_state,
-                    dependency_id,
-                    dependency_policy,
-                    effective_dates,
-                    run_instance_key,
-                ).get("status", "pending")
+            _, dependency_status, _ = _resolved_dependency_status(
+                dependency,
+                state_or_step_state,
+                steps_by_id=steps_by_id,
+                effective_dates=effective_dates,
+                run_instance_key=run_instance_key,
             )
         if dependency_status in FAILED_DEPENDENCY_STATUSES or dependency_status not in SATISFIED_DEPENDENCY_STATUSES:
             if is_soft:

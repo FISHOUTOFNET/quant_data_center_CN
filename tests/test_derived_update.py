@@ -9,7 +9,14 @@ import pandas as pd
 import pytest
 
 from src.sources.derived import update as update_module
-from src.sources.derived.common import BuildDerivedLockError, build_derived_file_lock
+from src.sources.derived.common import (
+    BuildDerivedLockError,
+    commit_derived_dataset_staging,
+    commit_derived_partition_staging,
+    create_derived_dataset_staging_area,
+    create_derived_partition_staging_area,
+    build_derived_file_lock,
+)
 from src.sources.derived.stock_daily_bar import build_cn_stock_daily_bar
 from src.storage.parquet_store import ParquetStore
 
@@ -53,6 +60,87 @@ def test_build_derived_datasets_uses_safe_target_order(
     )
 
     assert calls == expected
+
+
+@pytest.mark.parametrize(
+    ("targets", "exclude_targets", "expected"),
+    [
+        (("all",), ("daily_bar",), ["security_master", "valuation"]),
+        (("all",), (), ["security_master", "daily_bar", "valuation"]),
+        (("valuation",), (), ["security_master", "valuation"]),
+        (("valuation",), ("daily_bar",), ["security_master", "valuation"]),
+    ],
+)
+def test_build_derived_datasets_excludes_daily_bar_after_expansion(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    targets: tuple[str, ...],
+    exclude_targets: tuple[str, ...],
+    expected: list[str],
+) -> None:
+    calls: list[str] = []
+
+    def fake_builder(target: str, dataset: str):
+        def build(**kwargs):
+            del kwargs
+            calls.append(target)
+            return {"dataset": dataset, "status": "success", "rows": 1}
+
+        return build
+
+    monkeypatch.setattr(update_module, "build_security_master", fake_builder("security_master", "cn_security_master"))
+    monkeypatch.setattr(update_module, "build_cn_stock_daily_bar", fake_builder("daily_bar", "cn_stock_daily_bar"))
+    monkeypatch.setattr(update_module, "build_cn_stock_valuation", fake_builder("valuation", "cn_stock_valuation"))
+
+    update_module.build_derived_datasets(
+        root=tmp_path,
+        targets=targets,
+        exclude_targets=exclude_targets,
+        build_views=False,
+        refresh_registry=False,
+    )
+
+    assert calls == expected
+
+
+def test_build_derived_datasets_rejects_excluding_explicit_daily_bar(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="cannot exclude explicitly requested target: daily_bar"):
+        update_module.build_derived_datasets(
+            root=tmp_path,
+            targets=("daily_bar",),
+            exclude_targets=("daily_bar",),
+            build_views=False,
+            refresh_registry=False,
+        )
+
+
+def test_build_derived_datasets_lock_owner_uses_excluded_target_list(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    observed_owner: dict[str, object] = {}
+
+    def fake_builder(target: str, dataset: str):
+        def build(**kwargs):
+            del kwargs
+            lock_file = tmp_path / "data" / "metadata" / "locks" / "build-derived.lock" / "owner.json"
+            observed_owner.update(json.loads(lock_file.read_text(encoding="utf-8")))
+            return {"dataset": dataset, "status": "success", "rows": 1}
+
+        return build
+
+    monkeypatch.setattr(update_module, "build_security_master", fake_builder("security_master", "cn_security_master"))
+    monkeypatch.setattr(update_module, "build_cn_stock_valuation", fake_builder("valuation", "cn_stock_valuation"))
+
+    update_module.build_derived_datasets(
+        root=tmp_path,
+        targets=("all",),
+        exclude_targets=("daily_bar",),
+        build_views=False,
+        refresh_registry=False,
+    )
+
+    assert observed_owner["target"] == ["security_master", "valuation"]
 
 
 def test_build_derived_file_lock_blocks_concurrent_builds(
@@ -249,6 +337,71 @@ def test_incremental_detects_master_row_hash_change(tmp_path: Path, daily_sample
     changed = update_module._changed_security_ids_for_target(store, changed_master, "daily_bar", None)
 
     assert changed == ("SH.600000",)
+
+
+def test_commit_derived_partition_staging_promote_failure_includes_diagnostics(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = ParquetStore(root=tmp_path)
+    store.ensure_layout()
+    area = create_derived_partition_staging_area(store, "cn_stock_daily_bar", "2024-01-02")
+    (area.staging_partition_dir / "part.parquet").write_text("placeholder", encoding="utf-8")
+    original_rename = Path.rename
+
+    def failing_rename(self: Path, target: Path) -> Path:
+        if self == area.staging_partition_dir:
+            raise OSError("simulated promote failure")
+        return original_rename(self, target)
+
+    monkeypatch.setattr(Path, "rename", failing_rename)
+
+    with pytest.raises(RuntimeError) as exc_info:
+        commit_derived_partition_staging(area)
+
+    message = str(exc_info.value)
+    assert "dataset_id=cn_stock_daily_bar" in message
+    assert "partition_column=" in message
+    assert "partition_value=2024-01-02" in message
+    assert "delete_partition=False" in message
+    assert f"staging_root={area.staging_root}" in message
+    assert f"staging_partition_dir={area.staging_partition_dir}" in message
+    assert f"final_partition_dir={area.final_partition_dir}" in message
+    assert f"backup_dir={area.backup_dir}" in message
+    assert "backup_created=" in message
+    assert "original_exception_type=OSError" in message
+    assert "original_exception_repr=OSError('simulated promote failure')" in message
+
+
+def test_commit_derived_dataset_staging_promote_failure_includes_diagnostics(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = ParquetStore(root=tmp_path)
+    store.ensure_layout()
+    area = create_derived_dataset_staging_area(store, "cn_security_master")
+    (area.staging_dataset_dir / "part.parquet").write_text("placeholder", encoding="utf-8")
+    original_rename = Path.rename
+
+    def failing_rename(self: Path, target: Path) -> Path:
+        if self == area.staging_dataset_dir:
+            raise OSError("simulated dataset promote failure")
+        return original_rename(self, target)
+
+    monkeypatch.setattr(Path, "rename", failing_rename)
+
+    with pytest.raises(RuntimeError) as exc_info:
+        commit_derived_dataset_staging(area)
+
+    message = str(exc_info.value)
+    assert "dataset_id=cn_security_master" in message
+    assert f"staging_root={area.staging_root}" in message
+    assert f"staging_dataset_dir={area.staging_dataset_dir}" in message
+    assert f"final_dir={area.final_dir}" in message
+    assert f"backup_dir={area.backup_dir}" in message
+    assert "backup_created=" in message
+    assert "original_exception_type=OSError" in message
+    assert "original_exception_repr=OSError('simulated dataset promote failure')" in message
 
 
 def _master() -> pd.DataFrame:

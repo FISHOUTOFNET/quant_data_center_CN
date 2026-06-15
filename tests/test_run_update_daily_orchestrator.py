@@ -1132,6 +1132,13 @@ def test_weekend_daily_bar_failure_does_not_block_build_derived(tmp_path: Path) 
     state_file = tmp_path / "state.json"
     log_file = tmp_path / "run.log"
     calls: list[str] = []
+    commands: dict[str, tuple[str, ...]] = {}
+
+    def runner(step: run_update_daily.DailyStep, log_path: Path) -> int:
+        del log_path
+        calls.append(step.id)
+        commands[step.id] = step.command
+        return 7 if step.id == "akshare-daily-bar" else 0
 
     assert (
         run_update_daily.run_daily_update(
@@ -1139,7 +1146,7 @@ def test_weekend_daily_bar_failure_does_not_block_build_derived(tmp_path: Path) 
             state_file=state_file,
             run_log=log_file,
             today=date(2026, 6, 6),
-            command_runner=lambda step, log_path: calls.append(step.id) or (7 if step.id == "akshare-daily-bar" else 0),
+            command_runner=runner,
         )
         == 7
     )
@@ -1147,9 +1154,104 @@ def test_weekend_daily_bar_failure_does_not_block_build_derived(tmp_path: Path) 
     # akshare-daily-bar is a soft dependency of build-derived, so it should still run
     assert "build-derived" in calls
     assert "build-duckdb-views" in calls
+    assert "--exclude-target" in commands["build-derived"]
+    assert "daily_bar" in commands["build-derived"]
+    assert "cn_stock_daily_bar" not in commands["build-derived"]
+    log_text = log_file.read_text(encoding="utf-8")
+    assert "degraded mode" in log_text
+    assert "excluding target=daily_bar" in log_text
+    assert "dataset=cn_stock_daily_bar" in log_text
+    assert "status failed for market_date:2026-06-06" in log_text
+    assert "status pending" not in log_text
+    states = _steps(state_file, "natural_date:2026-06-06")
+    assert states["build-derived"]["status"] == "success_degraded"
+    assert states["build-derived"]["reason"].startswith("degraded: excluded target=daily_bar")
+    assert states["build-duckdb-views"]["status"] == "success_degraded"
+    assert states["build-duckdb-views"]["reason"] == (
+        "degraded: upstream dependency build-derived completed with success_degraded"
+    )
+
+
+def test_success_degraded_does_not_skip_recovered_daily_bar_or_views(tmp_path: Path) -> None:
+    _write_repo_workflow(tmp_path)
+    state_file = tmp_path / "state.json"
+    log_file = tmp_path / "run.log"
+    first_calls: list[str] = []
+    second_calls: list[str] = []
+    second_commands: dict[str, tuple[str, ...]] = {}
+
+    def first_runner(step: run_update_daily.DailyStep, log_path: Path) -> int:
+        del log_path
+        first_calls.append(step.id)
+        return 7 if step.id == "akshare-daily-bar" else 0
+
+    assert (
+        run_update_daily.run_daily_update(
+            root=tmp_path,
+            state_file=state_file,
+            run_log=log_file,
+            today=date(2026, 6, 6),
+            now=lambda: datetime(2026, 6, 6, 1, 0),
+            command_runner=first_runner,
+        )
+        == 7
+    )
+    first_states = _steps(state_file, "natural_date:2026-06-06")
+    assert first_states["build-derived"]["status"] == "success_degraded"
+    assert first_states["build-duckdb-views"]["status"] == "success_degraded"
+
+    def second_runner(step: run_update_daily.DailyStep, log_path: Path) -> int:
+        del log_path
+        second_calls.append(step.id)
+        second_commands[step.id] = step.command
+        return 0
+
+    assert (
+        run_update_daily.run_daily_update(
+            root=tmp_path,
+            state_file=state_file,
+            run_log=log_file,
+            today=date(2026, 6, 6),
+            now=lambda: datetime(2026, 6, 6, 2, 0),
+            command_runner=second_runner,
+        )
+        == 0
+    )
+
+    assert "akshare-daily-bar" in second_calls
+    assert "build-derived" in second_calls
+    assert "build-duckdb-views" in second_calls
+    assert "--exclude-target" not in second_commands["build-derived"]
+    second_states = _steps(state_file, "natural_date:2026-06-06")
+    assert second_states["build-derived"]["status"] == "success"
+    assert second_states["build-duckdb-views"]["status"] == "success"
+
+
+def test_daily_bar_success_keeps_build_derived_command_and_success_status(tmp_path: Path) -> None:
+    _write_repo_workflow(tmp_path)
+    state_file = tmp_path / "state.json"
+    log_file = tmp_path / "run.log"
+    commands: dict[str, tuple[str, ...]] = {}
+
+    def runner(step: run_update_daily.DailyStep, log_path: Path) -> int:
+        del log_path
+        commands[step.id] = step.command
+        return 0
+
+    assert (
+        run_update_daily.run_daily_update(
+            root=tmp_path,
+            state_file=state_file,
+            run_log=log_file,
+            today=date(2026, 6, 6),
+            command_runner=runner,
+        )
+        == 0
+    )
+
+    assert "--exclude-target" not in commands["build-derived"]
     states = _steps(state_file, "natural_date:2026-06-06")
     assert states["build-derived"]["status"] == "success"
-    assert states["build-duckdb-views"]["status"] == "success"
 
 
 def test_optional_plain_skipped_does_not_block_build_derived(tmp_path: Path) -> None:

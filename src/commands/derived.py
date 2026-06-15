@@ -19,6 +19,13 @@ def register_derived_commands(root: click.Group) -> None:
         default=("all",),
     )
     @click.option(
+        "--exclude-target",
+        "exclude_targets",
+        multiple=True,
+        type=click.Choice(["daily_bar"]),
+        help="Exclude derived target daily_bar from an all-target build.",
+    )
+    @click.option(
         "--mode",
         type=click.Choice(["incremental", "full"]),
         default="incremental",
@@ -34,6 +41,7 @@ def register_derived_commands(root: click.Group) -> None:
     @click.option("--build-duckdb-views/--no-build-duckdb-views", "build_views", default=True, show_default=True)
     def build_derived(
         target: tuple[str, ...],
+        exclude_targets: tuple[str, ...],
         mode: str,
         security_ids: tuple[str, ...],
         build_views: bool,
@@ -43,6 +51,7 @@ def register_derived_commands(root: click.Group) -> None:
         try:
             records = run_build_derived(
                 targets=target,
+                exclude_targets=exclude_targets,
                 mode=mode,
                 security_ids=security_ids,
                 build_views=build_views,
