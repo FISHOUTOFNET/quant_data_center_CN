@@ -139,6 +139,7 @@ steps:
 
   - id: sync-qlib
     name: sync-qlib
+    network_profile: inherit
     schedule_policy: market_window
     state_key_policy: market_date
     resume_policy: skip_if_success

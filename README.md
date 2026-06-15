@@ -388,7 +388,15 @@ qdc build-duckdb-views
 
 ## 配置
 
-主要配置在 `config/settings.yaml`。每日 workflow 配置在 `config/daily_workflow.yaml`；每个 step 声明 `id`、`name`、`command`、`depends_on`、`optional`、`timeout_seconds`、`enabled`、`schedule_policy`、`state_key_policy`、`resume_policy` 和 `data_freshness_policy`。`schedule_policy` 支持 `daily`、`market_window` 和兼容旧配置的 `legacy_when`；`legacy_when` 的 `when` 支持 `weekday`、`weekend`、`friday_to_sunday` 和具体英文星期名。命令可使用 `{python}`、`{qdc}`、`{today}`、`{natural_date}`、`{candidate_date}`、`{market_date}`、`{hist_start}` 变量。修改 workflow 后可先运行 `qdc run-update-daily --help` 和相关单测确认配置可解析。
+主要配置在 `config/settings.yaml`。每日 workflow 配置在 `config/daily_workflow.yaml`；每个 step 声明 `id`、`name`、`command`、`depends_on`、`optional`、`timeout_seconds`、`enabled`、`schedule_policy`、`state_key_policy`、`resume_policy`、`data_freshness_policy` 和 `network_profile`。`schedule_policy` 支持 `daily`、`market_window` 和兼容旧配置的 `legacy_when`；`legacy_when` 的 `when` 支持 `weekday`、`weekend`、`friday_to_sunday` 和具体英文星期名。命令可使用 `{python}`、`{qdc}`、`{today}`、`{natural_date}`、`{candidate_date}`、`{market_date}`、`{hist_start}` 变量。修改 workflow 后可先运行 `qdc run-update-daily --help` 和相关单测确认配置可解析。
+
+### 网络策略
+
+每日更新 step 默认使用 `direct` network profile：子进程启动前会清理 `HTTP_PROXY`、`HTTPS_PROXY`、`ALL_PROXY`、`NO_PROXY` 等进程环境变量代理，并设置 `NO_PROXY=*` / `no_proxy=*`，避免 AkShare、Baostock 等国内数据源误走代理。`sync-qlib` step 使用 `inherit` network profile，会继承当前环境中的代理变量，以便继续访问 GitHub release。
+
+手动执行 `qdc akshare update`、`qdc update-baostock-daily`、`qdc update-baostock-market-session`、`qdc repair-baostock-daily` 和 AkShare stock history audit 工具时，也有 `direct` 兜底。手动执行 `qdc sync-qlib` 仍继承当前环境。
+
+该机制只处理进程环境变量代理，不会绕过系统级全局路由 VPN、TUN VPN 或透明代理；这类流量策略需要在 VPN 客户端或操作系统中配置 split tunneling。不要在配置、日志或文档中写入本机代理地址或敏感信息。
 
 常用项：
 

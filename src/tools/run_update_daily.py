@@ -29,6 +29,7 @@ from src.storage.metadata_store import default_metadata_duckdb_file
 from src.storage.parquet_store import ParquetStore
 from src.utils import paths
 from src.utils.config_mgr import ConfigError, ConfigManager
+from src.utils.network_policy import NETWORK_PROFILE_DIRECT, NETWORK_PROFILES, build_network_env
 from src.utils.process_lock import ProcessLockError, acquire_process_lock, is_pid_alive
 
 
@@ -72,6 +73,7 @@ class DailyStep:
     state_key_policy: str = "natural_date"
     resume_policy: str = "skip_if_success"
     data_freshness_policy: str = "natural_daily"
+    network_profile: str = NETWORK_PROFILE_DIRECT
 
     @property
     def command_text(self) -> str:
@@ -231,6 +233,7 @@ DEFAULT_DAILY_WORKFLOW_CONFIG: dict[str, object] = {
             "id": "sync-qlib",
             "name": "sync-qlib",
             "when": ["friday_to_sunday"],
+            "network_profile": "inherit",
             "command": ["{qdc}", "sync-qlib", "--no-build-duckdb-views", "--max-runtime-seconds", "7200"],
         },
         {
@@ -352,6 +355,7 @@ def _steps_from_workflow_config(config: dict[str, object], effective_dates: Dail
             state_key_policy=step.state_key_policy,
             resume_policy=step.resume_policy,
             data_freshness_policy=step.data_freshness_policy,
+            network_profile=step.network_profile,
         )
         for step in steps
     ]
@@ -400,6 +404,13 @@ def _daily_step_from_config(raw_step: dict[str, object], context: dict[str, str]
         DATA_FRESHNESS_POLICIES,
         index,
     )
+    network_profile = _enum_value(
+        raw_step,
+        "network_profile",
+        NETWORK_PROFILE_DIRECT,
+        NETWORK_PROFILES,
+        index,
+    )
     return DailyStep(
         id=step_id,
         name=name,
@@ -411,6 +422,7 @@ def _daily_step_from_config(raw_step: dict[str, object], context: dict[str, str]
         state_key_policy=state_key_policy,
         resume_policy=resume_policy,
         data_freshness_policy=data_freshness_policy,
+        network_profile=network_profile,
     )
 
 
@@ -863,6 +875,7 @@ def run_daily_update(
             _write_state(resolved_state_file, state)
             _emit(resolved_log, now, f"Running {effective_step.id} ({effective_step.name})... log={resolved_log}", console=True)
             _emit(resolved_log, now, f"Command: {effective_step.command_text}", console=False)
+            _emit(resolved_log, now, f"Network profile: {effective_step.network_profile}", console=False)
 
             exit_code = int(runner(effective_step, resolved_log))
             if exit_code != 0:
@@ -1008,7 +1021,8 @@ def _default_run_log(root: Path, now: Callable[[], datetime] | None) -> Path:
 
 
 def _run_subprocess(step: DailyStep, log_path: Path, root: Path) -> int:
-    env = {**os.environ, "QDC_DISABLE_FILE_LOG": "1"}
+    env = build_network_env(os.environ, profile=step.network_profile)
+    env["QDC_DISABLE_FILE_LOG"] = "1"
     with log_path.open("a", encoding="utf-8") as log:
         popen_kwargs: dict[str, Any] = {
             "cwd": root,
@@ -1294,6 +1308,7 @@ def _record_step(
     row = {
         "status": status,
         "command": step.command_text,
+        "network_profile": step.network_profile,
         "started_at": started_at,
         "updated_at": timestamp,
         "ended_at": None if status == "running" else timestamp,

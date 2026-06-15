@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+
 import pandas as pd
 import pytest
 
@@ -14,7 +16,12 @@ def test_repair_normalizes_non_trading_range_to_trading_bounds(
     daily_sample,
 ) -> None:
     _write_settings(tmp_path)
+    monkeypatch.setenv("HTTP_PROXY", "http://proxy.example")
+    monkeypatch.setenv("HTTPS_PROXY", "http://proxy.example")
+    monkeypatch.setenv("ALL_PROXY", "socks://proxy.example")
+    monkeypatch.delenv("QDC_NETWORK_PROFILE", raising=False)
     state: dict[str, list[dict[str, str]]] = {"history_params": [], "baostock_cn_stock_adjustment_factor_params": []}
+    observed_env: dict[str, str | None] = {}
 
     class FakeProvider:
         name = "fake"
@@ -23,6 +30,10 @@ def test_repair_normalizes_non_trading_range_to_trading_bounds(
             self.config = config
 
         def __enter__(self):
+            observed_env["enter_HTTP_PROXY"] = os.environ.get("HTTP_PROXY")
+            observed_env["enter_HTTPS_PROXY"] = os.environ.get("HTTPS_PROXY")
+            observed_env["enter_ALL_PROXY"] = os.environ.get("ALL_PROXY")
+            observed_env["enter_QDC_NETWORK_PROFILE"] = os.environ.get("QDC_NETWORK_PROFILE")
             return self
 
         def __exit__(self, exc_type, exc, tb) -> None:
@@ -55,6 +66,10 @@ def test_repair_normalizes_non_trading_range_to_trading_bounds(
             self,
             request,
         ) -> pd.DataFrame:
+            observed_env["query_HTTP_PROXY"] = os.environ.get("HTTP_PROXY")
+            observed_env["query_HTTPS_PROXY"] = os.environ.get("HTTPS_PROXY")
+            observed_env["query_ALL_PROXY"] = os.environ.get("ALL_PROXY")
+            observed_env["query_QDC_NETWORK_PROFILE"] = os.environ.get("QDC_NETWORK_PROFILE")
             adjust_flag = {
                 "baostock_cn_stock_daily_bar_unadjusted": "3",
                 "baostock_cn_stock_daily_bar_qfq": "1",
@@ -122,6 +137,19 @@ def test_repair_normalizes_non_trading_range_to_trading_bounds(
             "end_date": "2024-01-12",
         }
     ]
+    assert observed_env == {
+        "enter_HTTP_PROXY": None,
+        "enter_HTTPS_PROXY": None,
+        "enter_ALL_PROXY": None,
+        "enter_QDC_NETWORK_PROFILE": "direct",
+        "query_HTTP_PROXY": None,
+        "query_HTTPS_PROXY": None,
+        "query_ALL_PROXY": None,
+        "query_QDC_NETWORK_PROFILE": "direct",
+    }
+    assert os.environ["HTTP_PROXY"] == "http://proxy.example"
+    assert os.environ["HTTPS_PROXY"] == "http://proxy.example"
+    assert os.environ["ALL_PROXY"] == "socks://proxy.example"
 
 
 def _write_settings(root) -> None:

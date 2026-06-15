@@ -18,6 +18,8 @@ from urllib.request import Request, urlopen
 
 import pandas as pd
 
+from src.utils.network_policy import NETWORK_PROFILE_DIRECT, network_env
+
 SOURCE_URL = "https://akshare.akfamily.xyz/data/stock/stock.html"
 DEFAULT_OUTPUT = Path("docs/akshare_stock_history_api_accessibility.md")
 DEFAULT_START_DATE = "19900101"
@@ -404,30 +406,31 @@ def main(
     parser.add_argument("--workers", type=int, default=8)
     args = parser.parse_args(argv)
 
-    current_time = (now or datetime.now)()
-    html_text = (fetch_html or (lambda url: globals()["fetch_html"](url, args.timeout_seconds)))(args.source_url)
-    candidates = discover_candidates(html_text)
-    probe_caller = caller or default_akshare_caller(args.timeout_seconds)
-    results = run_probe_rounds(
-        candidates,
-        caller=probe_caller,
-        rounds=args.rounds,
-        today=current_time.date(),
-        sleep_between_rounds=args.sleep_between_rounds,
-        workers=args.workers,
-        on_progress=lambda result: print(
-            f"round={result.rounds_attempted} endpoint={result.candidate.endpoint} status={result.status}"
-        ),
-    )
-    write_markdown_report(
-        args.output,
-        results,
-        generated_at=current_time,
-        akshare_version=_akshare_version(),
-        source_url=args.source_url,
-    )
-    print(f"Wrote {args.output} with {len(results)} candidate endpoints")
-    return 0
+    with network_env(NETWORK_PROFILE_DIRECT):
+        current_time = (now or datetime.now)()
+        html_text = (fetch_html or (lambda url: globals()["fetch_html"](url, args.timeout_seconds)))(args.source_url)
+        candidates = discover_candidates(html_text)
+        probe_caller = caller or default_akshare_caller(args.timeout_seconds)
+        results = run_probe_rounds(
+            candidates,
+            caller=probe_caller,
+            rounds=args.rounds,
+            today=current_time.date(),
+            sleep_between_rounds=args.sleep_between_rounds,
+            workers=args.workers,
+            on_progress=lambda result: print(
+                f"round={result.rounds_attempted} endpoint={result.candidate.endpoint} status={result.status}"
+            ),
+        )
+        write_markdown_report(
+            args.output,
+            results,
+            generated_at=current_time,
+            akshare_version=_akshare_version(),
+            source_url=args.source_url,
+        )
+        print(f"Wrote {args.output} with {len(results)} candidate endpoints")
+        return 0
 
 
 def _visible_text(page_html: str) -> str:

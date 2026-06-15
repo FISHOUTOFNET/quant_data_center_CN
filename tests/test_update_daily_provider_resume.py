@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from datetime import date
 
 import pandas as pd
@@ -179,3 +180,51 @@ def test_update_daily_missing_checkpoint_keeps_login_failure(
         )
 
     assert provider_calls == {"create": 1, "enter": 1}
+
+
+def test_update_daily_uses_direct_network_env_for_provider(tmp_path, monkeypatch) -> None:
+    _write_settings(tmp_path)
+    monkeypatch.setenv("HTTPS_PROXY", "http://proxy.example")
+    monkeypatch.setenv("ALL_PROXY", "socks://proxy.example")
+    monkeypatch.delenv("QDC_NETWORK_PROFILE", raising=False)
+    observed: dict[str, str | None] = {}
+
+    class ObservingProvider:
+        def __init__(self, config=None) -> None:
+            self.config = config
+
+        def __enter__(self):
+            observed["enter_HTTPS_PROXY"] = os.environ.get("HTTPS_PROXY")
+            observed["enter_ALL_PROXY"] = os.environ.get("ALL_PROXY")
+            observed["enter_QDC_NETWORK_PROFILE"] = os.environ.get("QDC_NETWORK_PROFILE")
+            raise BaostockTimeoutError("login unavailable")
+
+        def __exit__(self, exc_type, exc, tb) -> None:
+            return None
+
+    def create_provider(config, provider: str | None = None):
+        observed["create_HTTPS_PROXY"] = os.environ.get("HTTPS_PROXY")
+        observed["create_ALL_PROXY"] = os.environ.get("ALL_PROXY")
+        observed["create_QDC_NETWORK_PROFILE"] = os.environ.get("QDC_NETWORK_PROFILE")
+        return ObservingProvider(config)
+
+    monkeypatch.setattr(update_daily_module, "create_provider", create_provider)
+
+    with pytest.raises(BaostockTimeoutError):
+        update_daily_module.update_daily(
+            dataset="baostock_cn_trading_calendar",
+            end="2024-01-03",
+            root=tmp_path,
+            build_views=False,
+        )
+
+    assert observed == {
+        "create_HTTPS_PROXY": None,
+        "create_ALL_PROXY": None,
+        "create_QDC_NETWORK_PROFILE": "direct",
+        "enter_HTTPS_PROXY": None,
+        "enter_ALL_PROXY": None,
+        "enter_QDC_NETWORK_PROFILE": "direct",
+    }
+    assert os.environ["HTTPS_PROXY"] == "http://proxy.example"
+    assert os.environ["ALL_PROXY"] == "socks://proxy.example"

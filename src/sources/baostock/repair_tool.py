@@ -31,9 +31,31 @@ from src.storage.duckdb_store import DuckDBStore
 from src.storage.parquet_store import ParquetStore
 from src.utils.config_mgr import ConfigManager
 from src.utils.logging import logger
+from src.utils.network_policy import NETWORK_PROFILE_DIRECT, network_env
 
 
 def repair(
+    code: str,
+    start: str,
+    end: str,
+    dataset: str,
+    root: Path | None = None,
+    build_views: bool = True,
+    provider: str | None = None,
+) -> list[dict[str, str | int]]:
+    with network_env(NETWORK_PROFILE_DIRECT):
+        return _repair_with_direct_network(
+            code=code,
+            start=start,
+            end=end,
+            dataset=dataset,
+            root=root,
+            build_views=build_views,
+            provider=provider,
+        )
+
+
+def _repair_with_direct_network(
     code: str,
     start: str,
     end: str,

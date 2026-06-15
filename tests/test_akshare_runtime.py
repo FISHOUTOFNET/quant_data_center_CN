@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import time
+import os
 from datetime import datetime
 from pathlib import Path
 
@@ -9,6 +10,8 @@ import pytest
 
 from src.sources.akshare.client import AkShareCircuitOpen, AkShareNetworkError
 from src.sources.akshare.core.runtime import AkShareRuntime
+import src.sources.akshare.pipeline.execution as akshare_execution
+from src.sources.akshare.pipeline.execution_types import AkShareUpdateRequest, ConcurrencyPolicy, FetchResult
 from src.utils.config_mgr import ConfigManager
 
 
@@ -50,6 +53,68 @@ def test_akshare_runtime_retries_failures_and_returns_response() -> None:
     assert response.params == {"symbol": "600000"}
     assert response.akshare_version == "fake-1"
     assert response.data.loc[0, "mapped"] == 2
+
+
+def test_update_akshare_uses_direct_network_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    (config_dir / "settings.yaml").write_text("pipeline:\n  metadata_flush_size: 1\n", encoding="utf-8")
+    monkeypatch.setenv("HTTPS_PROXY", "http://proxy.example")
+    monkeypatch.setenv("ALL_PROXY", "socks://proxy.example")
+    monkeypatch.delenv("QDC_NETWORK_PROFILE", raising=False)
+    observed: dict[str, str | None] = {}
+
+    class FakeClient:
+        def close(self) -> None:
+            return None
+
+    class FakeModule:
+        target = "fake"
+
+        def plan(self, request, context):
+            return ["task"]
+
+        def prefilter(self, tasks, context):
+            return tasks
+
+        def fetch(self, task, context):
+            observed["HTTPS_PROXY"] = os.environ.get("HTTPS_PROXY")
+            observed["ALL_PROXY"] = os.environ.get("ALL_PROXY")
+            observed["QDC_NETWORK_PROFILE"] = os.environ.get("QDC_NETWORK_PROFILE")
+            return FetchResult(task=task, started_at=datetime(2024, 1, 1), ended_at=datetime(2024, 1, 1))
+
+        def record_result(self, result, context):
+            return [{"status": "success"}]
+
+        def record_skip(self, task, context, status="skipped_checkpoint", reason="checkpoint"):
+            return [{"status": status, "reason": reason}]
+
+        def progress_row(self, task, rows):
+            return {"task": task, "status": rows[0]["status"]}
+
+        def concurrency(self, request, context):
+            return ConcurrencyPolicy(workers=1)
+
+    monkeypatch.setattr(akshare_execution, "validate_request_target_options", lambda request: None)
+    monkeypatch.setattr(akshare_execution, "modules_for_target", lambda target: [FakeModule()])
+
+    records = akshare_execution.update_akshare(
+        AkShareUpdateRequest(
+            target="fake",
+            root=tmp_path,
+            build_views=False,
+            client_factory=lambda config: FakeClient(),
+        )
+    )
+
+    assert records == [{"status": "success"}]
+    assert observed == {
+        "HTTPS_PROXY": None,
+        "ALL_PROXY": None,
+        "QDC_NETWORK_PROFILE": "direct",
+    }
+    assert os.environ["HTTPS_PROXY"] == "http://proxy.example"
+    assert os.environ["ALL_PROXY"] == "socks://proxy.example"
 
 
 def test_akshare_runtime_endpoint_jitter_override_disables_stock_value_sleep() -> None:

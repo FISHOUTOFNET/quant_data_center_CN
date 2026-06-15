@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from datetime import date, datetime
 from pathlib import Path
 
@@ -143,13 +144,42 @@ def test_write_markdown_report_overwrites_latest_state(tmp_path: Path) -> None:
     assert "old" not in text
 
 
-def test_main_writes_report_from_injected_html_and_caller(tmp_path: Path) -> None:
+def test_main_writes_report_from_injected_html_and_caller(tmp_path: Path, monkeypatch) -> None:
     output = tmp_path / "report.md"
+    monkeypatch.setenv("HTTP_PROXY", "http://proxy.example")
+    monkeypatch.setenv("HTTPS_PROXY", "http://proxy.example")
+    monkeypatch.setenv("ALL_PROXY", "socks://proxy.example")
+    monkeypatch.delenv("QDC_NETWORK_PROFILE", raising=False)
+    observed: list[dict[str, str | None]] = []
     html = """
     <h2>历史</h2>
     <p>接口: stock_a</p>
     <pre>ak.stock_a(start_date="20200101", end_date="20240101")</pre>
     """
+
+    def fake_fetch_html(url: str) -> str:
+        observed.append(
+            {
+                "phase": "fetch",
+                "HTTP_PROXY": os.environ.get("HTTP_PROXY"),
+                "HTTPS_PROXY": os.environ.get("HTTPS_PROXY"),
+                "ALL_PROXY": os.environ.get("ALL_PROXY"),
+                "QDC_NETWORK_PROFILE": os.environ.get("QDC_NETWORK_PROFILE"),
+            }
+        )
+        return html
+
+    def fake_caller(candidate: ApiCandidate, kwargs: dict[str, object]) -> pd.DataFrame:
+        observed.append(
+            {
+                "phase": "caller",
+                "HTTP_PROXY": os.environ.get("HTTP_PROXY"),
+                "HTTPS_PROXY": os.environ.get("HTTPS_PROXY"),
+                "ALL_PROXY": os.environ.get("ALL_PROXY"),
+                "QDC_NETWORK_PROFILE": os.environ.get("QDC_NETWORK_PROFILE"),
+            }
+        )
+        return pd.DataFrame({"date": ["2020-01-01"]})
 
     exit_code = main(
         [
@@ -160,12 +190,31 @@ def test_main_writes_report_from_injected_html_and_caller(tmp_path: Path) -> Non
             "--workers",
             "2",
         ],
-        fetch_html=lambda _: html,
-        caller=lambda candidate, kwargs: pd.DataFrame({"date": ["2020-01-01"]}),
+        fetch_html=fake_fetch_html,
+        caller=fake_caller,
         now=lambda: datetime(2024, 1, 2, 3, 4),
     )
 
     assert exit_code == 0
+    assert observed == [
+        {
+            "phase": "fetch",
+            "HTTP_PROXY": None,
+            "HTTPS_PROXY": None,
+            "ALL_PROXY": None,
+            "QDC_NETWORK_PROFILE": "direct",
+        },
+        {
+            "phase": "caller",
+            "HTTP_PROXY": None,
+            "HTTPS_PROXY": None,
+            "ALL_PROXY": None,
+            "QDC_NETWORK_PROFILE": "direct",
+        },
+    ]
+    assert os.environ["HTTP_PROXY"] == "http://proxy.example"
+    assert os.environ["HTTPS_PROXY"] == "http://proxy.example"
+    assert os.environ["ALL_PROXY"] == "socks://proxy.example"
     assert "stock_a" in output.read_text(encoding="utf-8")
 
 

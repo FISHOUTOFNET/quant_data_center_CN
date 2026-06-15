@@ -48,6 +48,7 @@ from src.storage.duckdb_store import DuckDBStore
 from src.storage.parquet_store import ParquetStore
 from src.utils.config_mgr import ConfigManager
 from src.utils.logging import logger
+from src.utils.network_policy import NETWORK_PROFILE_DIRECT, network_env
 from src.utils.run_context import (
     current_pipeline_run_id,
     new_pipeline_run_id,
@@ -74,6 +75,35 @@ def update_daily(
     resume: bool = True,
     force: bool = False,
     mode: str = "partial",  # partial or full
+    provider: str | None = None,
+) -> list[dict[str, object]]:
+    with network_env(NETWORK_PROFILE_DIRECT):
+        return _update_daily_with_direct_network(
+            dataset=dataset,
+            start=start,
+            code=code,
+            lookback_days=lookback_days,
+            end=end,
+            root=root,
+            build_views=build_views,
+            resume=resume,
+            force=force,
+            mode=mode,
+            provider=provider,
+        )
+
+
+def _update_daily_with_direct_network(
+    dataset: str = UNADJUSTED_DAILY_DATASET,
+    start: str = FULL_HISTORY_START_DATE,
+    code: tuple[str, ...] | list[str] | str | None = None,
+    lookback_days: int | None = None,
+    end: str | None = None,
+    root: Path | None = None,
+    build_views: bool = True,
+    resume: bool = True,
+    force: bool = False,
+    mode: str = "partial",
     provider: str | None = None,
 ) -> list[dict[str, object]]:
     run_id = new_pipeline_run_id("daily")

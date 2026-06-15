@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import os
 import struct
 import time
 from datetime import date, datetime
@@ -171,6 +172,43 @@ def test_sync_qlib_converts_source_when_project_lags(tmp_path: Path) -> None:
         {"date": date(2024, 1, 5), "qlib_symbol": "sh600000", "close": 8.2, "volume": 120.0},
     ]
     assert state.iloc[-1]["status"] == "synced"
+
+
+def test_manual_sync_qlib_inherits_proxy_environment(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("HTTP_PROXY", "http://proxy.example")
+    monkeypatch.setenv("HTTPS_PROXY", "http://proxy.example")
+    monkeypatch.setenv("ALL_PROXY", "socks://proxy.example")
+    monkeypatch.delenv("QDC_NETWORK_PROFILE", raising=False)
+    source_dir = tmp_path / "qlib_source"
+    observed_env: dict[str, str | None] = {}
+
+    def fake_download(target_source_dir: Path, remote_asset: QlibRemoteAsset, force_download: bool) -> None:
+        del remote_asset, force_download
+        observed_env["HTTP_PROXY"] = os.environ.get("HTTP_PROXY")
+        observed_env["HTTPS_PROXY"] = os.environ.get("HTTPS_PROXY")
+        observed_env["ALL_PROXY"] = os.environ.get("ALL_PROXY")
+        observed_env["QDC_NETWORK_PROFILE"] = os.environ.get("QDC_NETWORK_PROFILE")
+        _write_qlib_source(
+            target_source_dir,
+            calendar=["2024-01-05"],
+            instruments={"all.txt": [("SH600000", "2024-01-05", "2024-01-05")]},
+            features={"sh600000": {"close": (0, [8.2])}},
+        )
+
+    sync_qlib_data(
+        root=tmp_path,
+        source_dir=source_dir,
+        target_date="2024-01-05",
+        force_download=True,
+        download_and_extract=fake_download,
+        remote_asset_provider=lambda: QlibRemoteAsset(asset_id="asset-1", etag="etag-1", size=10),
+        build_views=False,
+    )
+
+    assert observed_env["HTTP_PROXY"] == "http://proxy.example"
+    assert observed_env["HTTPS_PROXY"] == "http://proxy.example"
+    assert observed_env["ALL_PROXY"] == "socks://proxy.example"
+    assert observed_env["QDC_NETWORK_PROFILE"] is None
 
 
 def test_sync_qlib_resumes_feature_sync_without_rewriting_current_partitions(

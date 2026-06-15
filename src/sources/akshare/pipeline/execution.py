@@ -24,6 +24,7 @@ from src.sources.akshare.pipeline.registry import modules_for_target, validate_r
 from src.storage.duckdb_store import DuckDBStore
 from src.storage.parquet_store import ParquetStore
 from src.utils.config_mgr import ConfigManager
+from src.utils.network_policy import NETWORK_PROFILE_DIRECT, network_env
 
 
 @dataclass
@@ -46,6 +47,13 @@ class _Progress:
 
 
 def update_akshare(request: AkShareUpdateRequest) -> list[dict[str, object]]:
+    """Run one or more AkShare dataset modules."""
+
+    with network_env(NETWORK_PROFILE_DIRECT):
+        return _update_akshare_impl(request)
+
+
+def _update_akshare_impl(request: AkShareUpdateRequest) -> list[dict[str, object]]:
     """Run one or more AkShare dataset modules."""
 
     validate_request_target_options(request)

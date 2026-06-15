@@ -790,6 +790,7 @@ steps:
         ("state_key_policy", "business_date"),
         ("resume_policy", "maybe_skip"),
         ("data_freshness_policy", "stale"),
+        ("network_profile", "vpn"),
     ],
 )
 def test_daily_workflow_config_rejects_invalid_policy(tmp_path: Path, field: str, value: str) -> None:
@@ -1072,6 +1073,21 @@ def test_daily_steps_load_weekend_steps_from_config() -> None:
     assert "akshare-valuation-full" in _dependency_ids(by_id["build-derived"])
 
 
+def test_daily_workflow_network_profiles_from_repo_config() -> None:
+    steps = run_update_daily.daily_steps(date(2026, 6, 6), root=REPO_ROOT)
+    by_id = {step.id: step for step in steps}
+
+    assert by_id["sync-qlib"].network_profile == "inherit"
+    for step_id in (
+        "calendar",
+        "akshare-spot-quote",
+        "baostock-basic",
+        "financial-report",
+        "build-derived",
+    ):
+        assert by_id[step_id].network_profile == "direct"
+
+
 def test_daily_workflow_config_missing_required_field_is_clear(tmp_path: Path) -> None:
     config_dir = tmp_path / "config"
     config_dir.mkdir()
@@ -1157,13 +1173,14 @@ def test_weekend_daily_bar_failure_does_not_block_build_derived(tmp_path: Path) 
     assert "--exclude-target" in commands["build-derived"]
     assert "daily_bar" in commands["build-derived"]
     assert "cn_stock_daily_bar" not in commands["build-derived"]
+    states = _steps(state_file, "natural_date:2026-06-06")
+    assert states["build-derived"]["network_profile"] == "direct"
     log_text = log_file.read_text(encoding="utf-8")
     assert "degraded mode" in log_text
     assert "excluding target=daily_bar" in log_text
     assert "dataset=cn_stock_daily_bar" in log_text
     assert "status failed for market_date:2026-06-06" in log_text
     assert "status pending" not in log_text
-    states = _steps(state_file, "natural_date:2026-06-06")
     assert states["build-derived"]["status"] == "success_degraded"
     assert states["build-derived"]["reason"].startswith("degraded: excluded target=daily_bar")
     assert states["build-duckdb-views"]["status"] == "success_degraded"
@@ -1362,6 +1379,9 @@ def test_run_subprocess_disables_child_file_logging(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setenv("HTTP_PROXY", "http://proxy.example")
+    monkeypatch.setenv("HTTPS_PROXY", "http://proxy.example")
+    monkeypatch.setenv("ALL_PROXY", "socks://proxy.example")
     captured: dict[str, object] = {}
     log_file = tmp_path / "run.log"
     step = run_update_daily.DailyStep("sample", "sample step", (sys.executable, "-c", "print('sample')"))
@@ -1387,8 +1407,55 @@ def test_run_subprocess_disables_child_file_logging(
 
     env = captured["kwargs"]["env"]
     assert env["QDC_DISABLE_FILE_LOG"] == "1"
+    assert env["QDC_NETWORK_PROFILE"] == "direct"
+    assert env["NO_PROXY"] == "*"
+    assert env["no_proxy"] == "*"
+    assert "HTTP_PROXY" not in env
+    assert "HTTPS_PROXY" not in env
+    assert "ALL_PROXY" not in env
     assert captured["kwargs"]["stderr"] == subprocess.STDOUT
     assert log_file.read_text(encoding="utf-8") == "captured child output\n"
+
+
+def test_run_subprocess_inherit_network_profile_preserves_proxy_env(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("HTTP_PROXY", "http://proxy.example")
+    monkeypatch.setenv("HTTPS_PROXY", "http://proxy.example")
+    monkeypatch.setenv("ALL_PROXY", "socks://proxy.example")
+    captured: dict[str, object] = {}
+    log_file = tmp_path / "run.log"
+    step = run_update_daily.DailyStep(
+        "sync-qlib",
+        "sync qlib",
+        (sys.executable, "-c", "print('sample')"),
+        network_profile="inherit",
+    )
+
+    class FakePopen:
+        pid = 123
+
+        def __init__(self, *args, **kwargs):
+            captured["args"] = args
+            captured["kwargs"] = kwargs
+
+        def wait(self, timeout=None):
+            return 0
+
+        def poll(self):
+            return 0
+
+    monkeypatch.setattr(run_update_daily.subprocess, "Popen", FakePopen)
+
+    assert run_update_daily._run_subprocess(step, log_file, tmp_path) == 0
+
+    env = captured["kwargs"]["env"]
+    assert env["QDC_DISABLE_FILE_LOG"] == "1"
+    assert env["QDC_NETWORK_PROFILE"] == "inherit"
+    assert env["HTTP_PROXY"] == "http://proxy.example"
+    assert env["HTTPS_PROXY"] == "http://proxy.example"
+    assert env["ALL_PROXY"] == "socks://proxy.example"
 
 
 def test_orchestrator_rejects_corrupt_state_file(tmp_path: Path) -> None:
