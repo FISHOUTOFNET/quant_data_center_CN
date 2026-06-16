@@ -250,7 +250,7 @@ def _preflight_checkpoint_skip_records(
     needs_baostock_cn_stock_adjustment_factor_api = (
         include_baostock_cn_stock_adjustment_factor or _needs_baostock_cn_stock_adjustment_factors(daily_targets)
     )
-    code_security_type = "1" if needs_baostock_cn_stock_adjustment_factor_api else None
+    code_security_type = "1" if needs_code_pool else None
     codes = resolve_codes(
         config,
         store,
@@ -531,6 +531,13 @@ def _update_daily_impl(
             start_date,
             end_date,
             checkpoint_lookup,
+        )
+        logger.info(
+            "Baostock code pool resolved needs_code_pool={} security_type_filter={} codes_before_checkpoint={} codes_after_checkpoint={}",
+            needs_code_pool,
+            code_security_type or "",
+            len(requested_codes),
+            len(codes),
         )
         if requested_codes and not codes and checkpoint_lookup is not None:
             checkpoint_start_date = FULL_HISTORY_START_DATE if mode == "full" else start_date

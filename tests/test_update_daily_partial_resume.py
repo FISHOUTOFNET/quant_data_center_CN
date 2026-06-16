@@ -39,7 +39,8 @@ def test_update_daily_uses_active_baostock_cn_stock_basic_codes_and_resumes(
         build_views=False,
     )
 
-    assert Counter(first_history_calls) == Counter({"sh.000001": 2, "sh.600000": 2})
+    assert Counter(first_history_calls) == Counter({"sh.600000": 2})
+    assert "sh.000001" not in first_history_calls
     assert "sz.000001" not in first_history_calls
     assert state["history_calls"] == first_history_calls
     assert state["baostock_cn_stock_adjustment_factor_calls"] == []
@@ -355,8 +356,6 @@ def test_update_daily_resolves_weekend_end_to_previous_trading_day(
     history_windows = Counter((item["code"], item["start_date"], item["end_date"]) for item in first_history_params)
     assert history_windows == Counter(
         {
-            ("sh.000001", "2024-01-04", "2024-01-05"): 1,
-            ("sh.000001", "1990-01-01", "2024-01-05"): 1,
             ("sh.600000", "2024-01-04", "2024-01-05"): 1,
             ("sh.600000", "1990-01-01", "2024-01-05"): 1,
         }

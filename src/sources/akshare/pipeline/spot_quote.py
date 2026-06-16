@@ -32,7 +32,7 @@ from src.storage.dataset_catalog import (
     AKSHARE_SPOT_QUOTE_SINA_DATASET,
     akshare_daily_bar_dataset_id,
 )
-from src.storage.parquet_store import ParquetStore
+from src.storage.parquet_store import DatasetWriteResult, ParquetStore
 from src.storage.schema import field_names, schema_for_dataset
 from src.utils.config_mgr import ConfigManager
 from src.utils.logging import logger
@@ -283,7 +283,7 @@ def _write_spot_daily_bar_rows(store: ParquetStore, daily_bar_rows: pd.DataFrame
         dataset_dir.mkdir(parents=True, exist_ok=True)
         logger.info("AkShare spot daily-bar upsert completed dataset={} rows={} path={}", dataset, 0, dataset_dir)
         return dataset_dir
-    result = store.write_dataset(dataset, daily_bar_rows, mode="upsert", skip_existing=True)
+    result = _upsert_spot_daily_bar_rows(store, dataset, daily_bar_rows, skip_existing=True)
     if result.skipped_partitions > 0:
         logger.info(
             "Spot daily-bar batch append completed updated={} skipped={}",
@@ -297,6 +297,89 @@ def _write_spot_daily_bar_rows(store: ParquetStore, daily_bar_rows: pd.DataFrame
         dataset_dir,
     )
     return dataset_dir
+
+
+def _upsert_spot_daily_bar_rows(
+    store: ParquetStore,
+    dataset: str,
+    daily_bar_rows: pd.DataFrame,
+    *,
+    skip_existing: bool,
+) -> DatasetWriteResult:
+    incoming = store.prepare_dataset_frame(dataset, daily_bar_rows, validate=False)
+    if incoming.empty:
+        return DatasetWriteResult(paths=(), row_count=0, updated_partitions=0, skipped_partitions=0)
+
+    paths: list[Path] = []
+    row_count = 0
+    updated = 0
+    skipped = 0
+    for raw_code, group in incoming.groupby("code", dropna=False, sort=False):
+        code = str(raw_code).strip()
+        partition = {"code": code}
+        path = store.dataset_path(dataset, partition)
+        group = group.reset_index(drop=True)
+        if not path.exists():
+            result = store.write_dataset(dataset, group, partition=partition, mode="upsert", skip_existing=False)
+            paths.extend(result.paths)
+            row_count += result.row_count
+            updated += result.updated_partitions
+            skipped += result.skipped_partitions
+            continue
+
+        try:
+            incoming_keys = _spot_daily_bar_key_set(group)
+            existing_keys = _read_spot_daily_bar_partition_keys(path)
+        except Exception as exc:
+            logger.warning(
+                "AkShare spot daily-bar key probe failed dataset={} code={} path={} error={}: {}",
+                dataset,
+                code,
+                path,
+                type(exc).__name__,
+                str(exc),
+            )
+            result = store.write_dataset(dataset, group, partition=partition, mode="upsert", skip_existing=True)
+            paths.extend(result.paths)
+            row_count += result.row_count
+            updated += result.updated_partitions
+            skipped += result.skipped_partitions
+            continue
+
+        if skip_existing and incoming_keys and incoming_keys.issubset(existing_keys):
+            paths.append(path)
+            skipped += 1
+            continue
+
+        result = store.write_dataset(dataset, group, partition=partition, mode="upsert", skip_existing=False)
+        paths.extend(result.paths)
+        row_count += len(incoming_keys - existing_keys)
+        updated += result.updated_partitions
+        skipped += result.skipped_partitions
+
+    return DatasetWriteResult(
+        paths=tuple(paths),
+        row_count=row_count,
+        updated_partitions=updated,
+        skipped_partitions=skipped,
+    )
+
+
+def _read_spot_daily_bar_partition_keys(path: Path) -> set[tuple[str, str, str]]:
+    existing = pd.read_parquet(path, columns=["code", "date", "adjustment"])
+    return _spot_daily_bar_key_set(existing)
+
+
+def _spot_daily_bar_key_set(df: pd.DataFrame) -> set[tuple[str, str, str]]:
+    if df.empty:
+        return set()
+    work = df.loc[:, ["code", "date", "adjustment"]].copy()
+    work["date"] = pd.to_datetime(work["date"], errors="raise").dt.strftime("%Y-%m-%d")
+    for column in ["code", "adjustment"]:
+        work[column] = work[column].astype("string").str.strip()
+    if work[["code", "date", "adjustment"]].isna().any().any():
+        raise ValueError("Spot daily-bar key contains null values")
+    return set(map(tuple, work[["code", "date", "adjustment"]].astype(str).to_numpy()))
 
 
 def _run_sina_fallback(

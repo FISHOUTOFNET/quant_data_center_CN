@@ -1,14 +1,17 @@
 from __future__ import annotations
 
 import json
+from collections import Counter
 from datetime import date
 from pathlib import Path
 
 import yaml
 from click.testing import CliRunner
+from update_daily_fakes import _fake_provider_factory, _write_settings
 
 import src.cli as cli_module
 import src.commands.baostock as baostock_commands
+import src.sources.baostock.update_daily as update_daily_module
 from src.pipeline.common import DAILY_BAR_DATASETS
 from src.sources.baostock.adjustments import (
     BAOSTOCK_CN_STOCK_ADJUSTMENT_FACTOR_DATASET,
@@ -163,6 +166,78 @@ def test_update_baostock_market_session_cli_uses_market_session_target_in_market
     assert captured["dataset"] != "all"
     assert manifest_args["session_mode"] == "adjusted_market_session"
     assert manifest_args["market_date"] == "2026-06-12"
+
+
+def test_update_daily_unadjusted_partial_uses_active_stock_codes_only(
+    tmp_path,
+    monkeypatch,
+    daily_sample,
+    baostock_cn_stock_basic_sample,
+) -> None:
+    _write_settings(tmp_path)
+    provider_factory, state = _fake_provider_factory(baostock_cn_stock_basic_sample(), daily_sample())
+    monkeypatch.setattr(update_daily_module, "create_provider", provider_factory)
+
+    update_daily_module.update_daily(
+        dataset=UNADJUSTED_DAILY_DATASET,
+        end="2024-01-03",
+        lookback_days=1,
+        root=tmp_path,
+        build_views=False,
+        mode="partial",
+    )
+
+    assert Counter(state["history_calls"]) == Counter({"sh.600000": 2})
+    assert "sz.000001" not in state["history_calls"]
+    assert "sh.000001" not in state["history_calls"]
+
+
+def test_update_daily_market_session_partial_uses_active_stock_codes_only(
+    tmp_path,
+    monkeypatch,
+    daily_sample,
+    baostock_cn_stock_basic_sample,
+) -> None:
+    _write_settings(tmp_path)
+    provider_factory, state = _fake_provider_factory(baostock_cn_stock_basic_sample(), daily_sample())
+    monkeypatch.setattr(update_daily_module, "create_provider", provider_factory)
+
+    update_daily_module.update_daily(
+        dataset=BAOSTOCK_MARKET_SESSION_DAILY_TARGET,
+        end="2024-01-03",
+        lookback_days=1,
+        root=tmp_path,
+        build_views=False,
+        mode="partial",
+    )
+
+    assert Counter(state["history_calls"]) == Counter({"sh.600000": 2})
+    assert state["baostock_cn_stock_adjustment_factor_calls"] == ["sh.600000"]
+    assert "sz.000001" not in state["history_calls"]
+    assert "sh.000001" not in state["history_calls"]
+
+
+def test_update_daily_explicit_non_stock_code_is_not_security_type_filtered(
+    tmp_path,
+    monkeypatch,
+    daily_sample,
+    baostock_cn_stock_basic_sample,
+) -> None:
+    _write_settings(tmp_path)
+    provider_factory, state = _fake_provider_factory(baostock_cn_stock_basic_sample(), daily_sample())
+    monkeypatch.setattr(update_daily_module, "create_provider", provider_factory)
+
+    update_daily_module.update_daily(
+        dataset=UNADJUSTED_DAILY_DATASET,
+        code=("sh.000001",),
+        end="2024-01-03",
+        lookback_days=1,
+        root=tmp_path,
+        build_views=False,
+        mode="partial",
+    )
+
+    assert Counter(state["history_calls"]) == Counter({"sh.000001": 2})
 
 
 def test_daily_workflow_uses_single_baostock_market_session_step() -> None:
