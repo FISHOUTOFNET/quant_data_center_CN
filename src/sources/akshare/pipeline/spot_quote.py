@@ -353,7 +353,7 @@ def _upsert_spot_daily_bar_rows(
 
         result = store.write_dataset(dataset, group, partition=partition, mode="upsert", skip_existing=False)
         paths.extend(result.paths)
-        row_count += len(incoming_keys - existing_keys)
+        row_count += result.row_count
         updated += result.updated_partitions
         skipped += result.skipped_partitions
 

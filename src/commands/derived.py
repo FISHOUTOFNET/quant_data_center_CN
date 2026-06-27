@@ -33,6 +33,12 @@ def register_derived_commands(root: click.Group) -> None:
         help="Build mode. Use full for manual repair of all derived partitions.",
     )
     @click.option(
+        "--include-security-master/--no-include-security-master",
+        default=True,
+        show_default=True,
+        help="Automatically include cn_security_master before daily_bar or valuation targets.",
+    )
+    @click.option(
         "--security-id",
         "security_ids",
         multiple=True,
@@ -43,6 +49,7 @@ def register_derived_commands(root: click.Group) -> None:
         target: tuple[str, ...],
         exclude_targets: tuple[str, ...],
         mode: str,
+        include_security_master: bool,
         security_ids: tuple[str, ...],
         build_views: bool,
     ) -> None:
@@ -52,6 +59,7 @@ def register_derived_commands(root: click.Group) -> None:
             records = run_build_derived(
                 targets=target,
                 exclude_targets=exclude_targets,
+                include_security_master=include_security_master,
                 mode=mode,
                 security_ids=security_ids,
                 build_views=build_views,

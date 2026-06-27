@@ -7,6 +7,7 @@ from pathlib import Path
 import click
 
 from src.sources.qlib import sync as qlib_sync_module
+from src.utils.logging import logger
 
 
 def register_qlib_commands(root: click.Group) -> None:
@@ -57,14 +58,22 @@ def register_qlib_commands(root: click.Group) -> None:
             click.echo("qlib status=skipped_weekday reason=outside_friday_sunday_window")
             return
 
-        result = qlib_sync_module.sync_qlib_data(
-            source_dir=source_dir,
-            target_date=target_date,
-            force_download=force_download,
-            build_views=build_views,
-            max_runtime_seconds=max_runtime_seconds,
-            workers=workers,
-        )
+        try:
+            result = qlib_sync_module.sync_qlib_data(
+                source_dir=source_dir,
+                target_date=target_date,
+                force_download=force_download,
+                build_views=build_views,
+                max_runtime_seconds=max_runtime_seconds,
+                workers=workers,
+            )
+        except Exception as exc:
+            logger.exception(
+                "sync-qlib failed exception_type={} message={}",
+                type(exc).__name__,
+                str(exc),
+            )
+            raise click.ClickException(f"sync-qlib failed: {type(exc).__name__}: {exc}") from exc
         click.echo(
             f"qlib status={result.status} target_date={result.target_date} "
             f"source_latest_date={result.source_latest_date} project_latest_date={result.project_latest_date} "

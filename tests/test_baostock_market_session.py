@@ -255,10 +255,10 @@ def test_daily_workflow_uses_single_baostock_market_session_step() -> None:
     assert list(by_id).index("baostock-basic") < list(by_id).index("baostock-market-session")
 
     valuation_deps = [item["step"] for item in by_id["baostock-valuation-percentile"]["depends_on"]]
-    build_deps = [item["step"] for item in by_id["build-derived"]["depends_on"]]
+    daily_bar_build_deps = [item["step"] for item in by_id["build-derived-daily-bar"]["depends_on"]]
     assert valuation_deps == ["baostock-market-session"]
-    assert "baostock-market-session" in build_deps
-    assert not (OLD_BAOSTOCK_STEP_IDS & set(build_deps))
+    assert "baostock-market-session" in daily_bar_build_deps
+    assert not (OLD_BAOSTOCK_STEP_IDS & set(daily_bar_build_deps))
 
 
 def test_default_daily_workflow_config_matches_market_session_shape() -> None:
@@ -274,7 +274,7 @@ def test_default_daily_workflow_config_matches_market_session_shape() -> None:
     assert market_session["resume_policy"] == "always_run"
     assert market_session["depends_on"] == ["baostock-basic"]
     assert by_id["baostock-valuation-percentile"]["depends_on"] == ["baostock-market-session"]
-    assert "baostock-market-session" in by_id["build-derived"]["depends_on"]
+    assert "baostock-market-session" in by_id["build-derived-daily-bar"]["depends_on"]
 
 
 def test_baostock_market_session_manifest_aggregates_records_without_changed_alias() -> None:

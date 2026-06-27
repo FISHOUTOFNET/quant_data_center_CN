@@ -93,6 +93,7 @@ PROCESS_CLEANUP_WAIT_SECONDS = 30
 RUNNING_ABANDONED_AFTER_SECONDS = 24 * 60 * 60
 RUN_UPDATE_DAILY_LOCK_STALE_AFTER_SECONDS = 24 * 60 * 60
 DAILY_WORKFLOW_CONFIG = "daily_workflow.yaml"
+LEGACY_START_AT_ALIASES = {"build-derived": "build-derived-security-master"}
 _LAST_LOCKED_DUCKDB_PATHS: tuple[Path, ...] = ()
 # Kept only as a test/migration reference for the legacy workflow shape.
 # Production execution must load config/daily_workflow.yaml and must not
@@ -251,33 +252,64 @@ DEFAULT_DAILY_WORKFLOW_CONFIG: dict[str, object] = {
             ],
         },
         {
-            "id": "build-derived",
-            "name": "build canonical derived datasets",
+            "id": "build-derived-security-master",
+            "name": "build derived security_master",
             "command": [
                 "{qdc}",
                 "build-derived",
                 "--target",
-                "all",
+                "security_master",
                 "--mode",
                 "incremental",
                 "--no-build-duckdb-views",
             ],
-            "depends_on": [
-                "akshare-spot-quote",
-                "baostock-basic",
-                "baostock-market-session",
-                "baostock-valuation-percentile",
-                "akshare-delist",
-                "akshare-valuation-full",
-                {"step": "akshare-daily-bar", "soft": True},
-                "sync-qlib",
+            "depends_on": ["baostock-basic", "akshare-delist"],
+        },
+        {
+            "id": "build-derived-daily-bar",
+            "name": "build derived daily_bar",
+            "command": [
+                "{qdc}",
+                "build-derived",
+                "--target",
+                "daily_bar",
+                "--mode",
+                "incremental",
+                "--no-include-security-master",
+                "--no-build-duckdb-views",
             ],
+            "depends_on": [
+                "build-derived-security-master",
+                "akshare-spot-quote",
+                "baostock-market-session",
+                {"step": "akshare-daily-bar", "soft": True},
+            ],
+        },
+        {
+            "id": "build-derived-valuation",
+            "name": "build derived valuation",
+            "command": [
+                "{qdc}",
+                "build-derived",
+                "--target",
+                "valuation",
+                "--mode",
+                "incremental",
+                "--no-include-security-master",
+                "--no-build-duckdb-views",
+            ],
+            "depends_on": ["build-derived-security-master", "baostock-valuation-percentile", "akshare-valuation-full"],
         },
         {
             "id": "build-duckdb-views",
             "name": "build-duckdb-views",
             "command": ["{qdc}", "build-duckdb-views"],
-            "depends_on": ["build-derived"],
+            "depends_on": [
+                "build-derived-security-master",
+                "build-derived-daily-bar",
+                "build-derived-valuation",
+                {"step": "sync-qlib", "soft": True},
+            ],
         },
     ]
 }
@@ -709,6 +741,10 @@ def run_daily_update(
     steps = _daily_steps_for_root(effective_dates, base)
     steps_by_id = {step.id: step for step in steps}
     step_ids = [step.id for step in steps]
+    original_start_at = start_at
+    mapped_start_at = LEGACY_START_AT_ALIASES.get(start_at)
+    if start_at is not None and start_at not in step_ids and mapped_start_at in step_ids:
+        start_at = mapped_start_at
 
     if start_at is not None and start_at not in step_ids:
         raise ValueError(f"Unknown daily update step id: {start_at}")
@@ -737,11 +773,15 @@ def run_daily_update(
         state["version"] = 2
         state.setdefault("runs", {})
         resolved_log.parent.mkdir(parents=True, exist_ok=True)
-        if _mark_abandoned_running_steps_by_key(
-            steps,
+        if original_start_at is not None and original_start_at != start_at:
+            _emit(
+                resolved_log,
+                now,
+                f"Mapped legacy start-at {original_start_at} to {start_at}",
+                console=True,
+            )
+        if _mark_abandoned_running_steps_in_state(
             state,
-            effective_dates,
-            run_instance_key,
             resolved_log,
             now,
             active_lock.owner,
@@ -864,6 +904,11 @@ def run_daily_update(
                         f"for {readable_state_key}; proceeding anyway",
                         console=False,
                     )
+                    if degraded_success_reason is None:
+                        degraded_success_reason = (
+                            "degraded: soft dependency "
+                            f"{dep_id} status={dep_status} for {readable_state_key}"
+                        )
 
             if blocked_reason is not None:
                 _record_step(step_state, effective_step, "blocked", 1, resolved_log, now, reason=blocked_reason)
@@ -873,7 +918,12 @@ def run_daily_update(
 
             _record_step(step_state, effective_step, "running", None, resolved_log, now)
             _write_state(resolved_state_file, state)
-            _emit(resolved_log, now, f"Running {effective_step.id} ({effective_step.name})... log={resolved_log}", console=True)
+            _emit(
+                resolved_log,
+                now,
+                f"Running {effective_step.id} ({effective_step.name})... log={resolved_log}",
+                console=True,
+            )
             _emit(resolved_log, now, f"Command: {effective_step.command_text}", console=False)
             _emit(resolved_log, now, f"Network profile: {effective_step.network_profile}", console=False)
 
@@ -1291,6 +1341,47 @@ def _mark_abandoned_running_steps_by_key(
     return changed
 
 
+def _mark_abandoned_running_steps_in_state(
+    state: dict[str, Any],
+    log_path: Path,
+    now: Callable[[], datetime] | None,
+    active_lock_owner: dict[str, object],
+) -> bool:
+    del log_path
+    runs = state.get("runs", {})
+    if not isinstance(runs, dict):
+        return False
+    changed = False
+    for run_state in runs.values():
+        if not isinstance(run_state, dict):
+            continue
+        step_state = run_state.get("steps", {})
+        if not isinstance(step_state, dict):
+            continue
+        for current in step_state.values():
+            if not isinstance(current, dict) or str(current.get("status")) != "running":
+                continue
+            reason = _running_abandoned_reason(current, now, active_lock_owner)
+            if reason is None:
+                continue
+            _mark_running_row_abandoned(current, now, reason)
+            changed = True
+    return changed
+
+
+def _mark_running_row_abandoned(
+    row: dict[str, Any],
+    now: Callable[[], datetime] | None,
+    reason: str,
+) -> None:
+    timestamp = _timestamp(now)
+    row["status"] = "abandoned"
+    row["updated_at"] = timestamp
+    row["ended_at"] = timestamp
+    row["exit_code"] = 1
+    row["reason"] = reason
+
+
 def _record_step(
     step_state: dict[str, Any],
     step: DailyStep,
@@ -1353,6 +1444,9 @@ def _running_abandoned_reason(
     pid = _int_or_none(row.get("orchestrator_pid", row.get("pid")))
     if pid is None:
         return "running step has no orchestrator pid"
+    active_pid = _int_or_none(active_lock_owner.get("pid"))
+    if active_pid == pid:
+        return None
     if not is_pid_alive(pid):
         return f"orchestrator pid {pid} is not alive"
 
@@ -1363,9 +1457,6 @@ def _running_abandoned_reason(
     if current_time - started_at <= timedelta(seconds=RUNNING_ABANDONED_AFTER_SECONDS):
         return None
 
-    active_pid = _int_or_none(active_lock_owner.get("pid"))
-    if active_pid == pid:
-        return None
     return f"running step exceeded {RUNNING_ABANDONED_AFTER_SECONDS} seconds"
 
 
@@ -1449,8 +1540,10 @@ def _degraded_build_derived_step_for_akshare_daily_bar(
     readable_state_key: str,
 ) -> DailyStep | str | None:
     del dependency_status, readable_state_key
-    if step.id != "build-derived" or dependency_id != "akshare-daily-bar":
+    if step.id not in {"build-derived", "build-derived-daily-bar"} or dependency_id != "akshare-daily-bar":
         return None
+    if step.id == "build-derived-daily-bar":
+        return "blocked"
 
     requested_targets = _build_derived_requested_targets(step.command)
     if "all" not in requested_targets and "daily_bar" not in requested_targets:

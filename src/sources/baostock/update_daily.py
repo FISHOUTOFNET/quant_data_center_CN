@@ -509,7 +509,7 @@ def _update_daily_impl(
         needs_baostock_cn_stock_adjustment_factor_api = (
             include_baostock_cn_stock_adjustment_factor or _needs_baostock_cn_stock_adjustment_factors(daily_targets)
         )
-        code_security_type = "1" if needs_baostock_cn_stock_adjustment_factor_api else None
+        code_security_type = "1" if needs_code_pool else None
         codes = (
             resolve_codes(
                 config,
@@ -533,7 +533,8 @@ def _update_daily_impl(
             checkpoint_lookup,
         )
         logger.info(
-            "Baostock code pool resolved needs_code_pool={} security_type_filter={} codes_before_checkpoint={} codes_after_checkpoint={}",
+            "Baostock code pool resolved needs_code_pool={} security_type_filter={} "
+            "codes_before_checkpoint={} codes_after_checkpoint={}",
             needs_code_pool,
             code_security_type or "",
             len(requested_codes),

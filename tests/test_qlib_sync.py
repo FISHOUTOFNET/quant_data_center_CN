@@ -3,6 +3,7 @@ from __future__ import annotations
 import math
 import os
 import struct
+import tarfile
 import time
 from datetime import date, datetime
 from pathlib import Path
@@ -10,11 +11,15 @@ from pathlib import Path
 import duckdb
 import pandas as pd
 import pytest
+from click.testing import CliRunner
 
+import src.cli as cli_module
+import src.commands.qlib as qlib_commands
 import src.sources.qlib.sync as qlib_sync_module
 from src.sources.qlib.sync import (
     QlibRemoteAsset,
     QlibSyncTimeoutError,
+    download_and_extract_qlib_asset,
     is_qlib_update_day,
     load_qlib_feature_series,
     load_qlib_symbol_features,
@@ -396,6 +401,73 @@ def test_qlib_duckdb_views_can_be_created_and_queried(tmp_path: Path) -> None:
         assert conn.execute(
             "select close from v_qlib_cn_stock_features_day where qlib_symbol='sh600000'"
         ).fetchone() == (8.2,)
+
+
+def test_download_and_extract_qlib_asset_rolls_back_when_replace_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source_dir = tmp_path / "qlib" / "cn_data"
+    (source_dir / "calendars").mkdir(parents=True)
+    (source_dir / "features").mkdir()
+    (source_dir / "instruments").mkdir()
+    marker = source_dir / "calendars" / "day.txt"
+    marker.write_text("old\n", encoding="utf-8")
+
+    archive_source = tmp_path / "archive_source" / "cn_data"
+    (archive_source / "calendars").mkdir(parents=True)
+    (archive_source / "features").mkdir()
+    (archive_source / "instruments").mkdir()
+    (archive_source / "calendars" / "day.txt").write_text("new\n", encoding="utf-8")
+
+    def fake_download(url: str, target_path: Path, *, deadline=None) -> None:
+        del url, deadline
+        with tarfile.open(target_path, "w:gz") as tar:
+            tar.add(archive_source, arcname="cn_data")
+
+    original_rename = Path.rename
+
+    def fail_replacement_rename(self: Path, target: Path) -> Path:
+        if self.name.startswith("cn_data.replacement."):
+            raise RuntimeError("replace failed")
+        return original_rename(self, target)
+
+    monkeypatch.setattr(qlib_sync_module, "_download_file", fake_download)
+    monkeypatch.setattr(Path, "rename", fail_replacement_rename)
+
+    with pytest.raises(RuntimeError, match="replace failed"):
+        download_and_extract_qlib_asset(
+            source_dir,
+            QlibRemoteAsset(asset_id="asset-1", etag=None, size=None, download_url="https://example.test/qlib.tar.gz"),
+            force_download=True,
+        )
+
+    assert marker.read_text(encoding="utf-8") == "old\n"
+    assert not list(source_dir.parent.glob("cn_data.replacement.*"))
+
+
+def test_sync_qlib_cli_logs_exception_type_and_message(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, object] = {}
+
+    class FakeLogger:
+        def exception(self, message: str, *args: object) -> None:
+            captured["message"] = message
+            captured["args"] = args
+
+    def fail_sync(**kwargs):
+        del kwargs
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(qlib_commands.qlib_sync_module, "is_qlib_update_day", lambda: True)
+    monkeypatch.setattr(qlib_commands.qlib_sync_module, "sync_qlib_data", fail_sync)
+    monkeypatch.setattr(qlib_commands, "logger", FakeLogger())
+
+    result = CliRunner().invoke(cli_module.cli, ["sync-qlib"])
+
+    assert result.exit_code != 0
+    assert "sync-qlib failed: RuntimeError: boom" in result.output
+    assert captured["message"] == "sync-qlib failed exception_type={} message={}"
+    assert captured["args"] == ("RuntimeError", "boom")
 
 
 def _calendar(qlib_dir: Path) -> list[date]:

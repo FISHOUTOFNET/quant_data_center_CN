@@ -154,30 +154,50 @@ steps:
     data_freshness_policy: natural_daily
     command: ["{qdc}", "akshare", "update", "--target", "financial_report", "--mode", "incremental", "--no-build-duckdb-views"]
 
-  - id: build-derived
-    name: build canonical derived datasets
+  - id: build-derived-security-master
+    name: build derived security_master
     schedule_policy: daily
     state_key_policy: natural_date
     resume_policy: skip_if_success
     data_freshness_policy: natural_daily
-    command: ["{qdc}", "build-derived", "--target", "all", "--mode", "incremental", "--no-build-duckdb-views"]
+    command: ["{qdc}", "build-derived", "--target", "security_master", "--mode", "incremental", "--no-build-duckdb-views"]
     depends_on:
-      - step: akshare-spot-quote
-        state_key_policy: market_date
       - step: baostock-basic
-        state_key_policy: market_date
-      - step: baostock-market-session
-        state_key_policy: market_date
-      - step: baostock-valuation-percentile
         state_key_policy: market_date
       - step: akshare-delist
         state_key_policy: market_date
-      - step: akshare-valuation-full
+
+  - id: build-derived-daily-bar
+    name: build derived daily_bar
+    schedule_policy: daily
+    state_key_policy: natural_date
+    resume_policy: skip_if_success
+    data_freshness_policy: natural_daily
+    command: ["{qdc}", "build-derived", "--target", "daily_bar", "--mode", "incremental", "--no-include-security-master", "--no-build-duckdb-views"]
+    depends_on:
+      - step: build-derived-security-master
+        state_key_policy: natural_date
+      - step: akshare-spot-quote
+        state_key_policy: market_date
+      - step: baostock-market-session
         state_key_policy: market_date
       - step: akshare-daily-bar
         state_key_policy: market_date
         soft: true
-      - step: sync-qlib
+
+  - id: build-derived-valuation
+    name: build derived valuation
+    schedule_policy: daily
+    state_key_policy: natural_date
+    resume_policy: skip_if_success
+    data_freshness_policy: natural_daily
+    command: ["{qdc}", "build-derived", "--target", "valuation", "--mode", "incremental", "--no-include-security-master", "--no-build-duckdb-views"]
+    depends_on:
+      - step: build-derived-security-master
+        state_key_policy: natural_date
+      - step: baostock-valuation-percentile
+        state_key_policy: market_date
+      - step: akshare-valuation-full
         state_key_policy: market_date
 
   - id: build-duckdb-views
@@ -188,5 +208,12 @@ steps:
     data_freshness_policy: natural_daily
     command: ["{qdc}", "build-duckdb-views"]
     depends_on:
-      - step: build-derived
+      - step: build-derived-security-master
         state_key_policy: natural_date
+      - step: build-derived-daily-bar
+        state_key_policy: natural_date
+      - step: build-derived-valuation
+        state_key_policy: natural_date
+      - step: sync-qlib
+        state_key_policy: market_date
+        soft: true

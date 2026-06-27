@@ -50,6 +50,7 @@ def build_derived_datasets(
     root: Path | None = None,
     targets: tuple[str, ...] = ("all",),
     exclude_targets: tuple[str, ...] = (),
+    include_security_master: bool = True,
     mode: BuildMode = "incremental",
     security_ids: tuple[str, ...] | None = None,
     changed_since: datetime | None = None,
@@ -65,7 +66,11 @@ def build_derived_datasets(
 
     store = ParquetStore(root=root)
     expanded = _expand_targets(targets, exclude_targets=exclude_targets)
-    if any(target in expanded for target in ("daily_bar", "valuation")) and "security_master" not in expanded:
+    if (
+        include_security_master
+        and any(target in expanded for target in ("daily_bar", "valuation"))
+        and "security_master" not in expanded
+    ):
         expanded = ("security_master", *expanded)
 
     with build_derived_file_lock(store.root, expanded):

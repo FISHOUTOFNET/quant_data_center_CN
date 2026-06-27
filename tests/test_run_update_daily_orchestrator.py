@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 from datetime import date, datetime, timedelta
@@ -696,6 +697,32 @@ def test_build_derived_depends_on_market_and_natural_state_keys(tmp_path: Path) 
     assert _steps(state_file, "natural_date:2026-06-13")["build-derived"]["status"] == "success"
 
 
+def test_repo_workflow_maps_legacy_build_derived_start_at(tmp_path: Path) -> None:
+    _write_repo_workflow(tmp_path)
+    state_file = tmp_path / "state.json"
+    log_file = tmp_path / "run.log"
+    calls: list[str] = []
+
+    assert (
+        run_update_daily.run_daily_update(
+            root=tmp_path,
+            state_file=state_file,
+            run_log=log_file,
+            today=date(2026, 6, 8),
+            start_at="build-derived",
+            command_runner=lambda step, log_path: calls.append(step.id) or 0,
+        )
+        == 0
+    )
+
+    assert calls == ["build-derived-security-master", "build-derived-daily-bar", "build-derived-valuation", "build-duckdb-views"]
+    states = _steps(state_file, "natural_date:2026-06-08")
+    assert states["build-derived-security-master"]["status"] == "success"
+    assert "Mapped legacy start-at build-derived to build-derived-security-master" in log_file.read_text(
+        encoding="utf-8"
+    )
+
+
 def test_always_run_policy_reruns_successful_step(tmp_path: Path) -> None:
     _write_minimal_workflow(tmp_path)
     calls: list[str] = []
@@ -999,44 +1026,54 @@ def test_daily_steps_include_yjyg_em_before_build_views_on_weekday() -> None:
 
 
 @pytest.mark.parametrize("today", [date(2026, 6, 8), date(2026, 6, 6)])
-def test_daily_steps_build_derived_all_before_views(today: date) -> None:
+def test_daily_steps_build_derived_stages_before_views(today: date) -> None:
     steps = run_update_daily.daily_steps(today, root=REPO_ROOT)
     by_id = {step.id: step for step in steps}
-    expected_dependencies = (
+
+    assert "build-derived-security-master" in by_id
+    assert "build-derived-daily-bar" in by_id
+    assert "build-derived-valuation" in by_id
+    assert "build-derived" not in by_id
+    assert "build-security-master" not in by_id
+    assert steps.index(by_id["build-derived-security-master"]) < steps.index(by_id["build-derived-daily-bar"])
+    assert steps.index(by_id["build-derived-security-master"]) < steps.index(by_id["build-derived-valuation"])
+    assert steps.index(by_id["build-derived-daily-bar"]) < steps.index(by_id["build-duckdb-views"])
+    assert steps.index(by_id["build-derived-valuation"]) < steps.index(by_id["build-duckdb-views"])
+    assert _dependency_ids(by_id["build-derived-security-master"]) == (
+        ("baostock-basic", "akshare-delist") if today.weekday() in {4, 5, 6} else ("baostock-basic",)
+    )
+    assert _dependency_ids(by_id["build-derived-daily-bar"]) == (
+        ("build-derived-security-master", "akshare-spot-quote", "baostock-market-session", "akshare-daily-bar")
+        if today.weekday() in {4, 5, 6}
+        else ("build-derived-security-master", "akshare-spot-quote", "baostock-market-session")
+    )
+    assert _dependency_ids(by_id["build-derived-valuation"]) == (
+        ("build-derived-security-master", "baostock-valuation-percentile", "akshare-valuation-full")
+        if today.weekday() in {4, 5, 6}
+        else ("build-derived-security-master", "baostock-valuation-percentile")
+    )
+    assert _dependency_ids(by_id["build-duckdb-views"]) == (
         (
-            "akshare-spot-quote",
-            "baostock-basic",
-            "baostock-market-session",
-            "baostock-valuation-percentile",
-            "akshare-delist",
-            "akshare-valuation-full",
-            "akshare-daily-bar",
+            "build-derived-security-master",
+            "build-derived-daily-bar",
+            "build-derived-valuation",
             "sync-qlib",
         )
         if today.weekday() in {4, 5, 6}
-        else (
-            "akshare-spot-quote",
-            "baostock-basic",
-            "baostock-market-session",
-            "baostock-valuation-percentile",
-        )
+        else ("build-derived-security-master", "build-derived-daily-bar", "build-derived-valuation")
     )
-
-    assert "build-derived" in by_id
-    assert "build-security-master" not in by_id
-    assert steps.index(by_id["build-derived"]) < steps.index(by_id["build-duckdb-views"])
-    assert _dependency_ids(by_id["build-derived"]) == expected_dependencies
-    assert _dependency_ids(by_id["build-duckdb-views"]) == ("build-derived",)
-    assert by_id["build-derived"].command[1:] == (
+    assert by_id["build-derived-security-master"].command[1:] == (
         "-m",
         "src.cli",
         "build-derived",
         "--target",
-        "all",
+        "security_master",
         "--mode",
         "incremental",
         "--no-build-duckdb-views",
     )
+    assert "--no-include-security-master" in by_id["build-derived-daily-bar"].command
+    assert "--no-include-security-master" in by_id["build-derived-valuation"].command
 
 
 def test_daily_steps_load_weekday_steps_from_config() -> None:
@@ -1049,12 +1086,12 @@ def test_daily_steps_load_weekday_steps_from_config() -> None:
     assert _dependency_ids(by_id["baostock-market-session"]) == ("baostock-basic",)
     assert steps.index(by_id["baostock-basic"]) < steps.index(by_id["baostock-market-session"])
     assert "baostock-qfq" not in by_id
-    assert by_id["build-derived"].command[1:] == (
+    assert by_id["build-derived-security-master"].command[1:] == (
         "-m",
         "src.cli",
         "build-derived",
         "--target",
-        "all",
+        "security_master",
         "--mode",
         "incremental",
         "--no-build-duckdb-views",
@@ -1070,7 +1107,7 @@ def test_daily_steps_load_weekend_steps_from_config() -> None:
     assert "--start" in by_id["akshare-daily-bar"].command
     assert "2026-05-07" in by_id["akshare-daily-bar"].command
     assert "--end" in by_id["akshare-daily-bar"].command
-    assert "akshare-valuation-full" in _dependency_ids(by_id["build-derived"])
+    assert "akshare-valuation-full" in _dependency_ids(by_id["build-derived-valuation"])
 
 
 def test_daily_workflow_network_profiles_from_repo_config() -> None:
@@ -1083,7 +1120,9 @@ def test_daily_workflow_network_profiles_from_repo_config() -> None:
         "akshare-spot-quote",
         "baostock-basic",
         "financial-report",
-        "build-derived",
+        "build-derived-security-master",
+        "build-derived-daily-bar",
+        "build-derived-valuation",
     ):
         assert by_id[step_id].network_profile == "direct"
 
@@ -1137,13 +1176,14 @@ def test_core_baostock_failure_blocks_build_derived(tmp_path: Path, failed_step:
         == 7
     )
 
-    assert "build-derived" not in calls
+    blocked_step = "build-derived-daily-bar" if failed_step == "baostock-market-session" else "build-derived-valuation"
+    assert blocked_step not in calls
     states = _steps(state_file, "natural_date:2026-06-08")
-    assert states["build-derived"]["status"] == "blocked"
-    assert failed_step in states["build-derived"]["blocked_by"]
+    assert states[blocked_step]["status"] == "blocked"
+    assert failed_step in states[blocked_step]["blocked_by"]
 
 
-def test_weekend_daily_bar_failure_does_not_block_build_derived(tmp_path: Path) -> None:
+def test_weekend_daily_bar_failure_blocks_only_daily_bar_stage(tmp_path: Path) -> None:
     _write_repo_workflow(tmp_path)
     state_file = tmp_path / "state.json"
     log_file = tmp_path / "run.log"
@@ -1167,29 +1207,26 @@ def test_weekend_daily_bar_failure_does_not_block_build_derived(tmp_path: Path) 
         == 7
     )
 
-    # akshare-daily-bar is a soft dependency of build-derived, so it should still run
-    assert "build-derived" in calls
-    assert "build-duckdb-views" in calls
-    assert "--exclude-target" in commands["build-derived"]
-    assert "daily_bar" in commands["build-derived"]
-    assert "cn_stock_daily_bar" not in commands["build-derived"]
+    assert "build-derived-security-master" in calls
+    assert "build-derived-daily-bar" not in calls
+    assert "build-derived-valuation" in calls
+    assert "build-duckdb-views" not in calls
     states = _steps(state_file, "natural_date:2026-06-06")
-    assert states["build-derived"]["network_profile"] == "direct"
+    assert states["build-derived-security-master"]["network_profile"] == "direct"
     log_text = log_file.read_text(encoding="utf-8")
-    assert "degraded mode" in log_text
-    assert "excluding target=daily_bar" in log_text
-    assert "dataset=cn_stock_daily_bar" in log_text
+    assert "cannot run explicit target=daily_bar" in log_text
     assert "status failed for market_date:2026-06-06" in log_text
     assert "status pending" not in log_text
-    assert states["build-derived"]["status"] == "success_degraded"
-    assert states["build-derived"]["reason"].startswith("degraded: excluded target=daily_bar")
-    assert states["build-duckdb-views"]["status"] == "success_degraded"
-    assert states["build-duckdb-views"]["reason"] == (
-        "degraded: upstream dependency build-derived completed with success_degraded"
+    assert states["build-derived-security-master"]["status"] == "success"
+    assert states["build-derived-daily-bar"]["status"] == "blocked"
+    assert states["build-derived-daily-bar"]["reason"].startswith(
+        "degraded: cannot build target=daily_bar"
     )
+    assert states["build-derived-valuation"]["status"] == "success"
+    assert states["build-duckdb-views"]["status"] == "blocked"
 
 
-def test_success_degraded_does_not_skip_recovered_daily_bar_or_views(tmp_path: Path) -> None:
+def test_recovered_daily_bar_reruns_blocked_stage_and_views(tmp_path: Path) -> None:
     _write_repo_workflow(tmp_path)
     state_file = tmp_path / "state.json"
     log_file = tmp_path / "run.log"
@@ -1214,8 +1251,10 @@ def test_success_degraded_does_not_skip_recovered_daily_bar_or_views(tmp_path: P
         == 7
     )
     first_states = _steps(state_file, "natural_date:2026-06-06")
-    assert first_states["build-derived"]["status"] == "success_degraded"
-    assert first_states["build-duckdb-views"]["status"] == "success_degraded"
+    assert first_states["build-derived-security-master"]["status"] == "success"
+    assert first_states["build-derived-daily-bar"]["status"] == "blocked"
+    assert first_states["build-derived-valuation"]["status"] == "success"
+    assert first_states["build-duckdb-views"]["status"] == "blocked"
 
     def second_runner(step: run_update_daily.DailyStep, log_path: Path) -> int:
         del log_path
@@ -1236,11 +1275,13 @@ def test_success_degraded_does_not_skip_recovered_daily_bar_or_views(tmp_path: P
     )
 
     assert "akshare-daily-bar" in second_calls
-    assert "build-derived" in second_calls
+    assert "build-derived-security-master" not in second_calls
+    assert "build-derived-daily-bar" in second_calls
+    assert "build-derived-valuation" not in second_calls
     assert "build-duckdb-views" in second_calls
-    assert "--exclude-target" not in second_commands["build-derived"]
+    assert "--exclude-target" not in second_commands["build-derived-daily-bar"]
     second_states = _steps(state_file, "natural_date:2026-06-06")
-    assert second_states["build-derived"]["status"] == "success"
+    assert second_states["build-derived-daily-bar"]["status"] == "success"
     assert second_states["build-duckdb-views"]["status"] == "success"
 
 
@@ -1266,9 +1307,9 @@ def test_daily_bar_success_keeps_build_derived_command_and_success_status(tmp_pa
         == 0
     )
 
-    assert "--exclude-target" not in commands["build-derived"]
+    assert "--exclude-target" not in commands["build-derived-daily-bar"]
     states = _steps(state_file, "natural_date:2026-06-06")
-    assert states["build-derived"]["status"] == "success"
+    assert states["build-derived-daily-bar"]["status"] == "success"
 
 
 def test_optional_plain_skipped_does_not_block_build_derived(tmp_path: Path) -> None:
@@ -1290,11 +1331,14 @@ def test_optional_plain_skipped_does_not_block_build_derived(tmp_path: Path) -> 
         == 0
     )
 
-    assert "build-derived" in calls
+    assert "build-derived-security-master" in calls
+    assert "build-derived-daily-bar" in calls
+    assert "build-derived-valuation" in calls
     market_states = _steps(state_file, "market_date:2026-06-08")
     natural_states = _steps(state_file, "natural_date:2026-06-08")
     assert market_states["akshare-spot-quote"]["status"] == "skipped"
-    assert natural_states["build-derived"]["status"] == "success"
+    assert natural_states["build-derived-security-master"]["status"] == "success"
+    assert natural_states["build-derived-daily-bar"]["status"] == "success"
 
 
 @pytest.mark.parametrize("status", ["failed_resource_locked", "failed_timeout_cleanup"])
@@ -1359,7 +1403,9 @@ def test_weekend_akshare_valuation_failure_blocks_build_derived(tmp_path: Path) 
     assert "akshare-daily-bar" in calls
     assert "sync-qlib" in calls
     assert "financial-report" in calls
-    assert "build-derived" not in calls
+    assert "build-derived-security-master" in calls
+    assert "build-derived-daily-bar" in calls
+    assert "build-derived-valuation" not in calls
     assert "build-duckdb-views" not in calls
     market_states = _steps(state_file, "market_date:2026-06-06")
     natural_states = _steps(state_file, "natural_date:2026-06-06")
@@ -1370,9 +1416,40 @@ def test_weekend_akshare_valuation_failure_blocks_build_derived(tmp_path: Path) 
     assert market_states["akshare-daily-bar"]["status"] == "success"
     assert market_states["sync-qlib"]["status"] == "success"
     assert natural_states["financial-report"]["status"] == "success"
-    assert natural_states["build-derived"]["status"] == "blocked"
-    assert natural_states["build-derived"]["blocked_by"] == ["akshare-valuation-full"]
+    assert natural_states["build-derived-security-master"]["status"] == "success"
+    assert natural_states["build-derived-daily-bar"]["status"] == "success"
+    assert natural_states["build-derived-valuation"]["status"] == "blocked"
+    assert natural_states["build-derived-valuation"]["blocked_by"] == ["akshare-valuation-full"]
     assert natural_states["build-duckdb-views"]["status"] == "blocked"
+
+
+def test_sync_qlib_failure_degrades_build_views_without_blocking(tmp_path: Path) -> None:
+    _write_repo_workflow(tmp_path)
+    state_file = tmp_path / "state.json"
+    log_file = tmp_path / "run.log"
+    calls: list[str] = []
+
+    assert (
+        run_update_daily.run_daily_update(
+            root=tmp_path,
+            state_file=state_file,
+            run_log=log_file,
+            today=date(2026, 6, 6),
+            command_runner=lambda step, log_path: calls.append(step.id) or (7 if step.id == "sync-qlib" else 0),
+        )
+        == 7
+    )
+
+    assert "sync-qlib" in calls
+    assert "build-derived-security-master" in calls
+    assert "build-derived-daily-bar" in calls
+    assert "build-derived-valuation" in calls
+    assert "build-duckdb-views" in calls
+    market_states = _steps(state_file, "market_date:2026-06-06")
+    natural_states = _steps(state_file, "natural_date:2026-06-06")
+    assert market_states["sync-qlib"]["status"] == "failed"
+    assert natural_states["build-duckdb-views"]["status"] == "success_degraded"
+    assert natural_states["build-duckdb-views"]["reason"].startswith("degraded: soft dependency sync-qlib")
 
 
 def test_run_subprocess_disables_child_file_logging(
@@ -1554,6 +1631,73 @@ def test_running_dead_pid_is_marked_abandoned(tmp_path: Path, monkeypatch: pytes
     assert step_state["source"]["status"] == "abandoned"
     assert "not alive" in step_state["source"]["reason"]
     assert run_update_daily._final_exit_code([step], step_state, None) == 1
+
+
+def test_run_daily_update_marks_historical_running_dead_pid_abandoned(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state_file = tmp_path / "state.json"
+    active_pid = os.getpid()
+    state_file.write_text(
+        json.dumps(
+            {
+                "version": 2,
+                "runs": {
+                    "natural_date:2026-06-01": {
+                        "steps": {
+                            "dead-step": {
+                                "status": "running",
+                                "command": "old command",
+                                "log_path": "logs/old.log",
+                                "started_at": "2026-06-01 18:00:00",
+                                "updated_at": "2026-06-01 18:00:00",
+                                "ended_at": None,
+                                "exit_code": None,
+                                "orchestrator_pid": 999999,
+                            },
+                            "active-step": {
+                                "status": "running",
+                                "command": "active command",
+                                "log_path": "logs/active.log",
+                                "started_at": "2026-06-01 18:00:00",
+                                "updated_at": "2026-06-01 18:00:00",
+                                "ended_at": None,
+                                "exit_code": None,
+                                "orchestrator_pid": active_pid,
+                            },
+                        }
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        run_update_daily,
+        "daily_steps",
+        lambda *args, **kwargs: [run_update_daily.DailyStep("one", "one", ("cmd",))],
+    )
+    monkeypatch.setattr(run_update_daily, "is_pid_alive", lambda pid: pid == active_pid)
+
+    assert (
+        run_update_daily.run_daily_update(
+            root=tmp_path,
+            state_file=state_file,
+            run_log=tmp_path / "run.log",
+            today=date(2026, 6, 8),
+            now=lambda: datetime(2026, 6, 8, 18, 0),
+            command_runner=lambda step, log_path: 0,
+        )
+        == 0
+    )
+
+    old_steps = _steps(state_file, "natural_date:2026-06-01")
+    assert old_steps["dead-step"]["status"] == "abandoned"
+    assert old_steps["dead-step"]["command"] == "old command"
+    assert old_steps["dead-step"]["log_path"] == "logs/old.log"
+    assert old_steps["dead-step"]["reason"] == "orchestrator pid 999999 is not alive"
+    assert old_steps["active-step"]["status"] == "running"
 
 
 def test_abandoned_dependency_blocks_until_retried_successfully(
