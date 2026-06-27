@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import math
-import os
 import shutil
 import tarfile
 import tempfile
@@ -12,6 +11,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
+import uuid
 from collections.abc import Callable
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass
@@ -379,35 +379,60 @@ def download_and_extract_qlib_asset(
     deadline: Deadline = None,
 ) -> None:
     del force_download
+    stage = "download qlib asset"
     started = time.perf_counter()
-    _check_deadline(deadline, "download qlib asset")
     source_dir.parent.mkdir(parents=True, exist_ok=True)
     archive_path = source_dir.parent / QLIB_ASSET_NAME
-    _download_file(remote_asset.download_url, archive_path, deadline=deadline)
-    logger.info("Qlib asset downloaded elapsed={:.3f}s path={}", time.perf_counter() - started, archive_path)
-    with tempfile.TemporaryDirectory(prefix="qdc_qlib_") as temp_name:
-        temp_root = Path(temp_name)
-        extract_started = time.perf_counter()
-        _check_deadline(deadline, "extract qlib asset")
-        with tarfile.open(archive_path, "r:gz") as tar:
-            tar.extractall(temp_root, filter="data")
-        extracted = _find_extracted_qlib_dir(temp_root)
-        logger.info("Qlib asset extracted elapsed={:.3f}s", time.perf_counter() - extract_started)
-        replacement = source_dir.parent / f"{source_dir.name}.replacement"
-        if replacement.exists():
-            shutil.rmtree(replacement)
-        replace_started = time.perf_counter()
-        _check_deadline(deadline, "replace qlib source directory")
-        shutil.copytree(extracted, replacement)
-        if source_dir.exists():
-            shutil.rmtree(source_dir)
-        os.replace(replacement, source_dir)
-        logger.info(
-            "Qlib source directory replaced elapsed={:.3f}s path={}",
-            time.perf_counter() - replace_started,
+    replacement = source_dir.parent / f"{source_dir.name}.replacement.{uuid.uuid4().hex}"
+    backup = source_dir.parent / f"{source_dir.name}.backup.{uuid.uuid4().hex}"
+    try:
+        _check_deadline(deadline, stage)
+        _download_file(remote_asset.download_url, archive_path, deadline=deadline)
+        logger.info("Qlib asset downloaded elapsed={:.3f}s path={}", time.perf_counter() - started, archive_path)
+        with tempfile.TemporaryDirectory(prefix="qdc_qlib_") as temp_name:
+            temp_root = Path(temp_name)
+            stage = "extract qlib asset"
+            extract_started = time.perf_counter()
+            _check_deadline(deadline, stage)
+            with tarfile.open(archive_path, "r:gz") as tar:
+                tar.extractall(temp_root, filter="data")
+            extracted = _find_extracted_qlib_dir(temp_root)
+            logger.info("Qlib asset extracted elapsed={:.3f}s", time.perf_counter() - extract_started)
+
+            stage = "replace qlib source directory"
+            replace_started = time.perf_counter()
+            _check_deadline(deadline, stage)
+            shutil.copytree(extracted, replacement)
+            try:
+                if source_dir.exists():
+                    source_dir.rename(backup)
+                replacement.rename(source_dir)
+            except Exception:
+                if not source_dir.exists() and backup.exists():
+                    backup.rename(source_dir)
+                raise
+            finally:
+                if replacement.exists():
+                    shutil.rmtree(replacement, ignore_errors=True)
+            if backup.exists():
+                shutil.rmtree(backup, ignore_errors=True)
+            logger.info(
+                "Qlib source directory replaced elapsed={:.3f}s path={}",
+                time.perf_counter() - replace_started,
+                source_dir,
+            )
+    except Exception:
+        logger.exception(
+            "Qlib asset update failed stage={} source_dir={} archive_path={}",
+            stage,
             source_dir,
+            archive_path,
         )
-    archive_path.unlink(missing_ok=True)
+        raise
+    finally:
+        if replacement.exists():
+            shutil.rmtree(replacement, ignore_errors=True)
+        archive_path.unlink(missing_ok=True)
 
 
 def write_qlib_sync_state(root: Path, row: dict[str, object]) -> None:
