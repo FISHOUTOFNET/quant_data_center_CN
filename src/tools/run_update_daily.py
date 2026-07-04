@@ -25,12 +25,23 @@ from src.pipeline.common import (
     default_candidate_date,
     latest_trading_day_on_or_before,
 )
+from src.pipeline.step_health import StepHealthSummary, read_step_health_summary
 from src.storage.metadata_store import default_metadata_duckdb_file
 from src.storage.parquet_store import ParquetStore
 from src.utils import paths
 from src.utils.config_mgr import ConfigError, ConfigManager
 from src.utils.network_policy import NETWORK_PROFILE_DIRECT, NETWORK_PROFILES, build_network_env
 from src.utils.process_lock import ProcessLockError, acquire_process_lock, is_pid_alive
+
+# Critical derived datasets whose parquet existence authorizes a stale-aware
+# DuckDB view rebuild when upstream steps failed. If ANY of these is missing,
+# build-duckdb-views must not pretend to succeed.
+CRITICAL_DERIVED_DATASETS_FOR_VIEWS: tuple[str, ...] = (
+    "cn_security_master",
+    "cn_stock_daily_bar",
+    "cn_stock_valuation",
+)
+STEP_RESULT_PATH_ENV = "QDC_STEP_RESULT_PATH"
 
 
 class StateFileError(RuntimeError):
@@ -828,6 +839,34 @@ def run_daily_update(
                 effective_dates=effective_dates,
                 run_instance_key=run_instance_key,
             )
+            stale_parquet_reason: str | None = None
+            if blocked_by and step.id == "build-duckdb-views":
+                # Stale-aware rebuild: if upstream derived steps failed but the
+                # critical derived parquet files already exist, we may still
+                # rebuild DuckDB views against the stale parquet and record the
+                # step as success_degraded. If any critical parquet is missing,
+                # we must NOT pretend to succeed.
+                if _critical_derived_parquet_available(base):
+                    stale_parquet_reason = (
+                        f"degraded: upstream failed/blocked ({', '.join(blocked_by)}) "
+                        "but critical derived parquet exists; rebuilt views from stale parquet"
+                    )
+                    _emit(
+                        resolved_log,
+                        now,
+                        f"Warning: {step.id} upstream dependency failed: {', '.join(blocked_by)}; "
+                        "critical derived parquet exists, proceeding with stale-aware view rebuild",
+                        console=False,
+                    )
+                    blocked_by = ()
+                else:
+                    _emit(
+                        resolved_log,
+                        now,
+                        f"Warning: {step.id} upstream dependency failed and critical derived "
+                        "parquet is missing; cannot rebuild views",
+                        console=False,
+                    )
             if blocked_by:
                 _record_step(step_state, step, "blocked", 1, resolved_log, now, blocked_by=blocked_by)
                 _write_state(resolved_state_file, state)
@@ -927,7 +966,28 @@ def run_daily_update(
             _emit(resolved_log, now, f"Command: {effective_step.command_text}", console=False)
             _emit(resolved_log, now, f"Network profile: {effective_step.network_profile}", console=False)
 
-            exit_code = int(runner(effective_step, resolved_log))
+            # Resolve per-step health summary path and expose it to the runner
+            # (and the real subprocess) via QDC_STEP_RESULT_PATH. The runner
+            # closure (default or test) inherits this from os.environ. After
+            # the runner returns we read the summary, if any, to decide whether
+            # a exit_code==0 step should be recorded as success or
+            # success_degraded based on the records the command itself wrote.
+            step_result_path = _step_result_path(base, run_instance_key, effective_step)
+            prior_env_result_path = os.environ.get(STEP_RESULT_PATH_ENV)
+            os.environ[STEP_RESULT_PATH_ENV] = str(step_result_path)
+            # Clear any stale summary from a previous run so we never read it
+            # by mistake if the current command does not write one.
+            with suppress(OSError):
+                if step_result_path.exists():
+                    step_result_path.unlink()
+            try:
+                exit_code = int(runner(effective_step, resolved_log))
+            finally:
+                if prior_env_result_path is None:
+                    os.environ.pop(STEP_RESULT_PATH_ENV, None)
+                else:
+                    os.environ[STEP_RESULT_PATH_ENV] = prior_env_result_path
+            step_health_summary = read_step_health_summary(step_result_path)
             if exit_code != 0:
                 timed_out = exit_code == TIMEOUT_EXIT_CODE and step.timeout_seconds is not None
                 timeout_cleanup_failed = (
@@ -943,9 +1003,20 @@ def run_daily_update(
                                 exit_code,
                                 resolved_log,
                                 now,
+                                health_summary=step_health_summary,
+                                health_summary_path=step_result_path if step_result_path.exists() else None,
                             )
                         else:
-                            _record_step(step_state, effective_step, "failed", exit_code, resolved_log, now)
+                            _record_step(
+                                step_state,
+                                effective_step,
+                                "failed",
+                                exit_code,
+                                resolved_log,
+                                now,
+                                health_summary=step_health_summary,
+                                health_summary_path=step_result_path if step_result_path.exists() else None,
+                            )
                         _write_state(resolved_state_file, state)
                         _emit(
                             resolved_log,
@@ -967,9 +1038,20 @@ def run_daily_update(
                                 exit_code,
                                 resolved_log,
                                 now,
+                                health_summary=step_health_summary,
+                                health_summary_path=step_result_path if step_result_path.exists() else None,
                             )
                         else:
-                            _record_step(step_state, effective_step, "failed", exit_code, resolved_log, now)
+                            _record_step(
+                                step_state,
+                                effective_step,
+                                "failed",
+                                exit_code,
+                                resolved_log,
+                                now,
+                                health_summary=step_health_summary,
+                                health_summary_path=step_result_path if step_result_path.exists() else None,
+                            )
                         _write_state(resolved_state_file, state)
                         _emit(
                             resolved_log,
@@ -993,7 +1075,16 @@ def run_daily_update(
                         reason,
                         console=True,
                     )
-                    _record_step(step_state, effective_step, status, exit_code, resolved_log, now)
+                    _record_step(
+                        step_state,
+                        effective_step,
+                        status,
+                        exit_code,
+                        resolved_log,
+                        now,
+                        health_summary=step_health_summary,
+                        health_summary_path=step_result_path if step_result_path.exists() else None,
+                    )
                     _write_state(resolved_state_file, state)
                     continue
                 if timed_out:
@@ -1005,14 +1096,65 @@ def run_daily_update(
                     )
                 else:
                     _emit(resolved_log, now, f"{step.name} failed with error code {exit_code}", console=True)
-                _record_step(step_state, effective_step, "failed", exit_code, resolved_log, now)
+                _record_step(
+                    step_state,
+                    effective_step,
+                    "failed",
+                    exit_code,
+                    resolved_log,
+                    now,
+                    health_summary=step_health_summary,
+                    health_summary_path=step_result_path if step_result_path.exists() else None,
+                )
                 _write_state(resolved_state_file, state)
                 if failed_exit_code is None:
                     failed_exit_code = exit_code
                 continue
 
             _emit(resolved_log, now, f"Completed {effective_step.id} ({effective_step.name})", console=True)
-            if degraded_success_reason is not None:
+            # If the command wrote a StepHealthSummary, use its status to decide
+            # the step verdict. The summary takes precedence over the
+            # orchestrator-derived degraded reasons because the command has the
+            # most accurate view of its own records.
+            summary_status = step_health_summary.status if step_health_summary is not None else None
+            if summary_status == "failed":
+                # The command reported a fatal/threshold failure even though
+                # the sub-process returned exit code 0 (e.g. tolerant policy
+                # threshold exceeded). Treat it as a real failure.
+                _emit(
+                    resolved_log,
+                    now,
+                    f"{step.name} reported status=failed via health summary: "
+                    f"{step_health_summary.reason if step_health_summary else 'unknown'}",
+                    console=True,
+                )
+                _record_step(
+                    step_state,
+                    effective_step,
+                    "failed",
+                    exit_code,
+                    resolved_log,
+                    now,
+                    health_summary=step_health_summary,
+                    health_summary_path=step_result_path if step_result_path.exists() else None,
+                )
+                _write_state(resolved_state_file, state)
+                if failed_exit_code is None:
+                    failed_exit_code = exit_code if exit_code != 0 else 1
+                continue
+            if summary_status == "success_degraded":
+                _record_step(
+                    step_state,
+                    effective_step,
+                    "success_degraded",
+                    0,
+                    resolved_log,
+                    now,
+                    reason=step_health_summary.reason if step_health_summary else None,
+                    health_summary=step_health_summary,
+                    health_summary_path=step_result_path if step_result_path.exists() else None,
+                )
+            elif degraded_success_reason is not None:
                 _record_step(
                     step_state,
                     effective_step,
@@ -1021,6 +1163,8 @@ def run_daily_update(
                     resolved_log,
                     now,
                     reason=degraded_success_reason,
+                    health_summary=step_health_summary,
+                    health_summary_path=step_result_path if step_result_path.exists() else None,
                 )
             elif upstream_degraded_reason is not None:
                 _record_step(
@@ -1031,9 +1175,32 @@ def run_daily_update(
                     resolved_log,
                     now,
                     reason=upstream_degraded_reason,
+                    health_summary=step_health_summary,
+                    health_summary_path=step_result_path if step_result_path.exists() else None,
+                )
+            elif stale_parquet_reason is not None:
+                _record_step(
+                    step_state,
+                    effective_step,
+                    "success_degraded",
+                    0,
+                    resolved_log,
+                    now,
+                    reason=stale_parquet_reason,
+                    health_summary=step_health_summary,
+                    health_summary_path=step_result_path if step_result_path.exists() else None,
                 )
             else:
-                _record_step(step_state, effective_step, "success", 0, resolved_log, now)
+                _record_step(
+                    step_state,
+                    effective_step,
+                    "success",
+                    0,
+                    resolved_log,
+                    now,
+                    health_summary=step_health_summary,
+                    health_summary_path=step_result_path if step_result_path.exists() else None,
+                )
             _write_state(resolved_state_file, state)
 
         final_exit_code = _final_exit_code_for_state(
@@ -1070,9 +1237,53 @@ def _default_run_log(root: Path, now: Callable[[], datetime] | None) -> Path:
     return root / "logs" / f"run_update_daily_{stamp}.log"
 
 
+def _step_result_path(base: Path, run_instance_key: str, step: DailyStep) -> Path:
+    """Resolve the per-run JSON path where the step writes its StepHealthSummary.
+
+    Layout: ``data/metadata/step_results/<run_instance>/<step_id>.json``
+
+    The run_instance key looks like ``run_instance:YYYYMMDD_HHMMSS``; we strip
+    the ``run_instance:`` prefix for the on-disk directory name to keep paths
+    readable while still being unique per orchestrator invocation.
+    """
+
+    safe_key = run_instance_key
+    if safe_key.startswith("run_instance:"):
+        safe_key = safe_key[len("run_instance:") :]
+    return base / "data" / "metadata" / "step_results" / safe_key / f"{step.id}.json"
+
+
+def _critical_derived_parquet_available(base: Path) -> bool:
+    """Return True iff every critical derived dataset has at least one parquet file.
+
+    Used by build-duckdb-views stale-aware rebuild: when upstream derived
+    steps failed but their prior parquet output still exists, the view layer
+    can be rebuilt against the stale parquet. If any critical parquet is
+    missing, the view rebuild must NOT pretend to succeed.
+    """
+
+    parquet_root = base / "data" / "parquet"
+    for dataset_id in CRITICAL_DERIVED_DATASETS_FOR_VIEWS:
+        dataset_dir = parquet_root / dataset_id
+        if not dataset_dir.exists():
+            return False
+        if not any(
+            file.name.endswith(".parquet") and ".tmp.parquet" not in file.name
+            for file in dataset_dir.rglob("*.parquet")
+        ):
+            return False
+    return True
+
+
 def _run_subprocess(step: DailyStep, log_path: Path, root: Path) -> int:
     env = build_network_env(os.environ, profile=step.network_profile)
     env["QDC_DISABLE_FILE_LOG"] = "1"
+    # The orchestrator sets QDC_STEP_RESULT_PATH in os.environ before invoking
+    # the runner; propagate it into the child process so that CLI commands
+    # (baostock / akshare / build-derived) can write their StepHealthSummary.
+    step_result_path = os.environ.get(STEP_RESULT_PATH_ENV)
+    if step_result_path:
+        env[STEP_RESULT_PATH_ENV] = step_result_path
     with log_path.open("a", encoding="utf-8") as log:
         popen_kwargs: dict[str, Any] = {
             "cwd": root,
@@ -1392,6 +1603,8 @@ def _record_step(
     *,
     blocked_by: tuple[str, ...] | list[str] | None = None,
     reason: str | None = None,
+    health_summary: StepHealthSummary | None = None,
+    health_summary_path: str | Path | None = None,
 ) -> None:
     previous = step_state.get(step.id, {})
     timestamp = _timestamp(now)
@@ -1413,6 +1626,17 @@ def _record_step(
         row["blocked_by"] = list(blocked_by)
     if reason is not None:
         row["reason"] = reason
+    if health_summary is not None:
+        row["record_count"] = health_summary.total_records
+        row["success_count"] = health_summary.success_records
+        row["failed_count"] = health_summary.failed_records
+        row["failed_ratio"] = health_summary.failed_record_ratio
+        row["failed_codes_sample"] = list(health_summary.failed_codes[:10])
+        row["failed_datasets_sample"] = list(health_summary.failed_datasets[:10])
+        if health_summary.reason and not reason:
+            row["reason"] = health_summary.reason
+    if health_summary_path is not None:
+        row["health_summary_path"] = str(health_summary_path)
     step_state[step.id] = row
 
 
