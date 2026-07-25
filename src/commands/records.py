@@ -160,5 +160,19 @@ def _format_failed_examples(records: list[dict[str, object]]) -> list[str]:
 
 
 def _is_failed_status(value: object) -> bool:
+    """Return True for any non-success terminal status.
+
+    ``partial`` and ``cancelled`` are NOT success: a derived build that
+    completed with failures or was cooperatively cancelled must exit
+    non-zero so downstream steps and the orchestrator do not treat it as
+    success.
+    """
+
     status = str(value or "")
-    return status == "failed" or status.startswith("failed_")
+    return (
+        status == "failed"
+        or status.startswith("failed_")
+        or status == "partial"
+        or status == "cancelled"
+        or status == "stalled"
+    )
