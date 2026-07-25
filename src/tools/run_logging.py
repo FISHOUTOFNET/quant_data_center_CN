@@ -112,6 +112,10 @@ def create_run_log_context(
         log_path = resolved_runtime.run_logs_dir / f"{stamp}_{resolved_run_id}.log"
     try:
         log_path.parent.mkdir(parents=True, exist_ok=True)
+        # Ensure the managed-root marker exists so that log_cleanup can later
+        # authorize this directory. ``ensure_managed_log_root`` is the single
+        # authority that creates the marker; cleanup only validates (P0-7).
+        paths.ensure_managed_log_root(resolved_runtime.logs_dir)
         # Create/truncate the file so the orchestrator is the sole owner.
         log_path.touch(exist_ok=False)
     except FileExistsError as exc:

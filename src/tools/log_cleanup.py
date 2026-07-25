@@ -2,8 +2,10 @@
 
 Policy:
 * Only delete files inside the resolved managed log root.
-* The root must carry a ``.qdc-managed-log-root`` marker (created on first
-  use). This prevents cleanup from touching an arbitrary user-supplied path.
+* The root must carry a valid ``.qdc-managed-log-root`` marker. Cleanup MUST
+  NOT auto-create the marker — that would let cleanup claim any external
+  directory. The marker is created by ``paths.ensure_managed_log_root``,
+  which is called from application logging init and ``create_run_log_context``.
 * Never follow symlinks or junctions that escape the log root.
 * Reject dangerous roots: filesystem root, drive root, home, repo root,
   repo-internal paths, symlinks, and Windows junctions/reparse points.
@@ -17,7 +19,6 @@ Policy:
 
 from __future__ import annotations
 
-import json
 import os
 from collections.abc import Collection
 from dataclasses import dataclass, field
@@ -27,14 +28,18 @@ from pathlib import Path
 import click
 
 from src.utils import paths
+from src.utils.paths import (
+    MANAGED_ROOT_MARKER,
+    LogRootAuthorizationError,
+    ensure_managed_log_root,
+    validate_managed_log_root,
+)
 
 DEFAULT_RETENTION_DAYS = 30
 DEFAULT_KEEP_RECENT_RUNS = 10
 DEFAULT_MAX_BYTES = 2 * 1024 * 1024 * 1024  # 2 GiB
 LOG_SUFFIXES = {".log", ".out", ".err"}
 RUNS_SUBDIR = "runs"
-MANAGED_ROOT_MARKER = ".qdc-managed-log-root"
-MANAGED_ROOT_LAYOUT_VERSION = 1
 KEEP_REASON_WITHIN_RETENTION = "within_retention"
 KEEP_REASON_RECENT_RUN = "recent_run"
 KEEP_REASON_ACTIVE_RUN = "active_run"
@@ -90,7 +95,16 @@ def cleanup_logs(
         raise ValueError("keep_recent_runs must be >= 0")
 
     root = Path(log_dir).expanduser()
-    _reject_dangerous_root(root)
+    # Validate the managed-root marker BEFORE any deletion. Cleanup must NOT
+    # auto-create the marker (P0-7): a missing/invalid/wrong marker means the
+    # directory was never authorized, and cleanup must refuse with
+    # ``LogCleanupError`` (surfaced as a CLI non-zero exit). The marker is
+    # created by ``paths.ensure_managed_log_root`` from application logging
+    # init / ``create_run_log_context`` — never by cleanup.
+    try:
+        validate_managed_log_root(root)
+    except LogRootAuthorizationError as exc:
+        raise LogCleanupError(str(exc)) from exc
     root = root.resolve()
     if not root.exists():
         return CleanupResult(
@@ -100,14 +114,6 @@ def cleanup_logs(
             failures=[],
             kept_reasons={},
         )
-
-    # Ensure the managed-root marker is present. ``cleanup_logs`` is the
-    # single owner of the log root, so it creates the marker on first use.
-    # If a root exists but is NOT managed (and we did not just create it),
-    # refuse to clean it — this is the safety check.
-    marker = root / MANAGED_ROOT_MARKER
-    if not marker.exists():
-        _ensure_managed_root_marker(root)
 
     reference_time = now or datetime.now(timezone.utc)
     cutoff_timestamp = reference_time.timestamp() - retention_days * 24 * 60 * 60

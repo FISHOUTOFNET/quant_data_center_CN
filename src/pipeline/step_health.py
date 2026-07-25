@@ -35,19 +35,115 @@ METADATA_DATASET = "__metadata__"
 # always fatal: they indicate a process tree that may still be holding locks.
 DEFAULT_FATAL_STATUSES: tuple[str, ...] = ("failed_resource_locked", "failed_timeout_cleanup")
 
+# ---------------------------------------------------------------------------
+# Unified terminal-status classification (single authority).
+#
+# These sets and helpers are the ONLY place that decides whether a pipeline
+# status string is success, skipped, or failure. ``records.py``,
+# ``run_update_daily.py``, and any other module MUST import from here instead
+# of redefining private ``_is_failed_status`` copies.
+#
+# Semantics (per the task spec):
+# * ``success`` is the only true success.
+# * ``success_degraded`` is success-with-warnings (tolerant policy); it is
+#   NOT produced from ``partial`` — partial is a fatal terminal status.
+# * ``skipped`` / ``skipped_checkpoint`` are neutral (not failure, not success).
+# * ``partial`` means a derived target had partition failures — fatal terminal.
+# * ``cancelled`` / ``stalled`` / ``timed_out`` are always fatal terminal
+#   statuses; they cannot be downgraded by any tolerant policy.
+# * ``failed`` and any ``failed_*`` (e.g. ``failed_resource_locked``,
+#   ``failed_timeout_cleanup``) are fatal.
+# ---------------------------------------------------------------------------
+
+SUCCESS_STATUSES: frozenset[str] = frozenset({"success"})
+DEGRADED_SUCCESS_STATUSES: frozenset[str] = frozenset({"success_degraded"})
+SKIPPED_STATUSES: frozenset[str] = frozenset({"skipped", "skipped_checkpoint"})
+# Fatal terminal statuses that can NEVER be downgraded to success_degraded by
+# a tolerant policy. ``partial`` is here because it means a derived target
+# already had partition failures — that is a data-integrity failure, not a
+# threshold question.
+FAILURE_STATUSES: frozenset[str] = frozenset({
+    "failed",
+    "partial",
+    "cancelled",
+    "stalled",
+    "timed_out",
+    "failed_resource_locked",
+    "failed_timeout_cleanup",
+    # ``abandoned`` is an orchestrator-level terminal status set when a prior
+    # run's ``running`` step is found orphaned (orchestrator pid dead or
+    # exceeded RUNNING_ABANDONED_AFTER_SECONDS). It is a fatal failure: a
+    # downstream step must not proceed as if the abandoned step had succeeded.
+    "abandoned",
+})
+# Statuses that are always fatal regardless of tolerant-policy thresholds.
+# These propagate up as ``failed`` even when a source step has a tolerant
+# policy that would otherwise allow a small number of ordinary ``failed``
+# records to degrade to ``success_degraded``.
+FATAL_TERMINAL_STATUSES: frozenset[str] = frozenset({
+    "partial",
+    "cancelled",
+    "stalled",
+    "timed_out",
+})
+
+
+def is_success_status(value: object) -> bool:
+    """Return True for ``success`` (the only true success status)."""
+
+    return str(value or "") in SUCCESS_STATUSES
+
+
+def is_degraded_success_status(value: object) -> bool:
+    """Return True for ``success_degraded``."""
+
+    return str(value or "") in DEGRADED_SUCCESS_STATUSES
+
+
+def is_skipped_status(value: object) -> bool:
+    """Return True for ``skipped`` / ``skipped_checkpoint``."""
+
+    status = str(value or "")
+    return status in SKIPPED_STATUSES or status.startswith("skipped")
+
+
+def is_failure_status(value: object) -> bool:
+    """Return True for any fatal terminal or ``failed*`` status.
+
+    Covers ``failed``, ``failed_*`` (e.g. ``failed_resource_locked``),
+    ``partial``, ``cancelled``, ``stalled``, ``timed_out``.
+    """
+
+    status = str(value or "")
+    if status in FAILURE_STATUSES:
+        return True
+    return status.startswith("failed_")
+
+
+def is_fatal_terminal_status(value: object) -> bool:
+    """Return True for statuses that can never be downgraded by a tolerant policy.
+
+    These are ``partial``, ``cancelled``, ``stalled``, ``timed_out``. A
+    source step with a tolerant policy may still report ``success_degraded``
+    for a small number of ordinary ``failed`` records, but a single
+    ``partial`` / ``cancelled`` / ``stalled`` / ``timed_out`` record must
+    always escalate to ``failed``.
+    """
+
+    return str(value or "") in FATAL_TERMINAL_STATUSES
+
 
 def _is_failed_status(value: object) -> bool:
-    status = str(value or "")
-    return status == "failed" or status.startswith("failed_")
+    # Delegate to the public authority so there is exactly one classification.
+    return is_failure_status(value)
 
 
 def _is_success_status(value: object) -> bool:
-    return str(value or "") == "success"
+    return is_success_status(value)
 
 
 def _is_skipped_status(value: object) -> bool:
-    status = str(value or "")
-    return status.startswith("skipped")
+    return is_skipped_status(value)
 
 
 @dataclass(frozen=True)
@@ -245,16 +341,22 @@ def evaluate_step_health(
     fatal_datasets_hit: list[str] = []
     fatal_statuses_hit: list[str] = []
     for record in record_list:
-        if not _is_failed_status(record.get("status")):
+        status_value = record.get("status")
+        if not _is_failed_status(status_value):
             continue
         dataset = str(record.get("dataset", "") or "")
-        status = str(record.get("status", "") or "")
+        status = str(status_value or "")
         if dataset and dataset not in seen_datasets:
             seen_datasets.add(dataset)
             failed_datasets_ordered.append(dataset)
         if dataset and dataset in policy.fatal_datasets and dataset not in fatal_datasets_hit:
             fatal_datasets_hit.append(dataset)
-        if status and status in policy.fatal_statuses and status not in fatal_statuses_hit:
+        # Fatal terminal statuses (partial/cancelled/stalled/timed_out) are
+        # ALWAYS fatal regardless of policy.fatal_statuses — they represent
+        # data-integrity failures that no tolerant threshold can absorb.
+        if is_fatal_terminal_status(status) and status not in fatal_statuses_hit:
+            fatal_statuses_hit.append(status)
+        elif status and status in policy.fatal_statuses and status not in fatal_statuses_hit:
             fatal_statuses_hit.append(status)
 
     failed_codes, total_codes = _aggregate_failed_codes(record_list)
@@ -508,9 +610,14 @@ def read_step_health_summary(path: Path) -> StepHealthSummary | None:
 
 __all__ = [
     "DEFAULT_FATAL_STATUSES",
+    "DEGRADED_SUCCESS_STATUSES",
+    "FATAL_TERMINAL_STATUSES",
+    "FAILURE_STATUSES",
     "METADATA_DATASET",
+    "SKIPPED_STATUSES",
     "STEP_HEALTH_STATUSES",
     "STEP_HEALTH_SCHEMA_VERSION",
+    "SUCCESS_STATUSES",
     "StepHealthPolicy",
     "StepHealthSummary",
     "akshare_daily_bar_policy",
@@ -518,6 +625,11 @@ __all__ = [
     "baostock_market_session_policy",
     "evaluate_step_health",
     "failed_record_examples",
+    "is_degraded_success_status",
+    "is_failure_status",
+    "is_fatal_terminal_status",
+    "is_skipped_status",
+    "is_success_status",
     "read_step_health_summary",
     "strict_policy",
     "write_step_health_summary",

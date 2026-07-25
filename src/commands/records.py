@@ -11,6 +11,7 @@ from src.pipeline.step_health import (
     StepHealthPolicy,
     StepHealthSummary,
     evaluate_step_health,
+    is_failure_status,
     read_step_health_summary,
     strict_policy,
     write_step_health_summary,
@@ -160,19 +161,11 @@ def _format_failed_examples(records: list[dict[str, object]]) -> list[str]:
 
 
 def _is_failed_status(value: object) -> bool:
-    """Return True for any non-success terminal status.
+    """Delegate to the unified authority in :mod:`src.pipeline.step_health`.
 
-    ``partial`` and ``cancelled`` are NOT success: a derived build that
-    completed with failures or was cooperatively cancelled must exit
-    non-zero so downstream steps and the orchestrator do not treat it as
-    success.
+    Kept as a private alias so existing call sites in this module do not need
+    to change. New code should import :func:`is_failure_status` directly from
+    :mod:`src.pipeline.step_health`.
     """
 
-    status = str(value or "")
-    return (
-        status == "failed"
-        or status.startswith("failed_")
-        or status == "partial"
-        or status == "cancelled"
-        or status == "stalled"
-    )
+    return is_failure_status(value)

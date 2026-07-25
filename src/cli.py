@@ -38,6 +38,12 @@ def configure_logging(root: Path | None = None, *, runtime_paths: paths.RuntimeP
     logger.remove()
     logger.add(sys.stderr, level="INFO")
     if file_logging_enabled:
+        # ``ensure_managed_log_root`` is the single authority that creates the
+        # marker authorizing later cleanup. Application logging init is the
+        # natural owner because it runs once per process, early, and already
+        # creates the log directory. ``log_cleanup`` validates but never
+        # creates the marker (P0-7).
+        paths.ensure_managed_log_root(resolved.logs_dir)
         resolved.application_log_path.parent.mkdir(parents=True, exist_ok=True)
         logger.add(
             resolved.application_log_path,

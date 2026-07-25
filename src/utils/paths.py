@@ -2,12 +2,189 @@
 
 from __future__ import annotations
 
+import json
 import os
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 LOG_DIR_ENV = "QDC_LOG_DIR"
 DEFAULT_LOG_APP_NAME = "QuantDataCenter"
+
+# ---------------------------------------------------------------------------
+# Managed log-root marker (single authority for the authorization boundary).
+#
+# ``log_cleanup`` MUST NOT delete files from any directory that does not carry
+# a valid marker. The marker is created by ``ensure_managed_log_root`` (called
+# from ``resolve_runtime_paths`` / ``create_run_log_context``) and validated by
+# ``validate_managed_log_root`` (called from ``cleanup_logs``). Keeping both
+# functions here means ``log_cleanup`` and ``run_logging`` share exactly one
+# marker format instead of each writing their own.
+# ---------------------------------------------------------------------------
+
+MANAGED_ROOT_MARKER = ".qdc-managed-log-root"
+MANAGED_ROOT_LAYOUT_VERSION = 1
+MANAGED_ROOT_APPLICATION = "QuantDataCenter"
+
+
+class LogRootAuthorizationError(RuntimeError):
+    """Raised when a log root is not authorized for cleanup.
+
+    This is the single exception type used by both ``ensure_managed_log_root``
+    (when initialization is unsafe) and ``validate_managed_log_root`` (when the
+    marker is missing/invalid/wrong). ``log_cleanup`` surfaces it as a
+    ``LogCleanupError`` for CLI consistency.
+    """
+
+
+def ensure_managed_log_root(log_root: Path) -> None:
+    """Create the managed-root marker in ``log_root`` if it is safe to do so.
+
+    Called by :func:`resolve_runtime_paths` (when resolving the default log
+    root) and by :func:`src.tools.run_logging.create_run_log_context` (when
+    creating the per-run log). The directory is created if missing, and the
+    marker is written atomically. Unsafe roots (repo-internal, home, drive
+    root, symlink that escapes) are rejected with
+    :class:`LogRootAuthorizationError`.
+
+    This is the ONLY function that creates the marker. ``cleanup_logs`` must
+    NOT create it — cleanup must only validate an existing marker.
+    """
+
+    root = Path(log_root).expanduser()
+    _reject_unsafe_log_root(root)
+    resolved = root.resolve()
+    resolved.mkdir(parents=True, exist_ok=True)
+    marker = resolved / MANAGED_ROOT_MARKER
+    if marker.exists():
+        # Marker already present; leave it as-is so we never overwrite a
+        # pre-existing authorization record. ``validate_managed_log_root``
+        # will check its contents when cleanup runs.
+        return
+    payload = {
+        "application": MANAGED_ROOT_APPLICATION,
+        "layout_version": MANAGED_ROOT_LAYOUT_VERSION,
+    }
+    tmp_path = marker.with_name(f".{marker.name}.{os.getpid()}.tmp")
+    tmp_path.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True),
+        encoding="utf-8",
+    )
+    os.replace(tmp_path, marker)
+
+
+def validate_managed_log_root(log_root: Path) -> None:
+    """Validate that ``log_root`` is authorized for cleanup.
+
+    Raises :class:`LogRootAuthorizationError` when ANY of the following hold:
+
+    * The marker file does not exist (cleanup must NOT auto-create it).
+    * The marker is a symlink (could point at an attacker-controlled file).
+    * The marker JSON is unreadable or not a mapping.
+    * ``application`` is missing or != ``QuantDataCenter``.
+    * ``layout_version`` is missing or unsupported.
+    * The resolved root itself is a dangerous location (drive root, home,
+      repo root, repo-internal path, junction, or symlink that escapes).
+
+    This function is called by ``cleanup_logs`` BEFORE any deletion. It is
+    strictly fail-closed: any doubt → reject.
+    """
+
+    root = Path(log_root).expanduser()
+    _reject_unsafe_log_root(root)
+    resolved = root.resolve()
+    marker = resolved / MANAGED_ROOT_MARKER
+    if not marker.exists():
+        raise LogRootAuthorizationError(
+            f"Refusing to clean log root without a managed-root marker: {resolved}. "
+            f"Run 'python -m src.tools.log_cleanup --initialize-managed-root --log-dir {resolved}' "
+            f"to authorize this directory first."
+        )
+    # A symlink marker could be redirected at an attacker-controlled file to
+    # bypass the application/version check. Reject it.
+    if marker.is_symlink():
+        raise LogRootAuthorizationError(
+            f"Refusing to clean log root with a symlink marker: {marker} -> {marker.resolve()}"
+        )
+    try:
+        raw = marker.read_text(encoding="utf-8")
+        payload: Any = json.loads(raw)
+    except (OSError, json.JSONDecodeError) as exc:
+        raise LogRootAuthorizationError(
+            f"Managed-root marker is unreadable/corrupt at {marker}: {exc}"
+        ) from exc
+    if not isinstance(payload, dict):
+        raise LogRootAuthorizationError(
+            f"Managed-root marker must be a JSON object at {marker}; got {type(payload).__name__}"
+        )
+    application = str(payload.get("application") or "")
+    if application != MANAGED_ROOT_APPLICATION:
+        raise LogRootAuthorizationError(
+            f"Managed-root marker application mismatch at {marker}: "
+            f"expected {MANAGED_ROOT_APPLICATION!r}, got {application!r}"
+        )
+    layout_version = payload.get("layout_version")
+    try:
+        version_int = int(layout_version)
+    except (TypeError, ValueError) as exc:
+        raise LogRootAuthorizationError(
+            f"Managed-root marker layout_version is not an integer at {marker}: {layout_version!r}"
+        ) from exc
+    if version_int != MANAGED_ROOT_LAYOUT_VERSION:
+        raise LogRootAuthorizationError(
+            f"Managed-root marker layout_version {version_int} is unsupported at {marker} "
+            f"(expected {MANAGED_ROOT_LAYOUT_VERSION})"
+        )
+
+
+def _reject_unsafe_log_root(root: Path) -> None:
+    """Reject log roots that are inherently dangerous to clean.
+
+    This is the shared safety check used by both ``ensure_managed_log_root``
+    and ``validate_managed_log_root``. It mirrors the checks previously
+    scattered in ``log_cleanup._reject_dangerous_root`` but lives here so the
+    marker authority and the cleanup authority agree on what is "safe".
+    """
+
+    # Symlink whose target escapes its parent — reject.
+    if root.is_symlink():
+        target = root.resolve()
+        if not is_path_inside(target, root.parent):
+            raise LogRootAuthorizationError(
+                f"Refusing to authorize symlink log root that escapes its parent: {root} -> {target}"
+            )
+
+    # Windows junction/reparse point — reject.
+    is_junction = getattr(root, "is_junction", lambda: False)()
+    if is_junction:
+        raise LogRootAuthorizationError(
+            f"Refusing to authorize Windows junction/reparse log root: {root}"
+        )
+
+    resolved = root.resolve()
+    resolved_parent = resolved.parent
+    # Filesystem root: parent is itself.
+    if resolved == resolved_parent:
+        raise LogRootAuthorizationError(f"Refusing to authorize filesystem root: {root}")
+
+    # Bare Windows drive root (e.g. C:\).
+    drive = resolved.anchor
+    if drive and resolved == Path(drive):
+        raise LogRootAuthorizationError(f"Refusing to authorize drive root: {root}")
+
+    # User home directory.
+    import pathlib
+
+    home = pathlib.Path.home().resolve()
+    if resolved == home:
+        raise LogRootAuthorizationError(f"Refusing to authorize user home directory: {root}")
+
+    # Repository root or any path inside the repository.
+    repo_root = ROOT.resolve()
+    if resolved == repo_root or is_path_inside(resolved, repo_root):
+        raise LogRootAuthorizationError(
+            f"Refusing to authorize repository or repo-internal path: {root}"
+        )
 
 
 def project_root() -> Path:
