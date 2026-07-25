@@ -28,10 +28,24 @@ from src.pipeline.common import (
 from src.pipeline.step_health import StepHealthSummary, read_step_health_summary
 from src.storage.metadata_store import default_metadata_duckdb_file
 from src.storage.parquet_store import ParquetStore
+from src.tools.run_logging import (
+    RunLogContext,
+    RunLogContextError,
+    adopt_run_log_context,
+    create_run_log_context,
+)
 from src.utils import paths
 from src.utils.config_mgr import ConfigError, ConfigManager
+from src.utils.logging import logger
 from src.utils.network_policy import NETWORK_PROFILE_DIRECT, NETWORK_PROFILES, build_network_env
 from src.utils.process_lock import ProcessLockError, acquire_process_lock, is_pid_alive
+
+# Module-level scratch field updated by ``_run_subprocess`` immediately after
+# ``Popen`` returns. ``run_daily_update`` reads it after the runner call to
+# record the actual subprocess pid in the state file (in addition to the
+# orchestrator pid). Tests that supply a synthetic ``command_runner`` do not
+# touch this field, so ``child_pid`` stays ``None`` for them.
+_LAST_CHILD_PID: int | None = None
 
 # Critical derived datasets whose parquet existence authorizes a stale-aware
 # DuckDB view rebuild when upstream steps failed. If ANY of these is missing,
@@ -96,15 +110,28 @@ SCHEDULE_POLICIES = {"daily", "market_window", "legacy_when"}
 STATE_KEY_POLICIES = {"natural_date", "market_date", "run_instance"}
 RESUME_POLICIES = {"skip_if_success", "always_run"}
 DATA_FRESHNESS_POLICIES = {"market_session", "natural_daily", "disclosure_calendar", "maintenance"}
-FAILED_DEPENDENCY_STATUSES = {"failed", "failed_resource_locked", "failed_timeout_cleanup", "blocked", "abandoned"}
+FAILED_DEPENDENCY_STATUSES = {"failed", "failed_resource_locked", "failed_timeout_cleanup", "stalled", "blocked", "abandoned"}
 SATISFIED_DEPENDENCY_STATUSES = {"success", "success_degraded", "skipped", "skipped_checkpoint"}
 TIMEOUT_EXIT_CODE = 124
 TIMEOUT_CLEANUP_FAILED_EXIT_CODE = 125
+STALLED_EXIT_CODE = 126  # Distinct from timed_out (124) so the state file can
+                         # record ``stalled`` vs ``timed_out`` vs ``failed``.
 PROCESS_CLEANUP_WAIT_SECONDS = 30
 RUNNING_ABANDONED_AFTER_SECONDS = 24 * 60 * 60
 RUN_UPDATE_DAILY_LOCK_STALE_AFTER_SECONDS = 24 * 60 * 60
 DAILY_WORKFLOW_CONFIG = "daily_workflow.yaml"
 LEGACY_START_AT_ALIASES = {"build-derived": "build-derived-security-master"}
+# Derived build steps use stall detection instead of a fixed timeout.
+# The orchestrator polls the child's progress state file every
+# ``DERIVED_STALL_POLL_SECONDS`` and declares the build stalled when the
+# heartbeat is older than ``DERIVED_STALL_HEARTBEAT_SECONDS`` AND
+# ``processed`` is unchanged. A safety timeout of
+# ``DERIVED_SAFETY_TIMEOUT_SECONDS`` (18h, well above historical P99)
+# acts as a last-resort fallback.
+DERIVED_STALL_POLL_SECONDS = 60
+DERIVED_STALL_HEARTBEAT_SECONDS = 25 * 60
+DERIVED_SAFETY_TIMEOUT_SECONDS = 18 * 60 * 60
+DERIVED_STALL_TARGETS = {"daily_bar", "valuation"}
 _LAST_LOCKED_DUCKDB_PATHS: tuple[Path, ...] = ()
 # Kept only as a test/migration reference for the legacy workflow shape.
 # Production execution must load config/daily_workflow.yaml and must not
@@ -747,8 +774,28 @@ def run_daily_update(
     )
     run_instance_key = f"run_instance:{(now or datetime.now)().strftime('%Y%m%d_%H%M%S')}"
     resolved_state_file = state_file or base / "data" / "metadata" / "run_update_daily_state.json"
-    resolved_log = run_log or _default_run_log(base, now)
-    runner = command_runner or (lambda step, log_path: _run_subprocess(step, log_path, base))
+    run_log_context = _resolve_run_log_context(base=base, run_log=run_log, now=now)
+    resolved_log = run_log_context.path
+
+    # ``_on_child_spawn`` is invoked by ``_run_subprocess`` immediately after
+    # ``Popen`` returns, so the child pid lands in the state file *while* the
+    # step is still running. Synthetic test runners do not call it, so
+    # ``child_pid`` stays absent for them.
+    def _on_child_spawn(child_pid: int, step_id: str, step_state_view: dict[str, Any]) -> None:
+        row = step_state_view.get(step_id)
+        if isinstance(row, dict):
+            row["child_pid"] = child_pid
+            _write_state(resolved_state_file, state)
+
+    def _default_runner(step: DailyStep, log_path: Path) -> int:
+        return _run_subprocess(
+            step,
+            log_path,
+            base,
+            on_spawn=lambda pid: _on_child_spawn(pid, step.id, step_state),
+        )
+
+    runner = command_runner or _default_runner
     steps = _daily_steps_for_root(effective_dates, base)
     steps_by_id = {step.id: step for step in steps}
     step_ids = [step.id for step in steps]
@@ -770,6 +817,7 @@ def run_daily_update(
             "natural_date": effective_dates.natural_date.isoformat(),
             "candidate_date": effective_dates.candidate_date.isoformat(),
             "market_date": effective_dates.market_date.isoformat(),
+            "run_id": run_log_context.run_id,
         },
     )
     try:
@@ -783,6 +831,14 @@ def run_daily_update(
         state_needs_write = state.get("version") != 2
         state["version"] = 2
         state.setdefault("runs", {})
+        # Record the per-run log context (run_id, path, log_status) so that
+        # crash recovery and external monitors can tell whether the log is
+        # still alive. ``log_status`` is recomputed on every state write via
+        # ``RunLogContext.status_payload`` (which stats the file), so a missing
+        # log is reported as ``"missing"`` instead of silently keeping a stale
+        # path reference.
+        state["run_log"] = run_log_context.status_payload(now=(now or datetime.now)())
+        state["orchestrator_pid"] = os.getpid()
         resolved_log.parent.mkdir(parents=True, exist_ok=True)
         if original_start_at is not None and original_start_at != start_at:
             _emit(
@@ -993,6 +1049,34 @@ def run_daily_update(
                 timeout_cleanup_failed = (
                     exit_code == TIMEOUT_CLEANUP_FAILED_EXIT_CODE and step.timeout_seconds is not None
                 )
+                stalled = exit_code == STALLED_EXIT_CODE
+                if stalled:
+                    # Stall detection (derived builds only): the child's
+                    # heartbeat was stale and ``processed`` was unchanged.
+                    # The child was sent SIGINT for cooperative cancellation;
+                    # whatever it committed before exiting is preserved. Record
+                    # a distinct ``stalled`` status so the state file clearly
+                    # distinguishes this from ``timed_out`` / ``failed``.
+                    _record_step(
+                        step_state,
+                        effective_step,
+                        "stalled",
+                        exit_code,
+                        resolved_log,
+                        now,
+                        reason="derived build stalled: heartbeat stale and processed unchanged",
+                        health_summary=step_health_summary,
+                        health_summary_path=step_result_path if step_result_path.exists() else None,
+                    )
+                    _write_state(resolved_state_file, state)
+                    _emit(
+                        resolved_log,
+                        now,
+                        f"{step.name} declared stalled (heartbeat stale, processed unchanged); stopping",
+                        console=True,
+                    )
+                    failed_exit_code = failed_exit_code or exit_code
+                    continue
                 if timed_out or timeout_cleanup_failed:
                     if timeout_cleanup_failed:
                         if step.optional:
@@ -1214,8 +1298,11 @@ def run_daily_update(
             _emit(resolved_log, now, "All updates completed successfully", console=True)
         else:
             _emit(resolved_log, now, f"Daily update completed with failures; exit code {final_exit_code}", console=True)
-        if state_needs_write:
-            _write_state(resolved_state_file, state)
+        # Refresh log_status one final time so the state file reflects whether
+        # the run log survived (e.g. ``available`` vs ``missing`` after an
+        # external cleanup ran in parallel).
+        state["run_log"] = run_log_context.status_payload(now=(now or datetime.now)())
+        _write_state(resolved_state_file, state)
         return final_exit_code
     except BaseException:
         exc_info = sys.exc_info()
@@ -1233,8 +1320,41 @@ def _cmd(module: str, *args: str) -> tuple[str, ...]:
 
 
 def _default_run_log(root: Path, now: Callable[[], datetime] | None) -> Path:
+    """Deprecated: kept for backwards compatibility with code that imports it.
+
+    New code should use ``RunLogContext`` via ``_resolve_run_log_context`` so
+    that the per-run log lives outside the Git workspace by default.
+    """
+
     stamp = (now or datetime.now)().strftime("%Y%m%d_%H%M%S")
     return root / "logs" / f"run_update_daily_{stamp}.log"
+
+
+def _resolve_run_log_context(
+    *,
+    base: Path,
+    run_log: Path | None,
+    now: Callable[[], datetime] | None,
+) -> RunLogContext:
+    """Resolve the per-run log context used by ``run_daily_update``.
+
+    When ``run_log`` is provided (CLI ``--run-log`` or test fixture), the
+    orchestrator adopts that path so existing entrypoints (BAT script, tests)
+    keep working. Otherwise it creates a fresh run log under the resolved
+    ``RuntimePaths.run_logs_dir`` (outside the Git workspace by default).
+    """
+
+    timestamp = (now or datetime.now)()
+    if run_log is not None:
+        try:
+            return adopt_run_log_context(path=run_log, now=timestamp)
+        except RunLogContextError as exc:
+            raise RunDailyUpdateLockError(f"Failed to adopt run log path {run_log}: {exc}") from exc
+    runtime_paths = paths.resolve_runtime_paths(root=base)
+    try:
+        return create_run_log_context(runtime_paths=runtime_paths, now=timestamp)
+    except RunLogContextError as exc:
+        raise RunDailyUpdateLockError(f"Failed to create run log: {exc}") from exc
 
 
 def _step_result_path(base: Path, run_instance_key: str, step: DailyStep) -> Path:
@@ -1275,9 +1395,24 @@ def _critical_derived_parquet_available(base: Path) -> bool:
     return True
 
 
-def _run_subprocess(step: DailyStep, log_path: Path, root: Path) -> int:
+def _run_subprocess(
+    step: DailyStep,
+    log_path: Path,
+    root: Path,
+    *,
+    on_spawn: Callable[[int], None] | None = None,
+) -> int:
+    global _LAST_CHILD_PID
     env = build_network_env(os.environ, profile=step.network_profile)
+    # ``QDC_DISABLE_FILE_LOG=1`` is preserved for backwards compatibility. Its
+    # actual semantics is "subprocess only echoes to the per-run log captured
+    # by the orchestrator via stdout/stderr redirection"; it does not silence
+    # the application log entirely. See ``run_logging`` for details.
     env["QDC_DISABLE_FILE_LOG"] = "1"
+    # Share the per-run log path with the child so that any subprocess that
+    # wants to write a structured progress line (e.g. build-derived heartbeat)
+    # appends to the same run log instead of opening a parallel file.
+    env["QDC_RUN_LOG_PATH"] = str(log_path)
     # The orchestrator sets QDC_STEP_RESULT_PATH in os.environ before invoking
     # the runner; propagate it into the child process so that CLI commands
     # (baostock / akshare / build-derived) can write their StepHealthSummary.
@@ -1294,15 +1429,178 @@ def _run_subprocess(step: DailyStep, log_path: Path, root: Path) -> int:
         }
         if os.name != "nt":
             popen_kwargs["start_new_session"] = True
+        else:
+            # On Windows, create the child in its own process group so the
+            # orchestrator can send ``CTRL_BREAK_EVENT`` for cooperative
+            # cancellation when stall detection triggers. Without this flag,
+            # ``send_signal(CTRL_BREAK_EVENT)`` would also interrupt the
+            # orchestrator itself.
+            popen_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP  # type: ignore[attr-defined]
         proc = subprocess.Popen(step.command, **popen_kwargs)
+        # Capture the child pid immediately so the orchestrator (and the
+        # ``on_spawn`` callback) can surface it in the state file *while* the
+        # step is still running, instead of recording it only post-mortem.
+        _LAST_CHILD_PID = proc.pid
+        if on_spawn is not None:
+            try:
+                on_spawn(proc.pid)
+            except Exception:  # pragma: no cover - state-file writes must never kill the step
+                logger.exception("Failed to record child_pid for step {}", step.id)
         try:
-            return int(proc.wait(timeout=step.timeout_seconds))
+            # Derived build steps (daily_bar, valuation) have no fixed
+            # ``timeout_seconds`` because a normal full rebuild can legitimately
+            # exceed 4 hours. Instead of a hard timeout, we use stall detection:
+            # the orchestrator polls the child's progress state file and
+            # declares the build stalled when the heartbeat is stale AND
+            # ``processed`` is unchanged. A high safety timeout (18h) acts as
+            # a last-resort fallback. See ``progress.check_stall`` for details.
+            if step.timeout_seconds is not None:
+                return int(proc.wait(timeout=step.timeout_seconds))
+            if _step_uses_derived_stall_detection(step):
+                return _wait_with_stall_detection(proc, step, log, root)
+            return int(proc.wait())
         except subprocess.TimeoutExpired:
             log.write(f"Step timed out after {step.timeout_seconds} seconds; terminating process tree\n")
             if _terminate_process_tree(proc, log):
                 return TIMEOUT_EXIT_CODE
             log.write("Process tree cleanup failed after timeout\n")
             return TIMEOUT_CLEANUP_FAILED_EXIT_CODE
+        finally:
+            _LAST_CHILD_PID = None
+
+
+def _step_uses_derived_stall_detection(step: DailyStep) -> bool:
+    """Return True if the step is a derived build that should use stall detection."""
+
+    return step.id.startswith("build-derived-") and any(
+        f"--target {target}" in step.command_text or f"--target={target}" in step.command_text
+        for target in DERIVED_STALL_TARGETS
+    )
+
+
+def _wait_with_stall_detection(
+    proc: subprocess.Popen[Any],
+    step: DailyStep,
+    log: TextIO,
+    root: Path,
+) -> int:
+    """Poll the child's progress state and terminate if stalled.
+
+    Replaces ``proc.wait()`` for derived build steps. Polls every
+    ``DERIVED_STALL_POLL_SECONDS`` and checks:
+
+    1. Is the child PID still alive? If not, return its exit code.
+    2. Has the safety timeout (18h) been exceeded? If so, terminate → ``timed_out``.
+    3. Is the progress heartbeat stale AND ``processed`` unchanged? If so,
+       terminate → ``stalled``.
+
+    The four terminal states are distinguishable by exit code:
+    - normal completion → child's exit code
+    - stalled → ``STALLED_EXIT_CODE`` (126)
+    - timed_out → ``TIMEOUT_EXIT_CODE`` (124)
+    - failed → child's non-zero exit code
+    """
+
+    from src.sources.derived.progress import (
+        DEFAULT_SAFETY_TIMEOUT_SECONDS,
+        check_stall,
+        latest_progress_state_path,
+    )
+
+    metadata_dir = root / "data" / "metadata"
+    target = _extract_derived_target(step)
+    start_monotonic = time.monotonic()
+    previous_processed: int | None = None
+    while True:
+        # Check if the child has exited.
+        exit_code = proc.poll()
+        if exit_code is not None:
+            return int(exit_code)
+        # Check safety timeout (18h, well above historical P99).
+        elapsed = time.monotonic() - start_monotonic
+        if elapsed > DERIVED_SAFETY_TIMEOUT_SECONDS:
+            log.write(
+                f"Step exceeded safety timeout of {DERIVED_SAFETY_TIMEOUT_SECONDS} seconds "
+                f"(elapsed {elapsed:.0f}s); terminating process tree\n"
+            )
+            if _terminate_process_tree(proc, log):
+                return TIMEOUT_EXIT_CODE
+            log.write("Process tree cleanup failed after safety timeout\n")
+            return TIMEOUT_CLEANUP_FAILED_EXIT_CODE
+        # Check stall via progress state file.
+        if target is not None:
+            state_path = latest_progress_state_path(metadata_dir, target)
+            if state_path is not None:
+                report = check_stall(
+                    state_path,
+                    stall_heartbeat_seconds=DERIVED_STALL_HEARTBEAT_SECONDS,
+                    previous_processed=previous_processed,
+                )
+                if report.stalled:
+                    log.write(
+                        f"Step declared stalled: {report.reason}; "
+                        f"terminating process tree (child will commit "
+                        f"whatever was completed via cooperative cancellation)\n"
+                    )
+                    # Send SIGINT first to allow cooperative cancellation
+                    # (the child's signal handler sets the cancel event,
+                    # running workers finish, and the coordinator commits).
+                    _send_interrupt(proc, log)
+                    # Wait up to 60 seconds for graceful shutdown.
+                    try:
+                        exit_code = proc.wait(timeout=60)
+                        return int(exit_code)
+                    except subprocess.TimeoutExpired:
+                        log.write("Child did not respond to SIGINT within 60s; force-terminating\n")
+                    if _terminate_process_tree(proc, log):
+                        return STALLED_EXIT_CODE
+                    log.write("Process tree cleanup failed after stall\n")
+                    return TIMEOUT_CLEANUP_FAILED_EXIT_CODE
+                previous_processed = report.processed
+        # Sleep before next poll. Use a short wait so we don't miss a
+        # quick exit by more than the poll interval.
+        try:
+            exit_code = proc.wait(timeout=DERIVED_STALL_POLL_SECONDS)
+            return int(exit_code)
+        except subprocess.TimeoutExpired:
+            continue
+
+
+def _extract_derived_target(step: DailyStep) -> str | None:
+    """Extract the ``--target`` value from a build-derived step's command."""
+
+    command = step.command
+    for i, arg in enumerate(command):
+        if arg == "--target" and i + 1 < len(command):
+            return command[i + 1]
+        if arg.startswith("--target="):
+            return arg.split("=", 1)[1]
+    return None
+
+
+def _send_interrupt(proc: subprocess.Popen[Any], log: TextIO) -> None:
+    """Send a cooperative interrupt signal to the child process.
+
+    On POSIX we send SIGINT to the process group (since the child was started
+    with ``start_new_session=True``). On Windows we send CTRL_BREAK_EVENT to
+    the child's process group; the child's SIGINT handler translates this to
+    a cancel event.
+
+    We intentionally send SIGINT (not SIGTERM/SIGKILL) so the child can
+    cooperatively cancel: stop submitting new work, let running workers
+    finish, and commit whatever was completed.
+    """
+
+    if os.name == "nt":
+        try:
+            proc.send_signal(signal.CTRL_BREAK_EVENT)  # type: ignore[attr-defined]
+        except (OSError, ValueError, AttributeError) as exc:
+            log.write(f"Failed to send CTRL_BREAK_EVENT to child {proc.pid}: {exc}\n")
+    else:
+        try:
+            os.killpg(proc.pid, signal.SIGINT)
+        except (ProcessLookupError, OSError) as exc:
+            log.write(f"Failed to send SIGINT to process group {proc.pid}: {exc}\n")
 
 
 def _terminate_process_tree(proc: subprocess.Popen[Any], log: TextIO) -> bool:
@@ -1622,6 +1920,14 @@ def _record_step(
     if status == "running":
         row["pid"] = os.getpid()
         row["orchestrator_pid"] = os.getpid()
+    # Preserve the recorded child_pid across status transitions. ``_run_subprocess``
+    # populates this via the ``on_spawn`` callback after ``Popen`` returns; the
+    # value must survive the ``running`` → ``success`` / ``failed`` row rewrite
+    # so that forensic inspection of a completed step can still find the actual
+    # subprocess that produced the result.
+    previous_child_pid = previous.get("child_pid") if isinstance(previous, dict) else None
+    if previous_child_pid is not None:
+        row["child_pid"] = previous_child_pid
     if blocked_by is not None:
         row["blocked_by"] = list(blocked_by)
     if reason is not None:
@@ -1850,7 +2156,7 @@ def _final_exit_code(steps: list[DailyStep], step_state: dict[str, Any], failed_
         return failed_exit_code
     for step in steps:
         current = step_state.get(step.id, {})
-        if str(current.get("status")) in {"failed", "failed_resource_locked", "failed_timeout_cleanup", "abandoned"}:
+        if str(current.get("status")) in {"failed", "failed_resource_locked", "failed_timeout_cleanup", "stalled", "abandoned"}:
             raw_exit_code = current.get("exit_code")
             return int(raw_exit_code) if raw_exit_code is not None else 1
     for step in steps:

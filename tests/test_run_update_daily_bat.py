@@ -13,13 +13,26 @@ def _script_text() -> str:
 def test_run_update_daily_bat_delegates_to_python_orchestrator() -> None:
     text = _script_text()
 
-    assert 'if not exist "logs" mkdir "logs"' in text
+    # Log root lives outside the Git workspace by default so that git clean,
+    # IDE cleanup, or project resets cannot lose it.
+    assert "QuantDataCenter" in text
+    assert "LOCALAPPDATA" in text
+    assert "QDC_RUN_LOG_DIR" in text
+    assert 'if not exist "!QDC_RUN_LOG_DIR!" mkdir "!QDC_RUN_LOG_DIR!"' in text
+    # The BAT must NOT keep writing logs into the repo-local ``logs`` dir.
+    assert 'if not exist "logs" mkdir "logs"' not in text
+    assert 'set "QDC_RUN_LOG=logs' not in text
+    # Deterministic timestamp from PowerShell (avoids Python-only datetime).
     assert "Get-Date -Format yyyyMMdd_HHmmss" in text
-    assert 'set "QDC_RUN_LOG=logs\\run_update_daily_!QDC_RUN_STAMP!.log"' in text
+    assert 'set "QDC_RUN_LOG=!QDC_RUN_LOG_DIR!\\run_update_daily_!QDC_RUN_STAMP!.log"' in text
+    # The BAT forwards the path to the Python orchestrator, which owns the
+    # actual file lifecycle (RunLogContext).
     assert "python -m src.cli run-update-daily" in text
     assert "--run-log" in text
     assert "!QDC_RUN_LOG!" in text
     assert "%*" in text
+    # Redirection must not be on the python invocation: the orchestrator opens
+    # the log file itself so that it can record orchestrator/child PIDs.
     assert 'run-update-daily --run-log "!QDC_RUN_LOG!" %* >> "!QDC_RUN_LOG!" 2>&1' not in text
 
 

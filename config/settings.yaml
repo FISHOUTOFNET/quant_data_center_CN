@@ -7,7 +7,11 @@ paths:
   parquet_dir: data/parquet
   metadata_dir: data/metadata
   duckdb_dir: data/duckdb
-  logs_dir: logs
+  # logs_dir is intentionally omitted: the default log root is resolved by
+  # src.utils.paths.resolve_runtime_paths to %LOCALAPPDATA%\QuantDataCenter\logs
+  # (outside the Git workspace). Override with QDC_LOG_DIR or --log-dir, or add
+  # ``logs_dir: /absolute/path/outside/repo`` here. A value that resolves inside
+  # the repository is rejected to prevent logs from being lost on git clean.
 
 api:
   provider: baostock
@@ -115,6 +119,3 @@ pipeline:
 storage:
   duckdb_file: data/duckdb/quant.duckdb
   metadata_duckdb_file: data/metadata/qdc_metadata.duckdb
-
-logging:
-  file: logs/qdc.log

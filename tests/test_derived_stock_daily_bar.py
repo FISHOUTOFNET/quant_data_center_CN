@@ -86,11 +86,18 @@ def test_build_cn_stock_daily_bar_failure_keeps_existing_official_data(tmp_path,
         del args, kwargs
         raise RuntimeError("daily staging build failed")
 
-    monkeypatch.setattr("src.sources.derived.stock_daily_bar._materialize_security_daily_bar", fail_materialize)
+    # The new pipeline calls the pure ``materialize_security_daily_bar``
+    # function via the executor's ``_pure_materialize_wrapper``. A worker
+    # failure is caught by the executor, recorded in the journal/progress,
+    # and reported as a partial result rather than crashing the whole build.
+    # This is the intended behavior: a single partition failure must NOT
+    # discard the canonical data of other partitions or force a full rebuild.
+    monkeypatch.setattr("src.sources.derived.stock_daily_bar.materialize_security_daily_bar", fail_materialize)
 
-    with pytest.raises(RuntimeError, match="daily staging build failed"):
-        build_cn_stock_daily_bar(root=tmp_path, build_views=False, refresh_registry=False, now=lambda: NOW)
+    result = build_cn_stock_daily_bar(root=tmp_path, build_views=False, refresh_registry=False, now=lambda: NOW)
 
+    assert result["status"] == "partial"
+    assert result["failed"] == 1
     loaded = store.read_dataset("cn_stock_daily_bar", {"security_id": "SH.600000"})
     assert loaded["close"].tolist() == [1.0]
     assert store.dataset_exists("cn_stock_daily_bar", {"security_id": "SH.600000"})

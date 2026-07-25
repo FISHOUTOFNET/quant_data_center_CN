@@ -676,7 +676,10 @@ def test_configure_logging_uses_qdc_log_dir(tmp_path, monkeypatch) -> None:
     finally:
         logger.remove()
 
-    assert (env_log_dir / "qdc.log").exists()
+    # RuntimePaths places the application log under ``<logs_dir>/application/qdc.log``
+    # so that cleanup has a single managed root with clear ownership separation
+    # between the application log (Loguru-owned) and per-run logs (orchestrator-owned).
+    assert (env_log_dir / "application" / "qdc.log").exists()
     assert not (project_root / "logs" / "qdc.log").exists()
 
 

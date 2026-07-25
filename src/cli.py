@@ -23,16 +23,30 @@ def _env_truthy(value: str | None) -> bool:
     return value is not None and value.strip().lower() in {"1", "true", "yes", "on"}
 
 
-def configure_logging(root: Path | None = None) -> None:
-    base = (root or paths.ROOT).resolve()
-    configured_log_dir = os.environ.get("QDC_LOG_DIR")
-    log_dir = Path(configured_log_dir).expanduser().resolve() if configured_log_dir else base / "logs"
+def configure_logging(root: Path | None = None, *, runtime_paths: paths.RuntimePaths | None = None) -> paths.RuntimePaths:
+    """Configure Loguru sinks using the unified RuntimePaths resolution.
+
+    Subprocesses spawned by ``run-update-daily`` set ``QDC_DISABLE_FILE_LOG=1``
+    so they do not re-open the application log; their stdout/stderr is captured
+    by the orchestrator into the per-run log file instead. This keeps the
+    application log single-writer (only the orchestrator writes to it) and the
+    per-run log single-owner (only the orchestrator creates/appends it).
+    """
+
+    resolved = runtime_paths or paths.resolve_runtime_paths(root=root)
     file_logging_enabled = not _env_truthy(os.environ.get("QDC_DISABLE_FILE_LOG"))
     logger.remove()
     logger.add(sys.stderr, level="INFO")
     if file_logging_enabled:
-        log_dir.mkdir(parents=True, exist_ok=True)
-        logger.add(log_dir / "qdc.log", level="INFO", rotation="10 MB", retention="30 days", encoding="utf-8")
+        resolved.application_log_path.parent.mkdir(parents=True, exist_ok=True)
+        logger.add(
+            resolved.application_log_path,
+            level="INFO",
+            rotation="10 MB",
+            retention="30 days",
+            encoding="utf-8",
+        )
+    return resolved
 
 
 @click.group()

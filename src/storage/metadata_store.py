@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import time
-from collections.abc import Iterator
+from collections.abc import Collection, Iterator
 from contextlib import contextmanager, suppress
 from pathlib import Path
 from threading import RLock
@@ -243,6 +243,28 @@ class DuckDBMetadataStore:
                     "SELECT * FROM dataset_partition_manifest WHERE dataset = ?",
                     [dataset],
                 ).df()
+            return _clean_dataframe_for_schema(df, DATASET_PARTITION_MANIFEST_SCHEMA)
+
+    def read_dataset_partition_manifest_batch(
+        self,
+        dataset_ids: Collection[str],
+    ) -> pd.DataFrame:
+        """Load manifests for multiple datasets in a single DuckDB query.
+
+        This eliminates the N+1 query pattern where the derived build planner
+        previously called ``read_dataset_partition_manifest`` once per source
+        dataset and then once per security via ``_manifest_row``.
+        """
+
+        ids = [str(value) for value in dataset_ids if value]
+        if not ids:
+            return _clean_dataframe_for_schema(pd.DataFrame(), DATASET_PARTITION_MANIFEST_SCHEMA)
+        with self._connection() as conn:
+            placeholders = ", ".join("?" * len(ids))
+            df = conn.execute(
+                f"SELECT * FROM dataset_partition_manifest WHERE dataset IN ({placeholders})",
+                ids,
+            ).df()
             return _clean_dataframe_for_schema(df, DATASET_PARTITION_MANIFEST_SCHEMA)
 
     def delete_dataset_partition_manifest(self, dataset: str, partition_column: str, partition_value: str) -> None:
