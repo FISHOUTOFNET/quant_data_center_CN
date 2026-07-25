@@ -251,11 +251,12 @@ def _reject_dangerous_root(root: Path) -> None:
     if resolved == home:
         raise LogCleanupError(f"Refusing to clean user home directory: {raw}")
 
-    # Reject the repository root itself (would delete source code).
-    # Subdirectories like ``data/logs/`` are legitimate log roots.
-    repo_root = paths.ROOT.resolve()
-    if resolved == repo_root:
-        raise LogCleanupError(f"Refusing to clean repository root: {raw}")
+    # Reject the repository root and any path inside the repository.
+    # Use ``project_root()`` (from ``__file__``) rather than the module-level
+    # ``ROOT`` so test monkeypatching does not bypass this safety check.
+    repo_root = paths.project_root().resolve()
+    if resolved == repo_root or paths.is_path_inside(resolved, repo_root):
+        raise LogCleanupError(f"Refusing to clean repository or repo-internal path: {raw}")
 
 
 def _ensure_managed_root_marker(root: Path) -> None:
