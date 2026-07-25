@@ -8,6 +8,7 @@ import pytest
 from click.testing import CliRunner
 
 from src.tools import log_cleanup
+from src.utils.paths import ensure_managed_log_root
 
 
 def _touch(path: Path, mtime: datetime, content: bytes = b"log") -> Path:
@@ -18,6 +19,12 @@ def _touch(path: Path, mtime: datetime, content: bytes = b"log") -> Path:
     return path
 
 
+def _authorize(root: Path) -> Path:
+    """Authorize ``root`` via the official managed-root authority."""
+    ensure_managed_log_root(root)
+    return root
+
+
 def test_cleanup_logs_deletes_log_files_older_than_retention(tmp_path: Path) -> None:
     now = datetime(2026, 6, 4, 12, 0, tzinfo=timezone.utc)
     old_log = _touch(tmp_path / "old.log", now - timedelta(days=31))
@@ -25,6 +32,7 @@ def test_cleanup_logs_deletes_log_files_older_than_retention(tmp_path: Path) -> 
     recent_log = _touch(tmp_path / "recent.log", now - timedelta(days=1))
     boundary_log = _touch(tmp_path / "boundary.log", now - timedelta(days=30))
 
+    _authorize(tmp_path)
     result = log_cleanup.cleanup_logs(tmp_path, retention_days=30, now=now)
 
     assert result.deleted_count == 2
@@ -41,6 +49,7 @@ def test_cleanup_logs_dry_run_reports_without_deleting(tmp_path: Path) -> None:
     now = datetime(2026, 6, 4, 12, 0, tzinfo=timezone.utc)
     old_log = _touch(tmp_path / "old.log", now - timedelta(days=31))
 
+    _authorize(tmp_path)
     result = log_cleanup.cleanup_logs(tmp_path, retention_days=30, dry_run=True, now=now)
 
     assert result.deleted_count == 1
@@ -61,6 +70,7 @@ def test_cleanup_logs_reports_failed_delete_without_counting_it(tmp_path: Path, 
 
     monkeypatch.setattr(Path, "unlink", fail_unlink)
 
+    _authorize(tmp_path)
     result = log_cleanup.cleanup_logs(tmp_path, retention_days=30, now=now)
 
     assert result.deleted_count == 0
@@ -83,6 +93,7 @@ def test_cleanup_logs_skips_non_log_files_directories_and_symlinks(tmp_path: Pat
     except OSError:
         symlink = None
 
+    _authorize(tmp_path)
     result = log_cleanup.cleanup_logs(tmp_path, retention_days=30, now=now)
 
     assert result.deleted_count == 0
@@ -96,6 +107,7 @@ def test_cli_uses_qdc_log_dir_by_default(tmp_path: Path, monkeypatch) -> None:
     now = datetime.now(timezone.utc)
     log_dir = tmp_path / "env-logs"
     old_log = _touch(log_dir / "old.log", now - timedelta(days=31))
+    _authorize(log_dir)
     monkeypatch.setenv("QDC_LOG_DIR", str(log_dir))
 
     result = CliRunner().invoke(log_cleanup.main, ["--retention-days", "30"])
@@ -135,6 +147,7 @@ def test_keep_recent_runs_protects_old_run_logs(tmp_path: Path) -> None:
             run_id,
         )
 
+    _authorize(tmp_path)
     result = log_cleanup.cleanup_logs(
         tmp_path,
         retention_days=30,
@@ -161,6 +174,7 @@ def test_active_run_logs_are_never_deleted(tmp_path: Path) -> None:
         active_id,
     )
 
+    _authorize(tmp_path)
     result = log_cleanup.cleanup_logs(
         tmp_path,
         retention_days=30,
@@ -190,6 +204,7 @@ def test_max_bytes_evicts_oldest_run_logs_first(tmp_path: Path) -> None:
             content=b"x" * 1024,
         )
 
+    _authorize(tmp_path)
     result = log_cleanup.cleanup_logs(
         tmp_path,
         retention_days=30,
@@ -218,6 +233,7 @@ def test_symlink_escaping_root_is_not_followed(tmp_path: Path) -> None:
     except OSError:
         pytest.skip("symlink not supported on this platform")
 
+    _authorize(log_dir)
     result = log_cleanup.cleanup_logs(log_dir, retention_days=30, now=now)
 
     assert result.deleted_count == 0
@@ -240,6 +256,7 @@ def test_cleanup_failures_do_not_raise_cli(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr(Path, "unlink", fail_unlink)
     monkeypatch.setenv("QDC_LOG_DIR", str(tmp_path))
 
+    _authorize(tmp_path)
     result = CliRunner().invoke(log_cleanup.main, ["--retention-days", "30"])
 
     assert result.exit_code == 0
@@ -261,6 +278,7 @@ def test_run_logs_in_runs_subdir_are_identified(tmp_path: Path) -> None:
     # by retention regardless of keep_recent_runs.
     old_flat = _touch(tmp_path / "flat.log", now - timedelta(days=365))
 
+    _authorize(tmp_path)
     result = log_cleanup.cleanup_logs(
         tmp_path,
         retention_days=30,

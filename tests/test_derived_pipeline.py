@@ -25,7 +25,7 @@ import pandas as pd
 import pytest
 
 from src.sources.derived.common import cleanup_stale_derived_staging
-from src.sources.derived.executor import CommitCoordinator, PartitionExecutor
+from src.sources.derived.executor import PartitionExecutor, StreamingBuildCoordinator
 from src.sources.derived.journal import (
     JOURNAL_STATUS_COMPLETED,
     JOURNAL_STATUS_RUNNING,
@@ -338,11 +338,21 @@ def test_journal_resume_skips_completed_partitions(tmp_path) -> None:
         max_workers=2,
         updated_at=NOW,
     )
-    results = executor.execute(plan, journal=journal)
+    coordinator = StreamingBuildCoordinator(
+        executor=executor,
+        store=store,
+        dataset_id="cn_stock_daily_bar",
+        journal=journal,
+        heartbeat_interval_seconds=0.05,
+    )
+    with store._metadata_store.manifest_write_session() as session:
+        coordinator.attach_manifest_session(session, run_id="test-resume-journal")
+        counters = coordinator.run(plan)
 
-    # The first 3 should be skipped (None), the last 3 should be built.
-    built = [r for r in results if r is not None]
-    assert len(built) == 3, f"Expected 3 built, got {len(built)}; executed={executed_securities}"
+    # The first 3 should be skipped (journal-completed), the last 3 committed.
+    assert counters.committed == 3, (
+        f"Expected 3 committed, got {counters.committed}; executed={executed_securities}"
+    )
     skipped_ids = {item.security_id for item in plan.partitions[:3]}
     executed_ids = set(executed_securities)
     assert skipped_ids.isdisjoint(executed_ids), f"Skipped IDs were executed: {skipped_ids & executed_ids}"
@@ -459,11 +469,31 @@ def test_executor_respects_cancel_event(tmp_path) -> None:
         max_workers=4,
         updated_at=NOW,
     )
-    results = executor.execute(plan, cancel_event=cancel_event)
+    journal = BuildJournal.create(
+        run_id="test-cancel",
+        target="daily_bar",
+        dataset_id="cn_stock_daily_bar",
+        plan_hash=plan.plan_hash,
+        schema_version="1",
+        source_snapshot_hash=plan.source_snapshot_hash,
+        total=plan.total,
+        metadata_dir=store.metadata_dir,
+    )
+    coordinator = StreamingBuildCoordinator(
+        executor=executor,
+        store=store,
+        dataset_id="cn_stock_daily_bar",
+        journal=journal,
+        cancel_event=cancel_event,
+        heartbeat_interval_seconds=0.05,
+    )
+    with store._metadata_store.manifest_write_session() as session:
+        coordinator.attach_manifest_session(session, run_id="test-cancel")
+        counters = coordinator.run(plan)
 
-    # With cancel pre-set, no futures are submitted → all results are empty.
-    built = [r for r in results if r is not None]
-    assert len(built) == 0
+    # With cancel pre-set, no futures are submitted → 0 committed.
+    assert counters.committed == 0
+    assert counters.failed == 0
 
 
 # ---------------------------------------------------------------------------

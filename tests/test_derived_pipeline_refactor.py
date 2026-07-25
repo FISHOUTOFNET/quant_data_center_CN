@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import json
 import os
-import shutil
 import time
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -424,7 +423,7 @@ def test_target_manifest_missing_triggers_rebuild_not_skip(tmp_path: Path) -> No
 
     store = _setup_store(tmp_path, n=2)
     master = _master(2)
-    # First build so the target exists.
+    # First build so the target exists (using the production streaming API).
     planner = BuildPlanner(
         store=store,
         target="daily_bar",
@@ -436,8 +435,6 @@ def test_target_manifest_missing_triggers_rebuild_not_skip(tmp_path: Path) -> No
         force_rebuild=True,
     )
     plan = planner.plan()
-    # Manually commit partitions to create target files but DELETE the
-    # manifest rows, simulating "file committed but manifest write failed".
     executor = PartitionExecutor(
         store=store,
         dataset_id="cn_stock_daily_bar",
@@ -447,19 +444,33 @@ def test_target_manifest_missing_triggers_rebuild_not_skip(tmp_path: Path) -> No
         max_workers=1,
         updated_at=NOW,
     )
-    results = executor.execute(plan)
-    # Promote files for the first partition only.
-    built = next(r for r in results if r is not None)
-    staging_area = create_derived_partition_staging_area(store, "cn_stock_daily_bar", built.security_id)
-    # Re-use the existing final dir as the "committed" target.
-    final_dir = built.final_partition_dir
-    final_dir.mkdir(parents=True, exist_ok=True)
-    # Move the staged parquet into final.
-    for p in built.staging_partition_dir.iterdir():
-        shutil.move(str(p), str(final_dir / p.name))
-    # Delete the manifest row for this partition (simulate failed manifest write).
+    journal = BuildJournal.create(
+        run_id="test-tmm-prebuild",
+        target="daily_bar",
+        dataset_id="cn_stock_daily_bar",
+        plan_hash=plan.plan_hash,
+        schema_version="1",
+        source_snapshot_hash=plan.source_snapshot_hash,
+        total=plan.total,
+        metadata_dir=store.metadata_dir,
+    )
+    coordinator = StreamingBuildCoordinator(
+        executor=executor,
+        store=store,
+        dataset_id="cn_stock_daily_bar",
+        journal=journal,
+        heartbeat_interval_seconds=0.05,
+    )
+    with store._metadata_store.manifest_write_session() as session:
+        coordinator.attach_manifest_session(session, run_id="test-tmm-prebuild")
+        counters = coordinator.run(plan)
+    assert counters.committed == 2
+
+    # Pick the first partition and delete its manifest row (simulate failed
+    # manifest write — file exists, manifest row missing).
+    target_sid = plan.partitions[0].security_id
     store._metadata_store.delete_dataset_partition_manifest(
-        "cn_stock_daily_bar", "security_id", built.security_id
+        "cn_stock_daily_bar", "security_id", target_sid
     )
     store.close()
 
@@ -475,7 +486,7 @@ def test_target_manifest_missing_triggers_rebuild_not_skip(tmp_path: Path) -> No
         force_rebuild=False,
     )
     plan2 = planner2.plan()
-    matching = [p for p in plan2.partitions if p.security_id == built.security_id]
+    matching = [p for p in plan2.partitions if p.security_id == target_sid]
     assert matching, "TARGET_MANIFEST_MISSING partition not in plan"
     assert matching[0].change_reason == ChangeReason.TARGET_MANIFEST_MISSING
 
@@ -822,20 +833,34 @@ def test_lock_reclaimed_when_pid_dead(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_managed_root_marker_is_created_on_first_use(tmp_path: Path) -> None:
-    """A fresh log root gets the ``.qdc-managed-log-root`` marker on first cleanup."""
+def test_managed_root_marker_is_required_for_cleanup(tmp_path: Path) -> None:
+    """A fresh log root without a marker must be REJECTED by cleanup.
+
+    The marker is the authorization boundary: cleanup must NOT auto-create it
+    (otherwise any external directory could be claimed). The marker is created
+    only by ``ensure_managed_log_root`` (called from ``create_run_log_context``
+    and application logging init), not by ``cleanup_logs``.
+    """
+
+    from src.utils.paths import MANAGED_ROOT_LAYOUT_VERSION, ensure_managed_log_root
 
     log_root = tmp_path / "logs"
     log_root.mkdir()
     # No marker yet.
     assert not (log_root / log_cleanup.MANAGED_ROOT_MARKER).exists()
-    log_cleanup.cleanup_logs(log_root, retention_days=30)
-    # Marker now exists.
+    # Cleanup must refuse.
+    with pytest.raises(log_cleanup.LogCleanupError, match="marker"):
+        log_cleanup.cleanup_logs(log_root, retention_days=30)
+    # Still no marker — cleanup did not create one.
+    assert not (log_root / log_cleanup.MANAGED_ROOT_MARKER).exists()
+
+    # After explicit authorization, cleanup succeeds and the marker exists.
+    ensure_managed_log_root(log_root)
     marker = log_root / log_cleanup.MANAGED_ROOT_MARKER
     assert marker.exists()
     payload = json.loads(marker.read_text(encoding="utf-8"))
     assert payload["application"] == "QuantDataCenter"
-    assert payload["layout_version"] == log_cleanup.MANAGED_ROOT_LAYOUT_VERSION
+    assert payload["layout_version"] == MANAGED_ROOT_LAYOUT_VERSION
 
 
 def test_cleanup_rejects_drive_root(tmp_path: Path) -> None:
@@ -861,6 +886,176 @@ def test_cleanup_rejects_user_home(tmp_path: Path, monkeypatch) -> None:
     home = pathlib.Path.home()
     with pytest.raises(log_cleanup.LogCleanupError, match="home"):
         log_cleanup.cleanup_logs(home, retention_days=30)
+
+
+# ===========================================================================
+# 14.8 Journal stat validation (file size / mtime / output_path)
+# ===========================================================================
+#
+# These tests verify that ``validate_completed_partition`` fails CLOSED when
+# the manifest row disagrees with the actual file on disk. A partition that
+# fails validation is removed from the journal's ``completed`` set by
+# ``resume_filter_completed`` and rebuilt on the next run.
+#
+# Fault points covered (spec §11.2, §11.3, §14.8):
+#   * file_size_bytes mismatch
+#   * file_mtime mismatch
+#   * output_path missing
+#   * output_path escapes store root
+
+
+def _build_one_partition_for_stat_tests(tmp_path: Path):
+    """Build a single real partition and return (store, plan, item, manifest_row).
+
+    The returned ``manifest_row`` is a pandas Series snapshot of the manifest
+    row written by the real build. Tests tamper with the live DuckDB table
+    (via ``store._metadata_store``) and then call
+    ``validate_completed_partition`` / ``resume_filter_completed``.
+    """
+
+    from src.sources.derived.stock_daily_bar import build_cn_stock_daily_bar
+
+    store = _setup_store(tmp_path, n=1)
+    build_cn_stock_daily_bar(
+        root=tmp_path,
+        build_views=False,
+        refresh_registry=False,
+        now=lambda: NOW,
+    )
+    store.close()
+    master = _master(1)
+    plan = _make_plan(store, master, force=True)
+    assert plan.total == 1
+    item = plan.partitions[0]
+
+    manifests = store.read_dataset_partition_manifest_batch(["cn_stock_daily_bar"])
+    mask = (
+        (manifests["dataset"].astype("string") == "cn_stock_daily_bar")
+        & (manifests["partition_column"].astype("string") == "security_id")
+        & (manifests["partition_value"].astype("string") == item.security_id)
+    )
+    matched = manifests.loc[mask]
+    assert len(matched) == 1, f"expected 1 manifest row, got {len(matched)}"
+    manifest_row = matched.iloc[-1]
+    return store, plan, item, manifest_row
+
+
+def _update_manifest_column(
+    store: ParquetStore, dataset_id: str, partition_value: str, column: str, new_value
+) -> None:
+    """Directly UPDATE a single manifest column in DuckDB (bypass the session).
+
+    Used by stat-validation tests to tamper with the on-disk manifest row.
+    """
+
+    meta = store._metadata_store
+    with meta._connection() as conn:
+        conn.execute(
+            f"UPDATE dataset_partition_manifest SET {column} = ? "
+            f"WHERE dataset = ? AND partition_value = ?",
+            [new_value, dataset_id, partition_value],
+        )
+
+
+def test_validate_rejects_file_size_mismatch(tmp_path: Path) -> None:
+    """A manifest file_size_bytes that disagrees with the actual file size
+    must fail validation and be rebuilt on resume."""
+
+    store, plan, item, manifest_row = _build_one_partition_for_stat_tests(tmp_path)
+    actual_size = int(manifest_row["file_size_bytes"])
+    # Tamper: claim a different size.
+    _update_manifest_column(
+        store, "cn_stock_daily_bar", item.security_id, "file_size_bytes", actual_size + 9999
+    )
+
+    result = validate_completed_partition(store, item, dataset_id="cn_stock_daily_bar")
+    assert not result.valid
+    assert "size mismatch" in result.reason
+
+    # resume_filter_completed must remove it from the journal.
+    journal = BuildJournal.create(
+        run_id="test-size-mismatch",
+        target="daily_bar",
+        dataset_id="cn_stock_daily_bar",
+        plan_hash=plan.plan_hash,
+        schema_version="1",
+        source_snapshot_hash=plan.source_snapshot_hash,
+        total=plan.total,
+        metadata_dir=store.metadata_dir,
+    )
+    journal.record_completed(item.security_id)
+    removed = resume_filter_completed(store, journal, plan, dataset_id="cn_stock_daily_bar")
+    assert removed == 1
+    assert not journal.is_completed(item.security_id)
+
+
+def test_validate_rejects_file_mtime_mismatch(tmp_path: Path) -> None:
+    """A manifest file_mtime that disagrees with the actual file mtime
+    (beyond millisecond precision) must fail validation and be rebuilt."""
+
+    store, plan, item, manifest_row = _build_one_partition_for_stat_tests(tmp_path)
+    # Tamper: shift mtime by 5 seconds (well beyond ms precision).
+    from datetime import timedelta
+
+    original_mtime = manifest_row["file_mtime"]
+    if isinstance(original_mtime, pd.Timestamp):
+        original_mtime = original_mtime.to_pydatetime()
+    tampered_mtime = original_mtime + timedelta(seconds=5)
+    _update_manifest_column(
+        store, "cn_stock_daily_bar", item.security_id, "file_mtime", tampered_mtime
+    )
+
+    result = validate_completed_partition(store, item, dataset_id="cn_stock_daily_bar")
+    assert not result.valid
+    assert "mtime mismatch" in result.reason
+
+
+def test_validate_rejects_missing_output_path(tmp_path: Path) -> None:
+    """An empty/missing output_path must fail validation (fail-closed)."""
+
+    store, plan, item, _ = _build_one_partition_for_stat_tests(tmp_path)
+    _update_manifest_column(
+        store, "cn_stock_daily_bar", item.security_id, "output_path", ""
+    )
+
+    result = validate_completed_partition(store, item, dataset_id="cn_stock_daily_bar")
+    assert not result.valid
+    assert "output_path missing" in result.reason
+
+
+def test_validate_rejects_output_path_escaping_store_root(tmp_path: Path) -> None:
+    """An output_path that resolves outside the store root must fail validation.
+
+    This prevents a tampered manifest from pointing at an arbitrary external
+    file and causing the validator to skip a partition whose real file was
+    moved or deleted.
+    """
+
+    store, plan, item, _ = _build_one_partition_for_stat_tests(tmp_path)
+    # Point the output_path at a sibling directory outside the store root.
+    outside = tmp_path.parent / "outside_store_root_for_escape_test"
+    outside.mkdir(parents=True, exist_ok=True)
+    outside_file = outside / "fake.parquet"
+    outside_file.write_bytes(b"fake")
+    # Store as a path relative-ish string; the validator resolves it against
+    # store.root and then checks it stays inside store.root.
+    escape_path = "../" + outside.name + "/fake.parquet"
+    _update_manifest_column(
+        store, "cn_stock_daily_bar", item.security_id, "output_path", escape_path
+    )
+
+    result = validate_completed_partition(store, item, dataset_id="cn_stock_daily_bar")
+    assert not result.valid
+    # The escape check fires before the "points elsewhere" check.
+    assert "escapes store root" in result.reason or "points elsewhere" in result.reason
+
+
+def test_validate_accepts_valid_completed_partition(tmp_path: Path) -> None:
+    """A fully-consistent partition (file + manifest + signature) validates."""
+
+    store, plan, item, _ = _build_one_partition_for_stat_tests(tmp_path)
+    result = validate_completed_partition(store, item, dataset_id="cn_stock_daily_bar")
+    assert result.valid, f"expected valid, got: {result.reason}"
 
 
 def test_cleanup_rejects_repo_root(tmp_path: Path, monkeypatch) -> None:
