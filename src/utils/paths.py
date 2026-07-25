@@ -175,10 +175,11 @@ def _reject_unsafe_log_root(root: Path) -> None:
     if resolved == home:
         raise LogRootAuthorizationError(f"Refusing to authorize user home directory: {root}")
 
-    # Repository root or any path inside the repository.
+    # Repository root itself (would delete source code). Subdirectories
+    # like ``data/logs/`` are legitimate log roots and must be allowed.
     repo_root = ROOT.resolve()
-    if resolved == repo_root or is_path_inside(resolved, repo_root):
-        raise LogRootAuthorizationError(f"Refusing to authorize repository or repo-internal path: {root}")
+    if resolved == repo_root:
+        raise LogRootAuthorizationError(f"Refusing to authorize repository root: {root}")
 
 
 def project_root() -> Path:

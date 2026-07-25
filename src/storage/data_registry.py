@@ -9,7 +9,7 @@ from dataclasses import asdict, dataclass
 from datetime import date, datetime
 from pathlib import Path
 from threading import RLock
-from typing import Any
+from typing import Any, cast
 from weakref import WeakValueDictionary
 
 import pandas as pd
@@ -343,8 +343,8 @@ class DataRegistry:
         if frame.empty or "dataset" not in frame.columns:
             return status
         work = frame.copy()
-        work["_updated_at"] = pd.to_datetime(work.get("updated_at"), errors="coerce")
-        work["_last_success_date"] = pd.to_datetime(work.get("last_success_date"), errors="coerce")
+        work["_updated_at"] = pd.to_datetime(cast(Any, work.get("updated_at")), errors="coerce")
+        work["_last_success_date"] = pd.to_datetime(cast(Any, work.get("last_success_date")), errors="coerce")
         for dataset_id, group in work.groupby("dataset", dropna=False):
             dataset_key = str(dataset_id)
             latest = group.sort_values("_updated_at", na_position="first").iloc[-1]

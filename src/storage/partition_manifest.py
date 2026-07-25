@@ -177,7 +177,7 @@ def _clean_dataframe_for_schema(df: pd.DataFrame, schema: pa.Schema) -> pd.DataF
 def _coerce_series(series: pd.Series, arrow_type: pa.DataType) -> pd.Series:
     if pa.types.is_date32(arrow_type) or pa.types.is_date64(arrow_type):
         dates = pd.to_datetime(_replace_null_like(series), errors="coerce")
-        return dates.dt.date.where(dates.notna(), None)
+        return dates.dt.date.where(dates.notna(), cast(Any, None))
     if pa.types.is_timestamp(arrow_type):
         return pd.to_datetime(_replace_null_like(series), errors="coerce").dt.floor("ms")
     if pa.types.is_integer(arrow_type):

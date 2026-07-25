@@ -355,7 +355,7 @@ def _compute_append_only_fixed_window_percentiles(
         current_value = float(value)
         current_date = row["_date_only"]
         current_timestamp = np.datetime64(row["date"])
-        output_position = append_position_by_index[row_index]
+        output_position = append_position_by_index[cast(int, row_index)]
         for name, years in WINDOWS.items():
             threshold = _subtract_years(current_date, years)
             if first_valid_date <= threshold:

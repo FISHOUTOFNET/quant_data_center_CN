@@ -247,7 +247,7 @@ def test_daily_workflow_uses_single_baostock_market_session_step() -> None:
     assert not (OLD_BAOSTOCK_STEP_IDS & set(by_id))
     assert "baostock-market-session" in by_id
     market_session = by_id["baostock-market-session"]
-    assert market_session["schedule_policy"] == "daily"
+    assert market_session["schedule_policy"] == "market_window"
     assert market_session["state_key_policy"] == "market_date"
     assert market_session["resume_policy"] == "always_run"
     assert [item["step"] for item in market_session["depends_on"]] == ["baostock-basic"]

@@ -7,6 +7,7 @@ from collections.abc import Collection, Iterator
 from contextlib import contextmanager, suppress
 from pathlib import Path
 from threading import RLock
+from typing import Any, cast
 from weakref import WeakValueDictionary
 
 import duckdb
@@ -562,7 +563,7 @@ def _is_empty_frame(df: pd.DataFrame | None) -> bool:
 def _coerce_series(series: pd.Series, arrow_type: pa.DataType) -> pd.Series:
     if pa.types.is_date32(arrow_type) or pa.types.is_date64(arrow_type):
         dates = pd.to_datetime(_replace_null_like(series), errors="coerce")
-        return dates.dt.date.where(dates.notna(), None)
+        return dates.dt.date.where(dates.notna(), cast(Any, None))
     if pa.types.is_timestamp(arrow_type):
         return pd.to_datetime(_replace_null_like(series), errors="coerce").dt.floor("ms")
     if pa.types.is_integer(arrow_type):

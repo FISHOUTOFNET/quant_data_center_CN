@@ -17,7 +17,7 @@ from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass
 from datetime import date, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import numpy as np
 import pandas as pd
@@ -284,7 +284,7 @@ def load_qlib_symbol_features(symbol_dir: Path, calendar: list[date]) -> pd.Data
         offset = field_start - min_index
         column[offset : offset + len(values)] = values
         column = np.round(column, 6)
-        result[field] = pd.Series(column, dtype=object).where(~np.isnan(column), None)
+        result[field] = pd.Series(column, dtype=object).where(~np.isnan(column), cast(Any, None))
     return result[["date", "qlib_symbol", "exchange", "code", *QLIB_FEATURE_FIELDS]]
 
 

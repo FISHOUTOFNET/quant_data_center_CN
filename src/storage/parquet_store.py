@@ -276,7 +276,7 @@ class ParquetStore:
         if pa.types.is_date32(arrow_type) or pa.types.is_date64(arrow_type):
             values = self._replace_null_like(series)
             dates = pd.to_datetime(values, errors="coerce")
-            return dates.dt.date.where(dates.notna(), None)
+            return dates.dt.date.where(dates.notna(), cast(Any, None))
         if pa.types.is_timestamp(arrow_type):
             values = self._replace_null_like(series)
             if pd.api.types.is_datetime64_any_dtype(values.dtype):
