@@ -6,6 +6,7 @@ on:
     branches:
       - main
       - master
+      - feature/derived-pipeline-refactor
 
 jobs:
   quality:
