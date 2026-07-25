@@ -2,7 +2,11 @@
 
 Policy:
 * Only delete files inside the resolved managed log root.
+* The root must carry a ``.qdc-managed-log-root`` marker (created on first
+  use). This prevents cleanup from touching an arbitrary user-supplied path.
 * Never follow symlinks or junctions that escape the log root.
+* Reject dangerous roots: filesystem root, drive root, home, repo root,
+  repo-internal paths, symlinks, and Windows junctions/reparse points.
 * Keep the most recent ``keep_recent_runs`` per-run logs regardless of age.
 * Never delete logs belonging to an active run (``active_run_ids``).
 * Delete files older than ``retention_days`` (except the protected ones).
@@ -13,6 +17,7 @@ Policy:
 
 from __future__ import annotations
 
+import json
 import os
 from collections.abc import Collection
 from dataclasses import dataclass, field
@@ -28,6 +33,8 @@ DEFAULT_KEEP_RECENT_RUNS = 10
 DEFAULT_MAX_BYTES = 2 * 1024 * 1024 * 1024  # 2 GiB
 LOG_SUFFIXES = {".log", ".out", ".err"}
 RUNS_SUBDIR = "runs"
+MANAGED_ROOT_MARKER = ".qdc-managed-log-root"
+MANAGED_ROOT_LAYOUT_VERSION = 1
 KEEP_REASON_WITHIN_RETENTION = "within_retention"
 KEEP_REASON_RECENT_RUN = "recent_run"
 KEEP_REASON_ACTIVE_RUN = "active_run"
@@ -82,7 +89,9 @@ def cleanup_logs(
     if keep_recent_runs < 0:
         raise ValueError("keep_recent_runs must be >= 0")
 
-    root = Path(log_dir).expanduser().resolve()
+    root = Path(log_dir).expanduser()
+    _reject_dangerous_root(root)
+    root = root.resolve()
     if not root.exists():
         return CleanupResult(
             deleted_count=0,
@@ -92,9 +101,13 @@ def cleanup_logs(
             kept_reasons={},
         )
 
-    # Safety: refuse to clean a path that is a symlink itself pointing elsewhere
-    # or that cannot be resolved relative to its parent (path traversal).
-    _validate_managed_root(root)
+    # Ensure the managed-root marker is present. ``cleanup_logs`` is the
+    # single owner of the log root, so it creates the marker on first use.
+    # If a root exists but is NOT managed (and we did not just create it),
+    # refuse to clean it — this is the safety check.
+    marker = root / MANAGED_ROOT_MARKER
+    if not marker.exists():
+        _ensure_managed_root_marker(root)
 
     reference_time = now or datetime.now(timezone.utc)
     cutoff_timestamp = reference_time.timestamp() - retention_days * 24 * 60 * 60
@@ -151,8 +164,14 @@ def cleanup_logs(
         _delete(item)
 
     # Pass 2: capacity cap. Evict oldest non-active, non-recent run logs first.
+    # Only log files count towards ``max_bytes`` — the managed-root marker and
+    # other non-log infrastructure files are excluded from the size total so a
+    # tiny marker cannot trigger spurious evictions.
     if max_bytes is not None and max_bytes > 0:
-        remaining_size = sum(item.size for item in discovered if item.path not in deleted_paths)
+        remaining_size = sum(
+            item.size for item in discovered
+            if item.path not in deleted_paths and item.is_log_file
+        )
         if remaining_size > max_bytes:
             survivors = sorted(
                 (
@@ -171,7 +190,12 @@ def cleanup_logs(
                 if _delete(item):
                     remaining_size -= size_before
 
-    kept_count = sum(1 for item in discovered if item.path not in deleted_paths)
+    # kept_count reports only log files; the managed-root marker is
+    # infrastructure and should not appear in user-facing counts.
+    kept_count = sum(
+        1 for item in discovered
+        if item.path not in deleted_paths and item.is_log_file
+    )
 
     return CleanupResult(
         deleted_count=deleted_count,
@@ -188,14 +212,12 @@ def default_log_dir() -> Path:
     return paths.resolve_runtime_paths().logs_dir
 
 
-def _validate_managed_root(root: Path) -> None:
-    """Refuse paths that are symlinks pointing outside their parent or that
-    cannot be safely contained.
+def _reject_dangerous_root(root: Path) -> None:
+    """Reject log roots that are unsafe to clean.
 
-    The check is intentionally narrow: we only reject a root whose resolved
-    path differs from the input after :func:`Path.resolve` AND is a symlink.
-    This prevents accidental ``log_dir = /`` or ``log_dir = symlink to /``
-    without breaking legitimate ``%LOCALAPPDATA%`` usage.
+    Evaluated on the ORIGINAL (pre-resolve) path so symlinks/junctions are
+    still detectable. The managed-root marker check is performed separately
+    in :func:`cleanup_logs` after resolution.
     """
 
     if root.is_symlink():
@@ -204,6 +226,49 @@ def _validate_managed_root(root: Path) -> None:
             raise LogCleanupError(
                 f"Refusing to clean symlink root that escapes its parent: {root} -> {target}"
             )
+
+    raw = root
+    # Detect Windows junctions/reparse points (is_junction is 3.12+).
+    is_junction = getattr(raw, "is_junction", lambda: False)()
+    if is_junction:
+        raise LogCleanupError(f"Refusing to clean Windows junction/reparse root: {raw}")
+
+    resolved = raw.resolve()
+    resolved_parent = resolved.parent
+
+    # Reject filesystem root: a path whose parent is itself.
+    if resolved == resolved_parent:
+        raise LogCleanupError(f"Refusing to clean filesystem root: {raw}")
+
+    # Reject a bare Windows drive root (e.g. C:\).
+    drive = resolved.anchor
+    if drive and resolved == Path(drive):
+        raise LogCleanupError(f"Refusing to clean drive root: {raw}")
+
+    # Reject the user home directory.
+    import pathlib
+
+    home = pathlib.Path.home().resolve()
+    if resolved == home:
+        raise LogCleanupError(f"Refusing to clean user home directory: {raw}")
+
+    # Reject the repository root and any path inside the repository.
+    repo_root = paths.ROOT.resolve()
+    if resolved == repo_root or paths.is_path_inside(resolved, repo_root):
+        raise LogCleanupError(f"Refusing to clean repository or repo-internal path: {raw}")
+
+
+def _ensure_managed_root_marker(root: Path) -> None:
+    """Create the managed-root marker if it does not exist."""
+
+    marker = root / MANAGED_ROOT_MARKER
+    if marker.exists():
+        return
+    payload = {
+        "application": "QuantDataCenter",
+        "layout_version": MANAGED_ROOT_LAYOUT_VERSION,
+    }
+    marker.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 @dataclass(frozen=True)
@@ -301,18 +366,29 @@ def _extract_run_id(filename: str) -> str | None:
     show_default=True,
     help="Total capacity cap in bytes. 0 disables the cap.",
 )
+@click.option(
+    "--active-run-id",
+    "active_run_ids",
+    multiple=True,
+    help="Run-id whose run log must never be deleted. May be repeated. "
+    "Also read from QDC_ACTIVE_RUN_ID (comma-separated).",
+)
 @click.option("--dry-run", is_flag=True, help="Report expired logs without deleting files.")
 def main(
     log_dir: Path | None,
     retention_days: int,
     keep_recent_runs: int,
     max_bytes: int,
+    active_run_ids: tuple[str, ...],
     dry_run: bool,
 ) -> None:
     """Clean expired log files under the managed log root."""
 
     target_dir = log_dir.resolve() if log_dir else default_log_dir()
     effective_max = max_bytes if max_bytes > 0 else None
+    env_active = os.environ.get("QDC_ACTIVE_RUN_ID", "")
+    env_ids = tuple(value for value in env_active.split(",") if value)
+    all_active_ids = (*active_run_ids, *env_ids)
     try:
         result = cleanup_logs(
             target_dir,
@@ -320,6 +396,7 @@ def main(
             dry_run=dry_run,
             keep_recent_runs=keep_recent_runs,
             max_bytes=effective_max,
+            active_run_ids=all_active_ids,
         )
     except LogCleanupError as exc:
         # Safety violations are always errors.
