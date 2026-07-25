@@ -81,17 +81,30 @@ def make_build_run_context(
     metadata_dir: Path,
     run_log_path: Path | None = None,
     cancel_event: Event | None = None,
+    progress_path_override: Path | None = None,
 ) -> BuildRunContext:
     """Build a :class:`BuildRunContext` from a resumable or fresh journal.
 
     The journal's ``run_id`` is authoritative: it is the same id whether the
     journal was just created or resumed from a prior run. The progress path is
     derived from that run id (not from a directory scan).
+
+    When ``progress_path_override`` is provided (e.g. by the daily orchestrator
+    via ``QDC_DERIVED_PROGRESS_PATH``), the progress state file is pinned to
+    that exact path regardless of the journal run id. This is the single
+    authoritative contract between the orchestrator's stall detector and the
+    derived build subprocess: the orchestrator decides the path before spawn,
+    passes it via env, and reads only that path — never a directory scan.
+
+    The journal path is always derived from the journal run id so resume
+    semantics are preserved: a resumed run keeps its old journal file while
+    writing progress to the orchestrator-pinned path.
     """
 
-    journal_path, progress_path = build_run_context_paths(
+    journal_path, default_progress_path = build_run_context_paths(
         metadata_dir=metadata_dir, run_id=journal.run_id
     )
+    progress_path = progress_path_override or default_progress_path
     return BuildRunContext(
         run_id=journal.run_id,
         target=journal.target,

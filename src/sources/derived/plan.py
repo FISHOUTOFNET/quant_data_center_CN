@@ -110,14 +110,20 @@ class PartitionManifestSnapshot:
 
 @dataclass(frozen=True)
 class DerivedPartitionPlan:
-    """One partition's build plan, with source signature pre-computed."""
+    """One partition's build plan, with source signature pre-computed.
+
+    NOTE: ``source_rows`` (the manifest DataFrame used by the planner to
+    compute the signature) is intentionally NOT carried in the plan. The
+    production executor reads source data via ``source_read_fn`` using
+    ``source_partitions``; carrying the manifest DataFrame per partition
+    would hold O(N) frames in memory for no benefit (P0-12).
+    """
 
     security_id: str
     source_signature: str
     master_row_hash: str
     source_partitions: tuple[SourcePartition, ...]
     change_reason: ChangeReason
-    source_rows: pd.DataFrame | None = None
 
 
 @dataclass(frozen=True)
@@ -299,8 +305,11 @@ class BuildPlanner:
                     )
                 )
                 continue
-            current_signature = source_signature(source_rows, master_row_hash(security))
+            # Compute master_row_hash exactly once per security (P0-12: the
+            # previous code called master_row_hash(security) twice — once inside
+            # source_signature() and once to assign current_master_hash).
             current_master_hash = master_row_hash(security)
+            current_signature = source_signature(source_rows, current_master_hash)
             if not target_exists:
                 reason = ChangeReason.TARGET_MISSING
             elif self.force_rebuild:
@@ -333,7 +342,6 @@ class BuildPlanner:
                     master_row_hash=current_master_hash,
                     source_partitions=tuple(source_pairs),
                     change_reason=reason,
-                    source_rows=source_rows,
                 )
             )
         return plans

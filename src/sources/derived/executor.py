@@ -36,8 +36,9 @@ from collections.abc import Callable, Mapping
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass
 from datetime import datetime
+from enum import Enum
 from pathlib import Path
-from threading import Event, RLock
+from threading import Event
 from typing import Any
 
 import pandas as pd
@@ -45,12 +46,10 @@ import pandas as pd
 from src.sources.derived.common import (
     DerivedPartitionStagingArea,
     cleanup_derived_partition_staging,
-    commit_derived_partition_staging,
     create_derived_partition_staging_area,
 )
 from src.sources.derived.journal import BuildJournal
 from src.sources.derived.manifest import (
-    delete_derived_partition_manifest,
     upsert_derived_partition_manifest,
 )
 from src.sources.derived.plan import ChangeReason, DerivedBuildPlan, DerivedPartitionPlan
@@ -127,22 +126,6 @@ class StagedPartitionResult:
     delete_partition: bool
 
 
-# Legacy result type kept for backwards-compatible unit tests. Production code
-# uses :class:`StagedPartitionResult` instead and never holds the full frame.
-@dataclass(frozen=True)
-class PartitionBuildResult:
-    """Legacy result of a single partition build (kept for unit tests)."""
-
-    security_id: str
-    df: pd.DataFrame
-    source_signature: str
-    master_row_hash: str
-    staging_root: Path
-    staging_partition_dir: Path
-    final_partition_dir: Path
-    row_count: int
-
-
 MaterializeFn = Callable[[pd.Series, Mapping[str, pd.DataFrame]], pd.DataFrame]
 SourceReadFn = Callable[[ParquetStore, str, str], pd.DataFrame]
 SecurityLookupFn = Callable[[str], pd.Series | None]
@@ -153,11 +136,58 @@ SecurityLookupFn = Callable[[str], pd.Series | None]
 # ---------------------------------------------------------------------------
 
 
+class PromotionState(Enum):
+    """States in the partition-promotion state machine.
+
+    Transitions::
+
+        INITIAL → BACKUP_CREATED → FINAL_PROMOTED → FINALIZED
+        INITIAL → FINAL_PROMOTED → FINALIZED          (no prior final)
+        any *   → ROLLED_BACK                          (on failure)
+
+    ``promote()`` performs internal rollback on any intermediate failure, so
+    a caller seeing ``PartitionPromotionRecoveryError`` knows the partition
+    is in an indeterminate state that must be reported as unrecoverable.
+    """
+
+    INITIAL = "initial"
+    BACKUP_CREATED = "backup_created"
+    FINAL_PROMOTED = "final_promoted"
+    FINALIZED = "finalized"
+    ROLLED_BACK = "rolled_back"
+
+
+class PartitionPromotionRecoveryError(RuntimeError):
+    """Raised when rollback fails after a partial promotion.
+
+    The partition is in an indeterminate state: neither the old final nor the
+    new final is guaranteed to be consistent. The original exception that
+    triggered the rollback is chained via ``__cause__``. Callers must record
+    the partition as failed and must NOT mark the journal as completed.
+    """
+
+
 class PartitionPromotion:
-    """Atomic single-partition promotion with rollback.
+    """Atomic single-partition promotion with state-machine rollback.
 
     Encapsulates the file-swap protocol so that file replacement and manifest
-    update are coupled: either both succeed or the state is restored.
+    update are coupled: either both succeed or the file state is restored.
+
+    State machine (see :class:`PromotionState`):
+
+    * ``promote()`` performs ``final → backup`` (if final exists) then
+      ``staging → final`` (non-delete) or nothing (delete). Any failure
+      during these steps triggers :meth:`_rollback_partial_promotion`
+      *inside* ``promote()``, so a caller that catches the re-raised
+      exception knows the file state was restored (or that a
+      :class:`PartitionPromotionRecoveryError` was raised because rollback
+      also failed).
+    * ``rollback()`` is the *external* rollback called by the coordinator
+      when the manifest write fails *after* ``promote()`` succeeded. It
+      restores the pre-promotion file state.
+    * ``finalize()`` removes backup and staging directories after the
+      manifest write succeeds. Backup-cleanup failure is a warning (data is
+      consistent); it does NOT raise.
 
     Replace-existing flow:
         old final → backup; staging → final; manifest upsert.
@@ -180,58 +210,142 @@ class PartitionPromotion:
     ) -> None:
         self._staging = staging
         self._delete_partition = delete_partition
+        self._state = PromotionState.INITIAL
         self._backup_created = False
-        self._promoted = False
+
+    @property
+    def state(self) -> PromotionState:
+        return self._state
 
     @property
     def promoted(self) -> bool:
-        return self._promoted
+        return self._state in (PromotionState.FINAL_PROMOTED, PromotionState.FINALIZED)
+
+    @property
+    def backup_created(self) -> bool:
+        return self._backup_created
 
     def promote(self) -> None:
-        """Perform the file swap (staging → final, or final → backup for delete)."""
+        """Perform the file swap (staging → final, or final → backup for delete).
 
-        area = self._staging
-        area.backup_dir.parent.mkdir(parents=True, exist_ok=True)
-        area.final_partition_dir.parent.mkdir(parents=True, exist_ok=True)
-        if area.final_partition_dir.exists():
-            area.final_partition_dir.rename(area.backup_dir)
-            self._backup_created = True
-        if not self._delete_partition:
-            area.staging_partition_dir.rename(area.final_partition_dir)
-        self._promoted = True
-
-    def rollback(self) -> None:
-        """Restore the pre-promotion file state.
-
-        Called when manifest update fails after promotion. If rollback itself
-        fails, the error is logged but re-raised so the caller can mark the
-        partition as unrecoverable.
+        On any intermediate failure, :meth:`_rollback_partial_promotion` is
+        called *inside* this method to restore the pre-promotion file state.
+        If rollback also fails, :class:`PartitionPromotionRecoveryError` is
+        raised (chained from the rollback error); otherwise the original
+        promotion exception is re-raised.
         """
 
         area = self._staging
-        if not self._promoted:
-            return
-        if self._delete_partition:
-            # We removed final → backup; restore it.
-            if self._backup_created and area.backup_dir.exists() and not area.final_partition_dir.exists():
-                area.backup_dir.rename(area.final_partition_dir)
-            return
-        # Replace/insert path: we either moved staging→final (insert) or
-        # final→backup then staging→final (replace). If a new final exists
-        # (from staging), remove it and restore backup.
-        if self._backup_created:
+        try:
+            area.backup_dir.parent.mkdir(parents=True, exist_ok=True)
+            area.final_partition_dir.parent.mkdir(parents=True, exist_ok=True)
             if area.final_partition_dir.exists():
-                shutil.rmtree(area.final_partition_dir, ignore_errors=False)
+                area.final_partition_dir.rename(area.backup_dir)
+                self._backup_created = True
+                self._state = PromotionState.BACKUP_CREATED
+            if not self._delete_partition:
+                area.staging_partition_dir.rename(area.final_partition_dir)
+            self._state = PromotionState.FINAL_PROMOTED
+        except Exception:
+            try:
+                self._rollback_partial_promotion()
+            except Exception as rollback_exc:
+                raise PartitionPromotionRecoveryError(
+                    f"PartitionPromotion promote failed and rollback also failed "
+                    f"for partition={area.partition_value}; "
+                    f"state={self._state}, rollback_error={rollback_exc}"
+                ) from rollback_exc
+            raise
+
+    def rollback(self) -> None:
+        """External rollback: restore pre-promotion file state.
+
+        Called by the coordinator when the manifest write fails *after*
+        ``promote()`` succeeded. If the partition was already finalized or
+        rolled back, this is a no-op. If rollback itself fails,
+        :class:`PartitionPromotionRecoveryError` is raised.
+        """
+
+        if self._state in (PromotionState.FINALIZED, PromotionState.ROLLED_BACK):
+            return
+        try:
+            self._rollback_partial_promotion()
+        except Exception as rollback_exc:
+            raise PartitionPromotionRecoveryError(
+                f"PartitionPromotion rollback failed for "
+                f"partition={self._staging.partition_value}: {rollback_exc}"
+            ) from rollback_exc
+
+    def _rollback_partial_promotion(self) -> None:
+        """Restore pre-promotion file state based on the current state.
+
+        This is the single internal rollback routine used by both
+        :meth:`promote` (on intermediate failure) and :meth:`rollback`
+        (external, on manifest-write failure). It must never raise silently:
+        any failure propagates so the caller can wrap it in
+        :class:`PartitionPromotionRecoveryError`.
+        """
+
+        area = self._staging
+        if self._state == PromotionState.INITIAL:
+            # Nothing happened yet; nothing to undo.
+            return
+        if self._state == PromotionState.BACKUP_CREATED:
+            # final → backup succeeded, but staging → final (or delete) failed.
+            # Restore backup → final. If final somehow exists, we have a
+            # conflict — do NOT destroy it; leave backup in place for forensic
+            # inspection and raise.
+            if area.final_partition_dir.exists():
+                raise RuntimeError(
+                    f"Cannot rollback BACKUP_CREATED: final still exists at "
+                    f"{area.final_partition_dir} (backup at {area.backup_dir})"
+                )
             if area.backup_dir.exists():
                 area.backup_dir.rename(area.final_partition_dir)
-        else:
-            # No backup: staging was promoted to a brand-new final. Remove it.
-            if area.final_partition_dir.exists():
-                shutil.rmtree(area.final_partition_dir, ignore_errors=False)
+            self._backup_created = False
+            self._state = PromotionState.ROLLED_BACK
+            return
+        if self._state == PromotionState.FINAL_PROMOTED:
+            if self._delete_partition:
+                # final → backup done (delete mode). Restore backup → final.
+                if self._backup_created:
+                    if area.final_partition_dir.exists():
+                        # Unexpected: final exists in delete mode after promotion.
+                        raise RuntimeError(
+                            f"Cannot rollback delete promotion: final reappeared at "
+                            f"{area.final_partition_dir}"
+                        )
+                    if area.backup_dir.exists():
+                        area.backup_dir.rename(area.final_partition_dir)
+                    self._backup_created = False
+            else:
+                if self._backup_created:
+                    # Replace path: final→backup then staging→final done.
+                    # Remove new final, restore backup → final.
+                    if area.final_partition_dir.exists():
+                        shutil.rmtree(area.final_partition_dir, ignore_errors=False)
+                    if area.backup_dir.exists():
+                        area.backup_dir.rename(area.final_partition_dir)
+                    self._backup_created = False
+                else:
+                    # Insert path: staging→final done (no prior final).
+                    # Remove new final.
+                    if area.final_partition_dir.exists():
+                        shutil.rmtree(area.final_partition_dir, ignore_errors=False)
+            self._state = PromotionState.ROLLED_BACK
+            return
+        # FINALIZED or ROLLED_BACK: nothing to do.
 
     def finalize(self) -> None:
-        """Clean up backup and staging after a successful commit."""
+        """Clean up backup and staging after a successful commit.
 
+        Backup-cleanup failure is a warning (data is already consistent);
+        it does NOT raise. Only call this after the manifest write succeeds.
+        """
+
+        if self._state != PromotionState.FINAL_PROMOTED:
+            # Cannot finalize from a non-promoted state.
+            return
         area = self._staging
         if self._backup_created and area.backup_dir.exists():
             try:
@@ -256,6 +370,7 @@ class PartitionPromotion:
                     area.partition_value,
                     exc,
                 )
+        self._state = PromotionState.FINALIZED
 
 
 # ---------------------------------------------------------------------------
@@ -301,76 +416,6 @@ class PartitionExecutor:
     def max_workers(self) -> int:
         return self._max_workers
 
-    def execute(
-        self,
-        plan: DerivedBuildPlan,
-        *,
-        progress: ProgressReporter | None = None,
-        journal: BuildJournal | None = None,
-        cancel_event: Event | None = None,
-    ) -> list[PartitionBuildResult | None]:
-        """Bounded sliding-window execution. Returns results list (test helper).
-
-        .. deprecated::
-            Production code uses :class:`StreamingBuildCoordinator.run()`
-            which commits per-partition and returns :class:`BuildCounters`.
-            This method is kept for unit tests that inspect individual
-            results.
-        """
-
-        from src.sources.derived.common import _require_derived_dataset
-
-        definition = _require_derived_dataset(self._dataset_id)
-        schema = definition.schema
-        max_in_flight = self._max_workers * DEFAULT_MAX_IN_FLIGHT_MULTIPLIER
-        results: list[PartitionBuildResult | None] = [None] * len(plan.partitions)
-        pending = iter(enumerate(plan.partitions))
-        in_flight: dict[Future[PartitionBuildResult | None], int] = {}
-
-        with ThreadPoolExecutor(max_workers=self._max_workers) as pool:
-            self._submit_until_full(pool, pending, in_flight, progress, journal, cancel_event)
-            while in_flight:
-                done, _ = wait(in_flight, timeout=DEFAULT_HEARTBEAT_INTERVAL_SECONDS, return_when=FIRST_COMPLETED)
-                if not done:
-                    if progress is not None:
-                        progress.heartbeat()
-                    if journal is not None:
-                        journal.heartbeat()
-                    continue
-                for future in done:
-                    idx = in_flight.pop(future)
-                    try:
-                        result = future.result()
-                    except Exception:
-                        result = None
-                    results[idx] = result
-                    self._submit_until_full(pool, pending, in_flight, progress, journal, cancel_event)
-        return results
-
-    def _submit_until_full(
-        self,
-        pool: ThreadPoolExecutor,
-        pending: Any,
-        in_flight: dict[Future[PartitionBuildResult | None], int],
-        progress: ProgressReporter | None,
-        journal: BuildJournal | None,
-        cancel_event: Event | None,
-    ) -> None:
-        max_in_flight = self._max_workers * DEFAULT_MAX_IN_FLIGHT_MULTIPLIER
-        while len(in_flight) < max_in_flight:
-            try:
-                idx, item = next(pending)
-            except StopIteration:
-                return
-            if cancel_event is not None and cancel_event.is_set():
-                break
-            if journal is not None and journal.is_completed(item.security_id):
-                if progress is not None:
-                    progress.record_processed(item.security_id)
-                continue
-            future = pool.submit(self._build_one, item, progress, cancel_event)
-            in_flight[future] = idx
-
     def build_staged(
         self,
         item: DerivedPartitionPlan,
@@ -384,81 +429,6 @@ class PartitionExecutor:
         """
 
         return self._build_one_staged(item, cancel_event)
-
-    def _build_one(
-        self,
-        item: DerivedPartitionPlan,
-        progress: ProgressReporter | None,
-        cancel_event: Event | None,
-    ) -> PartitionBuildResult | None:
-        """Legacy worker path (returns full DataFrame). Used by execute()."""
-
-        if cancel_event is not None and cancel_event.is_set():
-            return None
-        if _is_manifest_missing_reason(item.change_reason):
-            logger.warning(
-                "Skipping partition build for {} (source manifest missing after preflight)",
-                item.security_id,
-            )
-            if progress is not None:
-                progress.record_failed(item.security_id)
-            return None
-        staging: Any = None
-        try:
-            security = self._security_lookup(item.security_id)
-            if security is None:
-                logger.warning("Worker could not find security master row for {}", item.security_id)
-                if progress is not None:
-                    progress.record_failed(item.security_id)
-                return None
-            source_frames = self._read_source_frames(item)
-            df = self._materialize_fn(security, source_frames)
-            staging = create_derived_partition_staging_area(
-                self._store, self._dataset_id, item.security_id
-            )
-            write_store = ParquetStore(
-                root=self._store.root,
-                parquet_dir=staging.staging_root,
-                metadata_dir=self._store.metadata_dir,
-            )
-            if df.empty:
-                cleanup_derived_partition_staging(staging)
-                return PartitionBuildResult(
-                    security_id=item.security_id,
-                    df=df,
-                    source_signature=item.source_signature,
-                    master_row_hash=item.master_row_hash,
-                    staging_root=staging.staging_root,
-                    staging_partition_dir=staging.staging_partition_dir,
-                    final_partition_dir=staging.final_partition_dir,
-                    row_count=0,
-                )
-            result = write_store.write_dataset(
-                self._dataset_id,
-                df,
-                partition={"security_id": item.security_id},
-                mode="replace",
-            )
-            return PartitionBuildResult(
-                security_id=item.security_id,
-                df=df,
-                source_signature=item.source_signature,
-                master_row_hash=item.master_row_hash,
-                staging_root=staging.staging_root,
-                staging_partition_dir=staging.staging_partition_dir,
-                final_partition_dir=staging.final_partition_dir,
-                row_count=result.row_count,
-            )
-        except Exception:
-            logger.exception("Worker failed to build partition security_id={}", item.security_id)
-            if staging is not None:
-                try:
-                    cleanup_derived_partition_staging(staging)
-                except Exception:
-                    logger.warning("Worker failed to clean up staging for {}", item.security_id)
-            if progress is not None:
-                progress.record_failed(item.security_id)
-            return None
 
     def _build_one_staged(
         self,
@@ -703,7 +673,21 @@ class StreamingBuildCoordinator:
             self._progress.record_processed(result.security_id)
 
     def _commit_partition(self, result: StagedPartitionResult) -> None:
-        """Promote staging → final, write manifest, finalize (with rollback)."""
+        """Promote staging → final, write manifest, finalize (with rollback).
+
+        Transaction window (all three stages must succeed for the partition
+        to be recorded as committed):
+
+        1. ``promotion.promote()`` — file swap. Internal rollback on failure.
+        2. ``_write_manifest()`` — manifest upsert/delete via the session.
+           On failure, ``promotion.rollback()`` restores the old final.
+        3. ``promotion.finalize()`` — backup/staging cleanup. Failure here is
+           a warning (data is already consistent); it does NOT raise.
+
+        If ``promote()`` itself raises ``PartitionPromotionRecoveryError``,
+        the partition is in an indeterminate state — re-raise so the caller
+        records it as failed (journal is NOT marked completed).
+        """
 
         from src.storage.dataset_catalog import dataset_definition
 
@@ -713,13 +697,24 @@ class StreamingBuildCoordinator:
             staging=result.staging,
             delete_partition=result.delete_partition,
         )
+        # Stage 1: promote (internal rollback on failure).
         promotion.promote()
+        # Stage 2: manifest write (external rollback on failure).
         try:
             self._write_manifest(result, promotion, partition_column)
         except Exception:
-            # Manifest write failed after file promotion → rollback file state.
             try:
                 promotion.rollback()
+            except PartitionPromotionRecoveryError:
+                # Rollback failed — data may be inconsistent. Re-raise so the
+                # caller records the partition as failed and the journal is
+                # NOT marked completed.
+                logger.error(
+                    "PartitionPromotion rollback FAILED for {}: partition is in "
+                    "an indeterminate state (data may be inconsistent)",
+                    result.security_id,
+                )
+                raise
             except Exception as rollback_exc:
                 logger.error(
                     "PartitionPromotion rollback FAILED for {}: {} (data may be inconsistent)",
@@ -728,6 +723,7 @@ class StreamingBuildCoordinator:
                 )
                 raise
             raise
+        # Stage 3: finalize (backup cleanup; warning only).
         promotion.finalize()
 
     def _write_manifest(
@@ -818,95 +814,3 @@ def _relative_output_path(path: Path, root: Path) -> str:
         return resolved_path.relative_to(resolved_root).as_posix()
     except ValueError:
         return resolved_path.as_posix()
-
-
-# ---------------------------------------------------------------------------
-# Legacy CommitCoordinator (kept for backwards-compatible unit tests only).
-# Production code uses StreamingBuildCoordinator.
-# ---------------------------------------------------------------------------
-
-
-class CommitCoordinator:
-    """Legacy single-writer metadata committer (per-partition or batch).
-
-    .. deprecated::
-        Production code uses :class:`StreamingBuildCoordinator` which combines
-        bounded execution with per-partition commit and a single
-        :class:`ManifestWriteSession`. This class is kept for unit tests that
-        test commit semantics in isolation.
-    """
-
-    def __init__(
-        self,
-        *,
-        store: ParquetStore,
-        dataset_id: str,
-        progress: ProgressReporter | None = None,
-        journal: BuildJournal | None = None,
-    ) -> None:
-        self._store = store
-        self._dataset_id = dataset_id
-        self._progress = progress
-        self._journal = journal
-        self._lock = RLock()
-
-    def commit(self, result: PartitionBuildResult | None) -> bool:
-        if result is None:
-            return False
-        with self._lock:
-            try:
-                if result.row_count == 0:
-                    if result.final_partition_dir.exists():
-                        shutil.rmtree(result.final_partition_dir, ignore_errors=True)
-                    delete_derived_partition_manifest(
-                        self._store, self._dataset_id, result.security_id
-                    )
-                else:
-                    staging = DerivedPartitionStagingArea(
-                        dataset_id=self._dataset_id,
-                        partition_column="security_id",
-                        partition_value=result.security_id,
-                        staging_root=result.staging_root,
-                        staging_partition_dir=result.staging_partition_dir,
-                        final_partition_dir=result.final_partition_dir,
-                        backup_dir=result.staging_root.parent
-                        / f"{self._dataset_id}.{result.security_id}.backup",
-                        final_existed=result.final_partition_dir.exists(),
-                    )
-                    commit_derived_partition_staging(staging)
-                    upsert_derived_partition_manifest(
-                        self._store,
-                        self._dataset_id,
-                        result.security_id,
-                        result.df,
-                        result.source_signature,
-                        result.master_row_hash,
-                    )
-                if self._journal is not None:
-                    self._journal.record_completed(result.security_id)
-                if self._progress is not None:
-                    self._progress.record_processed(result.security_id)
-                return True
-            except Exception as exc:
-                logger.exception(
-                    "CommitCoordinator failed to commit partition security_id={}",
-                    result.security_id,
-                )
-                if self._journal is not None:
-                    self._journal.record_failed(result.security_id, f"{type(exc).__name__}: {exc}")
-                if self._progress is not None:
-                    self._progress.record_failed(result.security_id)
-                return False
-
-    def commit_all(self, results: list[PartitionBuildResult | None]) -> tuple[int, int]:
-        """Legacy batch commit. Kept for tests; production uses streaming."""
-
-        committed = 0
-        failed = 0
-        for result in results:
-            ok = self.commit(result)
-            if ok:
-                committed += 1
-            else:
-                failed += 1
-        return committed, failed

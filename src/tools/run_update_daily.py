@@ -25,7 +25,15 @@ from src.pipeline.common import (
     default_candidate_date,
     latest_trading_day_on_or_before,
 )
-from src.pipeline.step_health import StepHealthSummary, read_step_health_summary
+from src.pipeline.step_health import (
+    FAILURE_STATUSES,
+    SKIPPED_STATUSES,
+    SUCCESS_STATUSES,
+    DEGRADED_SUCCESS_STATUSES,
+    StepHealthSummary,
+    is_failure_status,
+    read_step_health_summary,
+)
 from src.storage.metadata_store import default_metadata_duckdb_file
 from src.storage.parquet_store import ParquetStore
 from src.tools.run_logging import (
@@ -110,7 +118,22 @@ SCHEDULE_POLICIES = {"daily", "market_window", "legacy_when"}
 STATE_KEY_POLICIES = {"natural_date", "market_date", "run_instance"}
 RESUME_POLICIES = {"skip_if_success", "always_run"}
 DATA_FRESHNESS_POLICIES = {"market_session", "natural_daily", "disclosure_calendar", "maintenance"}
-FAILED_DEPENDENCY_STATUSES = {"failed", "failed_resource_locked", "failed_timeout_cleanup", "stalled", "blocked", "abandoned"}
+# Dependency-status sets. These MUST stay aligned with the unified authority
+# in :mod:`src.pipeline.step_health` (FAILURE_STATUSES / SKIPPED_STATUSES /
+# SUCCESS_STATUSES). ``partial``, ``cancelled``, ``stalled`` and ``timed_out``
+# are all fatal terminal statuses: a downstream step must NOT run when an
+# upstream dependency ended in any of them.
+FAILED_DEPENDENCY_STATUSES = {
+    "failed",
+    "failed_resource_locked",
+    "failed_timeout_cleanup",
+    "stalled",
+    "timed_out",
+    "partial",
+    "cancelled",
+    "blocked",
+    "abandoned",
+}
 SATISFIED_DEPENDENCY_STATUSES = {"success", "success_degraded", "skipped", "skipped_checkpoint"}
 TIMEOUT_EXIT_CODE = 124
 TIMEOUT_CLEANUP_FAILED_EXIT_CODE = 125
@@ -129,9 +152,30 @@ LEGACY_START_AT_ALIASES = {"build-derived": "build-derived-security-master"}
 # ``DERIVED_SAFETY_TIMEOUT_SECONDS`` (18h, well above historical P99)
 # acts as a last-resort fallback.
 DERIVED_STALL_POLL_SECONDS = 60
+# Default heartbeat staleness threshold. The effective value is resolved from
+# ``config/settings.yaml`` (``derived.stall_seconds``) via
+# :func:`derived_runtime_config`; this constant is only the fallback when the
+# config cannot be read (e.g. tests without a settings.yaml).
 DERIVED_STALL_HEARTBEAT_SECONDS = 25 * 60
 DERIVED_SAFETY_TIMEOUT_SECONDS = 18 * 60 * 60
-DERIVED_STALL_TARGETS = {"daily_bar", "valuation"}
+# Only ``daily_bar`` is wired into the unified derived progress contract
+# (BuildRunContext + journal heartbeat + StreamingBuildCoordinator +
+# orchestrator stall detector). ``valuation`` does NOT use this contract yet:
+# it lacks BuildRunContext, journal heartbeat, and the streaming coordinator,
+# so the orchestrator must not pretend it does. If/when valuation is migrated,
+# add it here in a separate change with its own progress path contract.
+DERIVED_STALL_TARGETS = {"daily_bar"}
+# Environment variables that form the single authoritative progress-path
+# contract between the orchestrator and a derived build subprocess. The
+# orchestrator generates a unique path per (run_instance, step_id) BEFORE
+# spawning the child, passes it via env, and reads only that path — never a
+# directory scan. The child reads it via
+# :func:`src.sources.derived.stock_daily_bar._progress_path_override_from_env`.
+QDC_DERIVED_PROGRESS_PATH_ENV = "QDC_DERIVED_PROGRESS_PATH"
+QDC_DERIVED_RUN_ID_ENV = "QDC_DERIVED_RUN_ID"
+# Environment variable that propagates the orchestrator's current run-id so
+# that the cleanup subprocess can protect the in-flight run log from deletion.
+QDC_ACTIVE_RUN_ID_ENV = "QDC_ACTIVE_RUN_ID"
 _LAST_LOCKED_DUCKDB_PATHS: tuple[Path, ...] = ()
 # Kept only as a test/migration reference for the legacy workflow shape.
 # Production execution must load config/daily_workflow.yaml and must not
@@ -780,7 +824,9 @@ def run_daily_update(
     # ``_on_child_spawn`` is invoked by ``_run_subprocess`` immediately after
     # ``Popen`` returns, so the child pid lands in the state file *while* the
     # step is still running. Synthetic test runners do not call it, so
-    # ``child_pid`` stays absent for them.
+    # ``child_pid`` stays absent for them. The callback also records the
+    # orchestrator-pinned derived progress path so crash recovery can find
+    # the exact file the stall detector is reading.
     def _on_child_spawn(child_pid: int, step_id: str, step_state_view: dict[str, Any]) -> None:
         row = step_state_view.get(step_id)
         if isinstance(row, dict):
@@ -792,6 +838,8 @@ def run_daily_update(
             step,
             log_path,
             base,
+            run_log_context=run_log_context,
+            run_instance_key=run_instance_key,
             on_spawn=lambda pid: _on_child_spawn(pid, step.id, step_state),
         )
 
@@ -1012,6 +1060,19 @@ def run_daily_update(
                 continue
 
             _record_step(step_state, effective_step, "running", None, resolved_log, now)
+            # For derived build steps that use the unified progress contract,
+            # record the orchestrator-pinned progress path and derived run id
+            # in the state file so crash recovery and external monitors can
+            # find the exact file the stall detector is reading. This is the
+            # state-file half of the contract; the env-var half is in
+            # ``_run_subprocess``.
+            if _step_uses_derived_stall_detection(effective_step):
+                pinned_progress_path = _derived_progress_path_for_step(
+                    base, run_instance_key, effective_step.id
+                )
+                pinned_derived_run_id = f"{run_instance_key}:{effective_step.id}"
+                step_state[effective_step.id]["progress_path"] = str(pinned_progress_path)
+                step_state[effective_step.id]["derived_run_id"] = pinned_derived_run_id
             _write_state(resolved_state_file, state)
             _emit(
                 resolved_log,
@@ -1400,8 +1461,23 @@ def _run_subprocess(
     log_path: Path,
     root: Path,
     *,
+    run_log_context: RunLogContext | None = None,
+    run_instance_key: str | None = None,
     on_spawn: Callable[[int], None] | None = None,
 ) -> int:
+    """Spawn a step's command as a subprocess and wait for it (with stall detection).
+
+    For derived build steps in :data:`DERIVED_STALL_TARGETS`, the orchestrator
+    pins a unique progress-state path per (run_instance, step_id) BEFORE spawn
+    and passes it to the child via :data:`QDC_DERIVED_PROGRESS_PATH_ENV`. The
+    stall detector reads only that path — never a directory scan.
+
+    For the cleanup step (and any step that respects ``--active-run-id``), the
+    orchestrator's current run-id is propagated via
+    :data:`QDC_ACTIVE_RUN_ID_ENV` so the cleanup subprocess can protect the
+    in-flight run log from deletion.
+    """
+
     global _LAST_CHILD_PID
     env = build_network_env(os.environ, profile=step.network_profile)
     # ``QDC_DISABLE_FILE_LOG=1`` is preserved for backwards compatibility. Its
@@ -1419,6 +1495,27 @@ def _run_subprocess(
     step_result_path = os.environ.get(STEP_RESULT_PATH_ENV)
     if step_result_path:
         env[STEP_RESULT_PATH_ENV] = step_result_path
+    # Propagate the orchestrator's current run-id to every child so that the
+    # cleanup subprocess (and any other tool that respects QDC_ACTIVE_RUN_ID)
+    # can protect the in-flight run log. We do NOT read this from os.environ
+    # because the orchestrator is the authoritative source of the run id;
+    # relying on a stale env var would defeat the protection.
+    if run_log_context is not None:
+        env[QDC_ACTIVE_RUN_ID_ENV] = run_log_context.run_id
+    # For derived build steps that use the unified progress contract, pin a
+    # unique progress-state path per (run_instance, step_id) and pass it to
+    # the child. The child (build_cn_stock_daily_bar) reads this env var via
+    # ``_progress_path_override_from_env`` and writes its ProgressReporter
+    # state to exactly this file. The stall detector below reads the same
+    # path — no directory scan is involved.
+    derived_target = _extract_derived_target(step) if _step_uses_derived_stall_detection(step) else None
+    progress_path: Path | None = None
+    derived_run_id: str | None = None
+    if derived_target is not None and run_instance_key is not None:
+        progress_path = _derived_progress_path_for_step(root, run_instance_key, step.id)
+        derived_run_id = f"{run_instance_key}:{step.id}"
+        env[QDC_DERIVED_PROGRESS_PATH_ENV] = str(progress_path)
+        env[QDC_DERIVED_RUN_ID_ENV] = derived_run_id
     with log_path.open("a", encoding="utf-8") as log:
         popen_kwargs: dict[str, Any] = {
             "cwd": root,
@@ -1447,17 +1544,24 @@ def _run_subprocess(
             except Exception:  # pragma: no cover - state-file writes must never kill the step
                 logger.exception("Failed to record child_pid for step {}", step.id)
         try:
-            # Derived build steps (daily_bar, valuation) have no fixed
+            # Derived build steps in DERIVED_STALL_TARGETS have no fixed
             # ``timeout_seconds`` because a normal full rebuild can legitimately
             # exceed 4 hours. Instead of a hard timeout, we use stall detection:
-            # the orchestrator polls the child's progress state file and
+            # the orchestrator polls the child's pinned progress state file and
             # declares the build stalled when the heartbeat is stale AND
             # ``processed`` is unchanged. A high safety timeout (18h) acts as
             # a last-resort fallback. See ``progress.check_stall`` for details.
             if step.timeout_seconds is not None:
                 return int(proc.wait(timeout=step.timeout_seconds))
-            if _step_uses_derived_stall_detection(step):
-                return _wait_with_stall_detection(proc, step, log, root)
+            if derived_target is not None:
+                return _wait_with_stall_detection(
+                    proc,
+                    step,
+                    log,
+                    root,
+                    progress_path=progress_path,
+                    derived_run_id=derived_run_id,
+                )
             return int(proc.wait())
         except subprocess.TimeoutExpired:
             log.write(f"Step timed out after {step.timeout_seconds} seconds; terminating process tree\n")
@@ -1483,34 +1587,58 @@ def _wait_with_stall_detection(
     step: DailyStep,
     log: TextIO,
     root: Path,
+    *,
+    progress_path: Path | None = None,
+    derived_run_id: str | None = None,
 ) -> int:
-    """Poll the child's progress state and terminate if stalled.
+    """Poll the child's pinned progress state and terminate if stalled.
 
     Replaces ``proc.wait()`` for derived build steps. Polls every
-    ``DERIVED_STALL_POLL_SECONDS`` and checks:
+    :data:`DERIVED_STALL_POLL_SECONDS` and checks:
 
     1. Is the child PID still alive? If not, return its exit code.
     2. Has the safety timeout (18h) been exceeded? If so, terminate → ``timed_out``.
     3. Is the progress heartbeat stale AND ``processed`` unchanged? If so,
        terminate → ``stalled``.
 
+    Stall verdict preservation (P0):
+
+    Once the orchestrator declares the build stalled, the final exit code is
+    fixed to :data:`STALLED_EXIT_CODE` (126) regardless of what the child
+    returns after SIGINT. The child's exit code (0, 1, ...) CANNOT override
+    the stall verdict — that was the original bug. The only exception is when
+    the process tree cannot be cleaned up at all, in which case the exit code
+    is :data:`TIMEOUT_CLEANUP_FAILED_EXIT_CODE` (125) to signal a more severe
+    failure.
+
     The four terminal states are distinguishable by exit code:
     - normal completion → child's exit code
-    - stalled → ``STALLED_EXIT_CODE`` (126)
-    - timed_out → ``TIMEOUT_EXIT_CODE`` (124)
+    - stalled (clean shutdown or force-kill succeeded) → ``STALLED_EXIT_CODE`` (126)
+    - stalled AND process-tree cleanup failed → ``TIMEOUT_CLEANUP_FAILED_EXIT_CODE`` (125)
+    - timed_out (safety timeout) → ``TIMEOUT_EXIT_CODE`` (124)
     - failed → child's non-zero exit code
     """
 
-    from src.sources.derived.progress import (
-        DEFAULT_SAFETY_TIMEOUT_SECONDS,
-        check_stall,
-        latest_progress_state_path,
-    )
+    from src.sources.derived.progress import check_stall
+
+    # Resolve the pinned progress path. The orchestrator MUST pass the path it
+    # pinned before spawn; we never scan the derived-runs directory in
+    # production. Falling back to ``latest_progress_state_path`` is forbidden
+    # because a stale or unrelated progress file could mask a real stall.
+    if progress_path is None:
+        # Defensive: if a caller forgot to pin a path (e.g. an old test), we
+        # refuse to invent one. Treat the build as non-stallable and just wait.
+        log.write(
+            "Stall detection skipped: no pinned progress_path was provided; "
+            "waiting for child without stall detection\n"
+        )
+        return int(proc.wait())
 
     metadata_dir = root / "data" / "metadata"
-    target = _extract_derived_target(step)
+    del metadata_dir  # Kept for clarity; not used in the pinned-path model.
     start_monotonic = time.monotonic()
     previous_processed: int | None = None
+    stall_threshold_seconds = _resolve_derived_stall_seconds(root)
     while True:
         # Check if the child has exited.
         exit_code = proc.poll()
@@ -1527,36 +1655,49 @@ def _wait_with_stall_detection(
                 return TIMEOUT_EXIT_CODE
             log.write("Process tree cleanup failed after safety timeout\n")
             return TIMEOUT_CLEANUP_FAILED_EXIT_CODE
-        # Check stall via progress state file.
-        if target is not None:
-            state_path = latest_progress_state_path(metadata_dir, target)
-            if state_path is not None:
-                report = check_stall(
-                    state_path,
-                    stall_heartbeat_seconds=DERIVED_STALL_HEARTBEAT_SECONDS,
-                    previous_processed=previous_processed,
+        # Check stall via the PINNED progress state file. We never call
+        # ``latest_progress_state_path`` here: a directory scan could pick up
+        # an unrelated or stale progress file and either mask a real stall or
+        # stall a healthy build that writes to a different path.
+        if progress_path.exists():
+            report = check_stall(
+                progress_path,
+                stall_heartbeat_seconds=stall_threshold_seconds,
+                previous_processed=previous_processed,
+            )
+            if report.stalled:
+                log.write(
+                    f"Step declared stalled: {report.reason}; "
+                    f"terminating process tree (child will commit "
+                    f"whatever was completed via cooperative cancellation)\n"
                 )
-                if report.stalled:
+                # Send SIGINT first to allow cooperative cancellation
+                # (the child's signal handler sets the cancel event,
+                # running workers finish, and the coordinator commits).
+                _send_interrupt(proc, log)
+                # Wait up to 60 seconds for graceful shutdown. Regardless of
+                # the child's exit code (0, 1, ...), the orchestrator's
+                # verdict is ``stalled`` — the child cannot override it.
+                try:
+                    proc.wait(timeout=60)
+                except subprocess.TimeoutExpired:
                     log.write(
-                        f"Step declared stalled: {report.reason}; "
-                        f"terminating process tree (child will commit "
-                        f"whatever was completed via cooperative cancellation)\n"
+                        "Child did not respond to SIGINT within 60s; force-terminating\n"
                     )
-                    # Send SIGINT first to allow cooperative cancellation
-                    # (the child's signal handler sets the cancel event,
-                    # running workers finish, and the coordinator commits).
-                    _send_interrupt(proc, log)
-                    # Wait up to 60 seconds for graceful shutdown.
-                    try:
-                        exit_code = proc.wait(timeout=60)
-                        return int(exit_code)
-                    except subprocess.TimeoutExpired:
-                        log.write("Child did not respond to SIGINT within 60s; force-terminating\n")
-                    if _terminate_process_tree(proc, log):
-                        return STALLED_EXIT_CODE
-                    log.write("Process tree cleanup failed after stall\n")
-                    return TIMEOUT_CLEANUP_FAILED_EXIT_CODE
-                previous_processed = report.processed
+                # Force-kill whatever is left. If cleanup succeeds, the stall
+                # verdict stands (126). If cleanup fails, escalate to 125.
+                if _terminate_process_tree(proc, log):
+                    log.write(
+                        "Stall verdict preserved: returning STALLED_EXIT_CODE (126); "
+                        "child exit code is ignored per the stall contract.\n"
+                    )
+                    return STALLED_EXIT_CODE
+                log.write(
+                    "Process tree cleanup failed after stall; returning "
+                    "TIMEOUT_CLEANUP_FAILED_EXIT_CODE (125)\n"
+                )
+                return TIMEOUT_CLEANUP_FAILED_EXIT_CODE
+            previous_processed = report.processed
         # Sleep before next poll. Use a short wait so we don't miss a
         # quick exit by more than the poll interval.
         try:
@@ -1564,6 +1705,49 @@ def _wait_with_stall_detection(
             return int(exit_code)
         except subprocess.TimeoutExpired:
             continue
+
+
+def _resolve_derived_stall_seconds(root: Path) -> float:
+    """Resolve the stall heartbeat threshold from settings.yaml.
+
+    Priority: settings.yaml (``derived.stall_seconds``) > code default
+    (:data:`DERIVED_STALL_HEARTBEAT_SECONDS`). Configuration errors fall back
+    to the code default rather than aborting the build — a missing or invalid
+    settings.yaml must not prevent stall detection from running at all.
+    """
+
+    try:
+        from src.sources.derived.config import load_derived_runtime_config
+
+        config = load_derived_runtime_config(root=root)
+        return float(config.stall_seconds)
+    except Exception:
+        return float(DERIVED_STALL_HEARTBEAT_SECONDS)
+
+
+def _derived_progress_path_for_step(root: Path, run_instance_key: str, step_id: str) -> Path:
+    """Resolve the pinned progress-state path for one derived build step.
+
+    Layout: ``data/metadata/derived-step-progress/<run_instance>/<step_id>.state.json``
+
+    The path is unique per (run_instance, step_id), so concurrent orchestrator
+    invocations never collide, and a resumed run writes to a fresh path
+    (the previous run's path is left in place for forensic inspection). The
+    path is generated BEFORE spawn and communicated to the child via
+    :data:`QDC_DERIVED_PROGRESS_PATH_ENV`.
+    """
+
+    safe_key = run_instance_key
+    if safe_key.startswith("run_instance:"):
+        safe_key = safe_key[len("run_instance:") :]
+    return (
+        root
+        / "data"
+        / "metadata"
+        / "derived-step-progress"
+        / safe_key
+        / f"{step_id}.state.json"
+    )
 
 
 def _extract_derived_target(step: DailyStep) -> str | None:
@@ -1928,6 +2112,14 @@ def _record_step(
     previous_child_pid = previous.get("child_pid") if isinstance(previous, dict) else None
     if previous_child_pid is not None:
         row["child_pid"] = previous_child_pid
+    # Preserve the orchestrator-pinned derived progress path and run id across
+    # status transitions (running → stalled/failed/success). These are written
+    # once before spawn and must survive the row rewrite so crash recovery can
+    # locate the exact progress file the stall detector was reading.
+    for preserve_key in ("progress_path", "derived_run_id"):
+        previous_value = previous.get(preserve_key) if isinstance(previous, dict) else None
+        if previous_value is not None:
+            row[preserve_key] = previous_value
     if blocked_by is not None:
         row["blocked_by"] = list(blocked_by)
     if reason is not None:
@@ -2154,9 +2346,13 @@ def _blocked_dependencies(
 def _final_exit_code(steps: list[DailyStep], step_state: dict[str, Any], failed_exit_code: int | None) -> int:
     if failed_exit_code is not None:
         return failed_exit_code
+    # Any fatal terminal status (failed / failed_* / partial / cancelled /
+    # stalled / timed_out / abandoned) on any step forces a non-zero final
+    # exit code. This MUST stay aligned with the unified authority in
+    # :func:`src.pipeline.step_health.is_failure_status`.
     for step in steps:
         current = step_state.get(step.id, {})
-        if str(current.get("status")) in {"failed", "failed_resource_locked", "failed_timeout_cleanup", "stalled", "abandoned"}:
+        if is_failure_status(current.get("status")):
             raw_exit_code = current.get("exit_code")
             return int(raw_exit_code) if raw_exit_code is not None else 1
     for step in steps:

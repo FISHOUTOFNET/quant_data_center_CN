@@ -12,13 +12,14 @@ The journal persists enough state to resume a derived build after a crash:
 Design constraints (from the task spec):
 
 * Atomic writes via temp-file + ``os.replace``.
-* Do NOT write the full ``completed`` list on every partition (O(n²) risk).
-  Instead, append completed ids to a separate ``.completed`` sidecar file and
-  only flush the JSON snapshot every ``flush_every`` partitions or
-  ``flush_interval_seconds``.
+* The ``completed`` set is persisted in the MAIN JSON file (there is no
+  ``.completed`` sidecar file). To avoid O(n²) write cost the JSON snapshot
+  is flushed every ``flush_every`` completed partitions (default 50) or every
+  ``flush_interval_seconds`` (default 30s), whichever comes first. Heartbeat
+  and finalize calls always force a flush.
 * Recovery validates target / schema / plan / source-snapshot before resuming.
-* Already-completed partitions are re-validated (target file + manifest exist)
-  before being skipped.
+* Already-completed partitions are re-validated (target file + manifest exist
+  + file size/mtime match + output_path matches) before being skipped.
 * If source data has changed, the old plan is discarded and a fresh plan is
   built.
 """
@@ -33,6 +34,8 @@ from datetime import datetime
 from pathlib import Path
 from threading import RLock
 from typing import Any
+
+import pandas as pd
 
 from src.utils.logging import logger
 
@@ -401,11 +404,17 @@ def validate_completed_partition(
     * A manifest row exists for ``(dataset, partition_column, partition_value)``.
     * The manifest ``source_signature`` equals the plan's ``source_signature``.
     * The manifest ``master_row_hash`` equals the plan's ``master_row_hash``.
-    * The manifest ``output_path`` points at the current final partition file.
+    * The manifest ``output_path`` is non-empty, resolves inside the store
+      root, and points at the current final partition file (fail-closed: any
+      resolution failure → validation failure).
+    * The manifest ``file_size_bytes`` matches the actual file size on disk.
+    * The manifest ``file_mtime`` matches the actual file mtime (floor to
+      millisecond precision to absorb filesystem time-precision differences).
 
     This replaces the unsafe ``security_id in journal.completed`` check that
-    could skip a partition whose file was lost or whose manifest write failed
-    in the previous run's failure window.
+    could skip a partition whose file was lost, replaced, or whose manifest
+    write failed in the previous run's failure window. All checks fail CLOSED:
+    a partition that cannot be fully validated is rebuilt, not skipped.
     """
 
     from src.storage.dataset_catalog import dataset_definition
@@ -446,19 +455,69 @@ def validate_completed_partition(
     if manifest_master != item.master_row_hash:
         return CompletedValidation(False, "master_row_hash mismatch")
 
-    # 5. manifest output_path points at the current final file.
+    # 5. manifest output_path points at the current final file (fail-closed).
+    #    A missing/empty/unresolvable/escaping output_path is a validation
+    #    failure, NOT a best-effort pass. This prevents a tampered manifest
+    #    from causing us to skip a partition whose real file was moved.
     manifest_output = str(row.get("output_path") or "")
-    if manifest_output:
-        try:
-            from pathlib import Path
+    if not manifest_output:
+        return CompletedValidation(False, "output_path missing")
+    try:
+        resolved_file = target_path.resolve()
+        resolved_manifest = (store.root / manifest_output).resolve()
+    except (OSError, ValueError) as exc:
+        return CompletedValidation(False, f"output_path resolution failed: {exc}")
+    # Reject output_path that escapes the store root.
+    try:
+        resolved_manifest.relative_to(store.root.resolve())
+    except ValueError:
+        return CompletedValidation(False, "output_path escapes store root")
+    if resolved_file != resolved_manifest:
+        return CompletedValidation(False, "output_path points elsewhere")
 
-            resolved_file = target_path.resolve()
-            resolved_manifest = (store.root / manifest_output).resolve()
-            if resolved_file != resolved_manifest:
-                return CompletedValidation(False, "output_path points elsewhere")
-        except (OSError, ValueError):
-            # Best-effort: if we cannot resolve, don't fail the resume.
-            pass
+    # 6. file_size_bytes matches actual file size.
+    try:
+        actual_stat = target_path.stat()
+    except OSError as exc:
+        return CompletedValidation(False, f"target file stat failed: {exc}")
+    manifest_size = int(row.get("file_size_bytes") or -1)
+    if manifest_size != actual_stat.st_size:
+        return CompletedValidation(
+            False,
+            f"file size mismatch: manifest={manifest_size} actual={actual_stat.st_size}",
+        )
+
+    # 7. file_mtime matches actual file mtime (floor to millisecond precision).
+    #    Filesystem time precision varies (NTFS ~100ns, FAT ~2s, ext4 ~1ns);
+    #    we floor both sides to milliseconds so the check is robust across
+    #    platforms without admitting wide minute-level tolerance that could
+    #    mask a tampered file.
+    manifest_mtime_raw = row.get("file_mtime")
+    actual_mtime_ms = int(actual_stat.st_mtime * 1000)
+    try:
+        # The manifest stores ``file_mtime`` as a naive local datetime created
+        # via ``datetime.fromtimestamp(stat.st_mtime)``. We must convert it
+        # back using the SAME naive-local-time semantics to avoid a timezone
+        # skew. ``pd.Timestamp.timestamp()`` treats naive timestamps as UTC
+        # (unlike ``datetime.timestamp()`` which treats them as local), so we
+        # explicitly convert to a naive ``datetime`` before calling
+        # ``.timestamp()`` to keep the round-trip consistent.
+        if isinstance(manifest_mtime_raw, pd.Timestamp):
+            manifest_dt = manifest_mtime_raw.to_pydatetime()
+        elif isinstance(manifest_mtime_raw, datetime):
+            manifest_dt = manifest_mtime_raw
+        elif manifest_mtime_raw is not None:
+            manifest_dt = pd.Timestamp(manifest_mtime_raw).to_pydatetime()
+        else:
+            return CompletedValidation(False, "file_mtime missing from manifest")
+        manifest_mtime_ms = int(manifest_dt.timestamp() * 1000)
+    except (TypeError, ValueError, OSError) as exc:
+        return CompletedValidation(False, f"file_mtime parse failed: {exc}")
+    if manifest_mtime_ms != actual_mtime_ms:
+        return CompletedValidation(
+            False,
+            f"file mtime mismatch: manifest_ms={manifest_mtime_ms} actual_ms={actual_mtime_ms}",
+        )
 
     return CompletedValidation(True)
 

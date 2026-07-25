@@ -2,7 +2,7 @@
 
 This module integrates the staged derived build pipeline:
 
-    BuildPlanner → DerivedBuildPlan → PartitionExecutor → CommitCoordinator
+    BuildPlanner → DerivedBuildPlan → PartitionExecutor → StreamingBuildCoordinator
 
 with a lightweight BuildJournal for crash-safe resume and a ProgressReporter
 for structured progress reporting.
@@ -43,9 +43,14 @@ from src.sources.derived.common import (
     create_derived_partition_staging_area,
     refresh_derived_registry,
 )
-from src.sources.derived.executor import (
+from src.sources.derived.config import (
+    DEFAULT_HEARTBEAT_SECONDS,
     DEFAULT_MAX_IN_FLIGHT_MULTIPLIER,
     DEFAULT_MAX_WORKERS,
+    DerivedConfigError,
+    load_derived_runtime_config,
+)
+from src.sources.derived.executor import (
     PartitionExecutor,
     StreamingBuildCoordinator,
 )
@@ -250,13 +255,21 @@ def build_cn_stock_daily_bar(
         )
 
     # The BuildRunContext binds the journal run id to the progress path so
-    # the orchestrator's stall detector reads the correct file.
+    # the orchestrator's stall detector reads the correct file. When the
+    # daily orchestrator pins a progress path via QDC_DERIVED_PROGRESS_PATH,
+    # that path wins over the journal-derived default. This is the single
+    # authoritative progress-path contract between orchestrator and child:
+    # the orchestrator decides the path before spawn, passes it via env, and
+    # reads only that path. The journal run id is unchanged so resume
+    # semantics are preserved.
     cancel_event, restore_signals = _install_cancel_signal_handler()
+    progress_path_override = _progress_path_override_from_env()
     context = make_build_run_context(
         plan=plan,
         journal=journal,
         metadata_dir=store.metadata_dir,
         cancel_event=cancel_event,
+        progress_path_override=progress_path_override,
     )
     progress = ProgressReporter(state_path=context.progress_path)
     progress.set_stage(STAGE_REPAIRING_MANIFEST, total=plan.total)
@@ -265,12 +278,31 @@ def build_cn_stock_daily_bar(
     # ------------------------------------------------------------------
     # Stage 3+4: Bounded streaming execution + per-partition commit
     # ------------------------------------------------------------------
-    # The streaming coordinator submits at most max_workers*2 futures at a
-    # time, commits each partition immediately when its future completes, and
-    # calls heartbeat every 30s independent of partition completions. This
-    # replaces the previous "submit all → collect all → batch commit" flow
-    # which held all DataFrames in memory and had a large manifest-write
-    # failure window.
+    # The streaming coordinator submits at most max_workers*multiplier futures
+    # at a time, commits each partition immediately when its future completes,
+    # and calls heartbeat every ``heartbeat_seconds`` independent of partition
+    # completions. This replaces the previous "submit all → collect all →
+    # batch commit" flow which held all DataFrames in memory and had a large
+    # manifest-write failure window.
+    #
+    # Runtime tunables (max_workers, max_in_flight_multiplier,
+    # heartbeat_seconds, stall_seconds) come from a single
+    # :class:`DerivedRuntimeConfig` loaded from ``settings.yaml`` so there is
+    # exactly one set of values in flight — no "daily-bar 30 min, orchestrator
+    # 25 min, YAML 30 min" divergence (P0-9). CLI ``--max-workers`` overrides
+    # only max_workers; the other three always come from settings.yaml (or code
+    # default). Config load is fail-fast: an invalid settings.yaml raises
+    # :class:`DerivedConfigError` instead of silently degrading.
+    try:
+        runtime_config = load_derived_runtime_config(
+            root=store.root, max_workers_override=max_workers
+        )
+    except DerivedConfigError:
+        # Re-raise so the CLI surfaces a clear error rather than silently
+        # falling back to defaults. ``load_derived_runtime_config_or_default``
+        # exists for callers (e.g. the orchestrator's stall detector) that
+        # must keep running even when settings.yaml is missing.
+        raise
     try:
         security_index = _build_security_index(effective_master)
         executor = PartitionExecutor(
@@ -279,7 +311,7 @@ def build_cn_stock_daily_bar(
             materialize_fn=_pure_materialize_wrapper(timestamp),
             source_read_fn=_read_source_partition,
             security_lookup=lambda sid: security_index.get(sid),
-            max_workers=max_workers or DEFAULT_MAX_WORKERS,
+            max_workers=runtime_config.max_workers,
             updated_at=timestamp,
         )
         coordinator = StreamingBuildCoordinator(
@@ -289,7 +321,8 @@ def build_cn_stock_daily_bar(
             progress=progress,
             journal=journal,
             cancel_event=cancel_event,
-            max_in_flight_multiplier=DEFAULT_MAX_IN_FLIGHT_MULTIPLIER,
+            max_in_flight_multiplier=runtime_config.max_in_flight_multiplier,
+            heartbeat_interval_seconds=runtime_config.heartbeat_seconds,
         )
         # Open one ManifestWriteSession (one DuckDB connection) for the entire
         # build and attach it to the coordinator. The coordinator is the sole
@@ -434,6 +467,25 @@ def _read_source_partition(store: ParquetStore, dataset_id: str, partition_value
     if partition_column is None:
         return store.read_dataset(dataset_id)
     return store.read_dataset(dataset_id, {partition_column: partition_value})
+
+
+def _progress_path_override_from_env() -> Path | None:
+    """Read the orchestrator-pinned progress path from the environment.
+
+    The daily orchestrator sets ``QDC_DERIVED_PROGRESS_PATH`` before spawning
+    a derived build subprocess so its stall detector can read the exact file
+    the child writes. When the variable is absent (manual CLI invocation),
+    ``None`` is returned and the journal-derived default path is used.
+
+    This is the ONLY place the derived build reads this env var, keeping the
+    progress-path contract in one location instead of scattered across the
+    business entrypoints.
+    """
+
+    raw = os.environ.get("QDC_DERIVED_PROGRESS_PATH")
+    if not raw:
+        return None
+    return Path(raw).expanduser().resolve()
 
 
 def _install_cancel_signal_handler() -> tuple[Event, Callable[[], None]]:
