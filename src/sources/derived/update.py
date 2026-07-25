@@ -57,6 +57,7 @@ def build_derived_datasets(
     build_views: bool = True,
     refresh_registry: bool = True,
     now: Callable[[], datetime] | None = None,
+    max_workers: int | None = None,
 ) -> list[dict[str, object]]:
     if mode not in {"full", "incremental"}:
         raise ValueError(f"Unsupported derived build mode: {mode}")
@@ -91,16 +92,19 @@ def build_derived_datasets(
                 "valuation": build_cn_stock_valuation,
             }[target]
             target_security_ids = _target_security_ids(target, mode, incremental_plan or IncrementalPlan({}, (), {}))
-            results.append(
-                builder(
-                    root=store.root,
-                    security_ids=target_security_ids,
-                    changed_since=changed_since,
-                    build_views=False,
-                    refresh_registry=False,
-                    now=now,
-                )
+            builder_kwargs: dict[str, object] = dict(
+                root=store.root,
+                security_ids=target_security_ids,
+                changed_since=changed_since,
+                build_views=False,
+                refresh_registry=False,
+                now=now,
             )
+            # Only daily_bar (and future BuildPlanner-based targets) consume
+            # max_workers. Pass it through where the builder accepts it.
+            if target in ("daily_bar",):
+                builder_kwargs["max_workers"] = max_workers
+            results.append(builder(**builder_kwargs))
 
         if refresh_registry:
             refresh_derived_registry(store, [str(result["dataset"]) for result in results])

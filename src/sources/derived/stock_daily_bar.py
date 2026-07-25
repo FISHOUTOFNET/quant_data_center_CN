@@ -44,8 +44,10 @@ from src.sources.derived.common import (
     refresh_derived_registry,
 )
 from src.sources.derived.executor import (
-    CommitCoordinator,
+    DEFAULT_MAX_IN_FLIGHT_MULTIPLIER,
+    DEFAULT_MAX_WORKERS,
     PartitionExecutor,
+    StreamingBuildCoordinator,
 )
 from src.sources.derived.journal import (
     JOURNAL_STATUS_ABANDONED,
@@ -55,6 +57,7 @@ from src.sources.derived.journal import (
     JOURNAL_STATUS_FAILED,
     cleanup_old_journals,
     find_resumable_journal,
+    resume_filter_completed,
 )
 from src.sources.derived.manifest import (
     cleanup_stale_derived_manifests,
@@ -80,6 +83,7 @@ from src.sources.derived.progress import (
     STAGE_PLANNING,
     STAGE_REPAIRING_MANIFEST,
 )
+from src.sources.derived.run_context import make_build_run_context
 from src.sources.derived.security_master import build_security_master
 from src.storage.dataset_catalog import DATASET_CATALOG
 from src.storage.duckdb_store import DuckDBStore
@@ -99,7 +103,6 @@ AKSHARE_DAILY_SOURCES = {
 }
 CN_STOCK_DAILY_BAR_COLUMNS = tuple(field.name for field in CN_STOCK_DAILY_BAR_SCHEMA)
 DAILY_BAR_SCHEMA_VERSION = "1"
-DEFAULT_MAX_WORKERS = 4
 
 
 def build_cn_stock_daily_bar(
@@ -168,12 +171,13 @@ def build_cn_stock_daily_bar(
             }
 
     # ------------------------------------------------------------------
-    # Stage 1: Plan
+    # Stage 1: Plan (must happen before run id is decided)
     # ------------------------------------------------------------------
-    progress = ProgressReporter(
-        state_path=store.metadata_dir / "derived-runs" / f"{run_id}.state.json",
-    )
-    progress.set_stage(STAGE_PLANNING)
+    # A throwaway reporter is used only for the planning stage; the real
+    # progress reporter is created AFTER the run id is finalized so its state
+    # path is bound to the journal's run id (not a fresh id that gets swapped).
+    planning_reporter = ProgressReporter()
+    planning_reporter.set_stage(STAGE_PLANNING)
 
     source_dataset_specs = (
         tuple((dataset_id, "baostock_code") for dataset_id in BAOSTOCK_DAILY_SOURCES)
@@ -192,7 +196,7 @@ def build_cn_stock_daily_bar(
 
     if not plan.partitions:
         logger.info("build_cn_stock_daily_bar: plan has 0 partitions; nothing to build")
-        progress.final(STAGE_COMPLETED)
+        planning_reporter.final(STAGE_COMPLETED)
         _finalize_build(store, build_views, refresh_registry, ("cn_stock_daily_bar",))
         return {
             "dataset": "cn_stock_daily_bar",
@@ -203,7 +207,7 @@ def build_cn_stock_daily_bar(
         }
 
     # ------------------------------------------------------------------
-    # Stage 2: Check for a resumable journal
+    # Stage 2: Find resumable journal → decide final run id → create context
     # ------------------------------------------------------------------
     journal = find_resumable_journal(
         metadata_dir=store.metadata_dir,
@@ -220,7 +224,18 @@ def build_cn_stock_daily_bar(
             len(journal.completed),
             plan.total,
         )
-        run_id = journal.run_id
+        # Re-validate each journal-completed partition against the target file
+        # and manifest. A partition whose file/manifest is missing or whose
+        # signature no longer matches is removed from ``completed`` so it is
+        # rebuilt on this resume (instead of being silently skipped).
+        discarded = resume_filter_completed(
+            store, journal, plan, dataset_id="cn_stock_daily_bar"
+        )
+        if discarded:
+            logger.info(
+                "build_cn_stock_daily_bar: resume validation discarded {} stale completed partition(s)",
+                discarded,
+            )
     else:
         journal = BuildJournal.create(
             run_id=run_id,
@@ -234,19 +249,28 @@ def build_cn_stock_daily_bar(
             now=timestamp,
         )
 
+    # The BuildRunContext binds the journal run id to the progress path so
+    # the orchestrator's stall detector reads the correct file.
+    cancel_event, restore_signals = _install_cancel_signal_handler()
+    context = make_build_run_context(
+        plan=plan,
+        journal=journal,
+        metadata_dir=store.metadata_dir,
+        cancel_event=cancel_event,
+    )
+    progress = ProgressReporter(state_path=context.progress_path)
     progress.set_stage(STAGE_REPAIRING_MANIFEST, total=plan.total)
     progress.set_stage(STAGE_BUILDING_PARTITIONS, total=plan.total)
 
     # ------------------------------------------------------------------
-    # Stage 3: Execute (bounded concurrency, pure transforms)
+    # Stage 3+4: Bounded streaming execution + per-partition commit
     # ------------------------------------------------------------------
-    # Cooperative cancellation: the orchestrator (or an external monitor) can
-    # request a graceful stop by sending SIGINT (Ctrl+C). The signal handler
-    # sets ``cancel_event``, which causes the executor to stop submitting new
-    # work and return early. Already-running workers finish their current
-    # partition; the coordinator then commits whatever was completed. This
-    # avoids the "kill -9 loses everything" failure mode.
-    cancel_event, restore_signals = _install_cancel_signal_handler()
+    # The streaming coordinator submits at most max_workers*2 futures at a
+    # time, commits each partition immediately when its future completes, and
+    # calls heartbeat every 30s independent of partition completions. This
+    # replaces the previous "submit all → collect all → batch commit" flow
+    # which held all DataFrames in memory and had a large manifest-write
+    # failure window.
     try:
         security_index = _build_security_index(effective_master)
         executor = PartitionExecutor(
@@ -258,29 +282,35 @@ def build_cn_stock_daily_bar(
             max_workers=max_workers or DEFAULT_MAX_WORKERS,
             updated_at=timestamp,
         )
-        results = executor.execute(plan, progress=progress, journal=journal, cancel_event=cancel_event)
+        coordinator = StreamingBuildCoordinator(
+            executor=executor,
+            store=store,
+            dataset_id="cn_stock_daily_bar",
+            progress=progress,
+            journal=journal,
+            cancel_event=cancel_event,
+            max_in_flight_multiplier=DEFAULT_MAX_IN_FLIGHT_MULTIPLIER,
+        )
+        # Open one ManifestWriteSession (one DuckDB connection) for the entire
+        # build and attach it to the coordinator. The coordinator is the sole
+        # metadata writer.
+        with store._metadata_store.manifest_write_session() as session:
+            coordinator.attach_manifest_session(
+                session,
+                run_id=context.run_id,
+                writer_thread="coordinator",
+            )
+            counters = coordinator.run(plan)
         cancelled = cancel_event.is_set()
+        if cancelled:
+            progress.set_stage(STAGE_CANCELLING, total=plan.total)
+        committed = counters.committed
+        failed = counters.failed
     finally:
         restore_signals()
 
-    # ------------------------------------------------------------------
-    # Stage 4: Commit (single-writer metadata)
-    # ------------------------------------------------------------------
-    progress.set_stage(STAGE_COMMITTING, total=plan.total)
-    coordinator = CommitCoordinator(
-        store=store,
-        dataset_id="cn_stock_daily_bar",
-        progress=progress,
-        journal=journal,
-    )
-    committed, failed = coordinator.commit_all(results)
-
     # When building for the entire master (no explicit security_ids filter),
     # remove target partitions whose security_id is no longer in the master.
-    # This matches the old full-dataset staging semantics: a partition whose
-    # security was delisted or never had source data must not linger. When
-    # ``security_ids`` is provided we only touch those securities and leave
-    # other partitions alone.
     if not security_ids:
         _remove_stale_target_partitions(store, "cn_stock_daily_bar", effective_master)
 
@@ -309,15 +339,14 @@ def build_cn_stock_daily_bar(
     cleanup_old_journals(store.metadata_dir, keep_recent=20, now=timestamp)
     _finalize_build(store, build_views, refresh_registry, ("cn_stock_daily_bar",))
 
-    total_rows = sum(r.row_count for r in results if r is not None)
     return {
         "dataset": "cn_stock_daily_bar",
         "status": build_status,
-        "rows": total_rows,
+        "rows": counters.rows,
         "partitions": committed,
         "failed": failed,
         "cancelled": cancelled,
-        "run_id": run_id,
+        "run_id": context.run_id,
         "plan_hash": plan.plan_hash,
         "source_snapshot_hash": plan.source_snapshot_hash,
     }

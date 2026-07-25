@@ -202,6 +202,25 @@ class BuildJournal:
         with self._lock:
             return security_id in self.completed
 
+    def discard_completed(self, security_id: str, *, reason: str = "") -> None:
+        """Remove a partition from the completed set (resume validation failed).
+
+        Called when :func:`validate_completed_partition` determines that a
+        previously-committed partition is no longer consistent (file missing,
+        manifest missing, signature mismatch, ...). The partition will be
+        rebuilt on this resume.
+        """
+
+        with self._lock:
+            self.completed.discard(security_id)
+            self._dirty = True
+        logger.info(
+            "BuildJournal: discarding completed partition {} (reason: {})",
+            security_id,
+            reason or "unspecified",
+        )
+        self._maybe_flush(force=True)
+
     # ------------------------------------------------------------------
     # Internal
     # ------------------------------------------------------------------
@@ -349,3 +368,120 @@ def _parse_dt(value: object) -> datetime | None:
         return datetime.fromisoformat(value)
     except ValueError:
         return None
+
+
+# ---------------------------------------------------------------------------
+# Resume validation: verify a journal "completed" partition is truly committed
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class CompletedValidation:
+    """Result of validating one journal-completed partition on resume.
+
+    If validation fails, the partition must be rebuilt (removed from the
+    journal's ``completed`` set).
+    """
+
+    valid: bool
+    reason: str | None = None
+
+
+def validate_completed_partition(
+    store: "ParquetStore",
+    item: "DerivedPartitionPlan",
+    *,
+    dataset_id: str,
+) -> CompletedValidation:
+    """Verify that a journal-completed partition is truly committed.
+
+    Checks (all must pass for the partition to be skipped on resume):
+
+    * The target Parquet file exists on disk.
+    * A manifest row exists for ``(dataset, partition_column, partition_value)``.
+    * The manifest ``source_signature`` equals the plan's ``source_signature``.
+    * The manifest ``master_row_hash`` equals the plan's ``master_row_hash``.
+    * The manifest ``output_path`` points at the current final partition file.
+
+    This replaces the unsafe ``security_id in journal.completed`` check that
+    could skip a partition whose file was lost or whose manifest write failed
+    in the previous run's failure window.
+    """
+
+    from src.storage.dataset_catalog import dataset_definition
+
+    definition = dataset_definition(dataset_id)
+    partition_column = definition.partition_column or "security_id"
+    partition_value = item.security_id
+
+    # 1. Target file exists.
+    try:
+        target_path = store.dataset_path(dataset_id, {partition_column: partition_value})
+    except (KeyError, ValueError):
+        return CompletedValidation(False, "could not resolve target partition path")
+    if not target_path.exists():
+        return CompletedValidation(False, "target parquet file missing")
+
+    # 2. Manifest row exists.
+    manifests = store.read_dataset_partition_manifest_batch([dataset_id])
+    if manifests.empty:
+        return CompletedValidation(False, "manifest batch empty")
+    mask = (
+        (manifests["dataset"].astype("string") == dataset_id)
+        & (manifests["partition_column"].astype("string") == partition_column)
+        & (manifests["partition_value"].astype("string") == partition_value)
+    )
+    matched = manifests.loc[mask]
+    if matched.empty:
+        return CompletedValidation(False, "manifest row missing")
+    row = matched.iloc[-1]
+
+    # 3. source_signature matches the plan.
+    manifest_sig = str(row.get("source_signature") or "")
+    if manifest_sig != item.source_signature:
+        return CompletedValidation(False, "source_signature mismatch")
+
+    # 4. master_row_hash matches the plan.
+    manifest_master = str(row.get("master_row_hash") or "")
+    if manifest_master != item.master_row_hash:
+        return CompletedValidation(False, "master_row_hash mismatch")
+
+    # 5. manifest output_path points at the current final file.
+    manifest_output = str(row.get("output_path") or "")
+    if manifest_output:
+        try:
+            from pathlib import Path
+
+            resolved_file = target_path.resolve()
+            resolved_manifest = (store.root / manifest_output).resolve()
+            if resolved_file != resolved_manifest:
+                return CompletedValidation(False, "output_path points elsewhere")
+        except (OSError, ValueError):
+            # Best-effort: if we cannot resolve, don't fail the resume.
+            pass
+
+    return CompletedValidation(True)
+
+
+def resume_filter_completed(
+    store: "ParquetStore",
+    journal: "BuildJournal",
+    plan: "DerivedBuildPlan",
+    *,
+    dataset_id: str,
+) -> int:
+    """Remove journal-completed partitions that fail validation.
+
+    Returns the number of partitions removed from ``completed`` (i.e. the
+    number that must be rebuilt on this resume).
+    """
+
+    removed = 0
+    for item in plan.partitions:
+        if not journal.is_completed(item.security_id):
+            continue
+        result = validate_completed_partition(store, item, dataset_id=dataset_id)
+        if not result.valid:
+            journal.discard_completed(item.security_id, reason=result.reason or "validation failed")
+            removed += 1
+    return removed

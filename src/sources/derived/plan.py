@@ -44,7 +44,9 @@ class ChangeReason(str, Enum):
 
     SOURCE_CHANGED = "source_changed"
     TARGET_MISSING = "target_missing"
-    MANIFEST_MISSING = "manifest_missing"
+    TARGET_MANIFEST_MISSING = "target_manifest_missing"
+    SOURCE_MANIFEST_MISSING = "source_manifest_missing"
+    MANIFEST_MISSING = "manifest_missing"  # Legacy alias; new code uses the specific reasons above.
     FORCE_REBUILD = "force_rebuild"
     SCHEMA_CHANGED = "schema_changed"
 
@@ -282,14 +284,18 @@ class BuildPlanner:
                 continue
             source_rows = self._collect_source_rows(source_snapshot, source_pairs)
             if source_rows is None:
-                # Missing manifest even after preflight repair → mark and skip.
+                # Source manifest missing even after preflight repair. This is
+                # an unrecoverable data-integrity error for this partition: we
+                # must NOT build (we cannot compute a source signature), and we
+                # must NOT report success. Emit a plan flagged
+                # SOURCE_MANIFEST_MISSING so the executor records a failure.
                 plans.append(
                     DerivedPartitionPlan(
                         security_id=security_id,
                         source_signature="",
                         master_row_hash="",
                         source_partitions=tuple(source_pairs),
-                        change_reason=ChangeReason.MANIFEST_MISSING,
+                        change_reason=ChangeReason.SOURCE_MANIFEST_MISSING,
                     )
                 )
                 continue
@@ -302,7 +308,12 @@ class BuildPlanner:
             else:
                 target_manifest = _target_manifest_row(target_snapshot, security_id)
                 if target_manifest is None:
-                    reason = ChangeReason.MANIFEST_MISSING
+                    # Target parquet exists but its manifest row is missing.
+                    # This is the recovery window for "file committed but
+                    # manifest write failed". We rebuild the partition through
+                    # the normal path so the manifest is restored. This is
+                    # distinct from SOURCE_MANIFEST_MISSING (which fails).
+                    reason = ChangeReason.TARGET_MANIFEST_MISSING
                 else:
                     target_signature = _clean_string(target_manifest.get("source_signature"))
                     target_master_hash = _clean_string(target_manifest.get("master_row_hash"))
