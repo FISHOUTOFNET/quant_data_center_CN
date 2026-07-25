@@ -19,7 +19,6 @@ Policy:
 
 from __future__ import annotations
 
-import json
 import os
 from collections.abc import Collection
 from dataclasses import dataclass, field
@@ -30,7 +29,6 @@ import click
 
 from src.utils import paths
 from src.utils.paths import (
-    MANAGED_ROOT_LAYOUT_VERSION,
     MANAGED_ROOT_MARKER,
     LogRootAuthorizationError,
     validate_managed_log_root,
@@ -257,19 +255,6 @@ def _reject_dangerous_root(root: Path) -> None:
     repo_root = paths.project_root().resolve()
     if resolved == repo_root or paths.is_path_inside(resolved, repo_root):
         raise LogCleanupError(f"Refusing to clean repository or repo-internal path: {raw}")
-
-
-def _ensure_managed_root_marker(root: Path) -> None:
-    """Create the managed-root marker if it does not exist."""
-
-    marker = root / MANAGED_ROOT_MARKER
-    if marker.exists():
-        return
-    payload = {
-        "application": "QuantDataCenter",
-        "layout_version": MANAGED_ROOT_LAYOUT_VERSION,
-    }
-    marker.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 @dataclass(frozen=True)
