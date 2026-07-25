@@ -89,7 +89,9 @@ def build_baostock_market_session_manifest(
     processed_codes = sorted(set(success_by_code) | set(failed_by_code) | set(skipped_by_code))
     succeeded_codes = sorted(success_by_code)
     failed_codes = sorted(failed_by_code)
-    skipped_codes = sorted(code for code in skipped_by_code if code not in success_by_code and code not in failed_by_code)
+    skipped_codes = sorted(
+        code for code in skipped_by_code if code not in success_by_code and code not in failed_by_code
+    )
 
     summary = health_summary
     summary_path_text = _str_path(health_summary_path)
@@ -136,9 +138,9 @@ def _manifest_datasets(records: list[dict[str, object]], session_mode: str) -> l
     actual = [str(record.get("dataset", "") or "") for record in records]
     ordered = list(base)
     for dataset in actual:
-        if dataset == BAOSTOCK_CN_STOCK_ADJUSTMENT_FACTOR_DATASET and dataset not in ordered:
-            ordered.append(dataset)
-        elif dataset in DAILY_BAR_DATASETS and dataset not in ordered:
+        if (dataset == BAOSTOCK_CN_STOCK_ADJUSTMENT_FACTOR_DATASET and dataset not in ordered) or (
+            dataset in DAILY_BAR_DATASETS and dataset not in ordered
+        ):
             ordered.append(dataset)
     return ordered
 

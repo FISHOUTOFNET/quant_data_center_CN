@@ -21,6 +21,7 @@ The core transformation is split into two layers:
 
 from __future__ import annotations
 
+import contextlib
 import os
 import shutil
 import signal
@@ -34,19 +35,10 @@ from typing import Any
 import pandas as pd
 
 from src.sources.derived.common import (
-    cleanup_derived_dataset_staging,
-    cleanup_derived_partition_staging,
     cleanup_stale_derived_staging,
-    commit_derived_dataset_staging,
-    commit_derived_partition_staging,
-    create_derived_dataset_staging_area,
-    create_derived_partition_staging_area,
     refresh_derived_registry,
 )
 from src.sources.derived.config import (
-    DEFAULT_HEARTBEAT_SECONDS,
-    DEFAULT_MAX_IN_FLIGHT_MULTIPLIER,
-    DEFAULT_MAX_WORKERS,
     DerivedConfigError,
     load_derived_runtime_config,
 )
@@ -55,38 +47,30 @@ from src.sources.derived.executor import (
     StreamingBuildCoordinator,
 )
 from src.sources.derived.journal import (
-    JOURNAL_STATUS_ABANDONED,
     JOURNAL_STATUS_CANCELLED,
-    BuildJournal,
     JOURNAL_STATUS_COMPLETED,
     JOURNAL_STATUS_FAILED,
+    BuildJournal,
     cleanup_old_journals,
     find_resumable_journal,
     resume_filter_completed,
 )
 from src.sources.derived.manifest import (
     cleanup_stale_derived_manifests,
-    current_source_signature_for_security,
     delete_derived_partition_manifest,
-    source_partition_pairs_for_security,
-    upsert_derived_partition_manifest,
 )
 from src.sources.derived.plan import (
     BuildPlanner,
-    ChangeReason,
-    DerivedBuildPlan,
-    DerivedPartitionPlan,
 )
 from src.sources.derived.progress import (
-    ProgressReporter,
     STAGE_BUILDING_PARTITIONS,
     STAGE_CANCELLED,
     STAGE_CANCELLING,
     STAGE_COMPLETED,
-    STAGE_COMMITTING,
     STAGE_FAILED,
     STAGE_PLANNING,
     STAGE_REPAIRING_MANIFEST,
+    ProgressReporter,
 )
 from src.sources.derived.run_context import make_build_run_context
 from src.sources.derived.security_master import build_security_master
@@ -158,9 +142,9 @@ def build_cn_stock_daily_bar(
     effective_master = master
     if security_ids:
         requested = {sid.upper() for sid in security_ids if sid}
-        effective_master = master.loc[
-            master["security_id"].astype("string").str.upper().isin(requested)
-        ].reset_index(drop=True)
+        effective_master = master.loc[master["security_id"].astype("string").str.upper().isin(requested)].reset_index(
+            drop=True
+        )
         if effective_master.empty:
             logger.warning(
                 "build_cn_stock_daily_bar: no securities matched filter={}",
@@ -184,9 +168,8 @@ def build_cn_stock_daily_bar(
     planning_reporter = ProgressReporter()
     planning_reporter.set_stage(STAGE_PLANNING)
 
-    source_dataset_specs = (
-        tuple((dataset_id, "baostock_code") for dataset_id in BAOSTOCK_DAILY_SOURCES)
-        + tuple((dataset_id, "akshare_code") for dataset_id in AKSHARE_DAILY_SOURCES)
+    source_dataset_specs = tuple((dataset_id, "baostock_code") for dataset_id in BAOSTOCK_DAILY_SOURCES) + tuple(
+        (dataset_id, "akshare_code") for dataset_id in AKSHARE_DAILY_SOURCES
     )
     planner = BuildPlanner(
         store=store,
@@ -233,9 +216,7 @@ def build_cn_stock_daily_bar(
         # and manifest. A partition whose file/manifest is missing or whose
         # signature no longer matches is removed from ``completed`` so it is
         # rebuilt on this resume (instead of being silently skipped).
-        discarded = resume_filter_completed(
-            store, journal, plan, dataset_id="cn_stock_daily_bar"
-        )
+        discarded = resume_filter_completed(store, journal, plan, dataset_id="cn_stock_daily_bar")
         if discarded:
             logger.info(
                 "build_cn_stock_daily_bar: resume validation discarded {} stale completed partition(s)",
@@ -294,9 +275,7 @@ def build_cn_stock_daily_bar(
     # default). Config load is fail-fast: an invalid settings.yaml raises
     # :class:`DerivedConfigError` instead of silently degrading.
     try:
-        runtime_config = load_derived_runtime_config(
-            root=store.root, max_workers_override=max_workers
-        )
+        runtime_config = load_derived_runtime_config(root=store.root, max_workers_override=max_workers)
     except DerivedConfigError:
         # Re-raise so the CLI surfaces a clear error rather than silently
         # falling back to defaults. ``load_derived_runtime_config_or_default``
@@ -533,15 +512,11 @@ def _install_cancel_signal_handler() -> tuple[Event, Callable[[], None]]:
             previous_term = None
 
     def _restore() -> None:
-        try:
+        with contextlib.suppress(ValueError, OSError, TypeError):
             signal.signal(signal.SIGINT, previous_int)
-        except (ValueError, OSError, TypeError):
-            pass
         if previous_term is not None and hasattr(signal, "SIGTERM"):
-            try:
+            with contextlib.suppress(ValueError, OSError, TypeError):
                 signal.signal(signal.SIGTERM, previous_term)
-            except (ValueError, OSError, TypeError):
-                pass
 
     return cancel_event, _restore
 

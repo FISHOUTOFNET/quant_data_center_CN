@@ -159,8 +159,7 @@ def commit_derived_dataset_staging(area: DerivedDatasetStagingArea) -> None:
         }
         logger.exception("Failed to promote staged derived dataset; context={}", context)
         raise RuntimeError(
-            "Failed to promote staged derived dataset; "
-            + "; ".join(f"{key}={value}" for key, value in context.items())
+            "Failed to promote staged derived dataset; " + "; ".join(f"{key}={value}" for key, value in context.items())
         ) from exc
     finally:
         if backup_created and area.backup_dir.exists():

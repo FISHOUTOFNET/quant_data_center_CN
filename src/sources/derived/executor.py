@@ -49,9 +49,6 @@ from src.sources.derived.common import (
     create_derived_partition_staging_area,
 )
 from src.sources.derived.journal import BuildJournal
-from src.sources.derived.manifest import (
-    upsert_derived_partition_manifest,
-)
 from src.sources.derived.plan import ChangeReason, DerivedBuildPlan, DerivedPartitionPlan
 from src.sources.derived.progress import ProgressReporter
 from src.storage.metadata_store import ManifestWriteSession
@@ -272,8 +269,7 @@ class PartitionPromotion:
             self._rollback_partial_promotion()
         except Exception as rollback_exc:
             raise PartitionPromotionRecoveryError(
-                f"PartitionPromotion rollback failed for "
-                f"partition={self._staging.partition_value}: {rollback_exc}"
+                f"PartitionPromotion rollback failed for partition={self._staging.partition_value}: {rollback_exc}"
             ) from rollback_exc
 
     def _rollback_partial_promotion(self) -> None:
@@ -312,8 +308,7 @@ class PartitionPromotion:
                     if area.final_partition_dir.exists():
                         # Unexpected: final exists in delete mode after promotion.
                         raise RuntimeError(
-                            f"Cannot rollback delete promotion: final reappeared at "
-                            f"{area.final_partition_dir}"
+                            f"Cannot rollback delete promotion: final reappeared at {area.final_partition_dir}"
                         )
                     if area.backup_dir.exists():
                         area.backup_dir.rename(area.final_partition_dir)
@@ -453,9 +448,7 @@ class PartitionExecutor:
                 return None
             source_frames = self._read_source_frames(item)
             df = self._materialize_fn(security, source_frames)
-            staging = create_derived_partition_staging_area(
-                self._store, self._dataset_id, item.security_id
-            )
+            staging = create_derived_partition_staging_area(self._store, self._dataset_id, item.security_id)
             write_store = ParquetStore(
                 root=self._store.root,
                 parquet_dir=staging.staging_root,
@@ -481,9 +474,7 @@ class PartitionExecutor:
                     partition={"security_id": item.security_id},
                     mode="replace",
                 )
-                manifest = self._prepare_manifest(
-                    df, item, write_result.row_count, staging.staging_partition_dir
-                )
+                manifest = self._prepare_manifest(df, item, write_result.row_count, staging.staging_partition_dir)
             # Release the DataFrame reference before returning.
             del df
             return StagedPartitionResult(
@@ -530,9 +521,7 @@ class PartitionExecutor:
         frames: dict[str, pd.DataFrame] = {}
         for dataset_id, partition_value in item.source_partitions:
             if dataset_id not in frames:
-                frames[dataset_id] = self._source_read_fn(
-                    self._store, dataset_id, partition_value
-                )
+                frames[dataset_id] = self._source_read_fn(self._store, dataset_id, partition_value)
         return frames
 
 
@@ -655,9 +644,7 @@ class StreamingBuildCoordinator:
         try:
             self._commit_partition(result)
         except Exception as exc:
-            logger.exception(
-                "StreamingBuildCoordinator: commit failed for {}", result.security_id
-            )
+            logger.exception("StreamingBuildCoordinator: commit failed for {}", result.security_id)
             self._record_failed(result.security_id, f"{type(exc).__name__}: {exc}")
             counters.failed += 1
             return
@@ -735,13 +722,13 @@ class StreamingBuildCoordinator:
         """Write (or delete) the manifest row via the session."""
 
         session = self._manifest_session
+        if session is None:
+            raise RuntimeError("manifest session not attached before _write_manifest")
         if result.delete_partition:
             session.delete_partition(self._dataset_id, partition_column, result.security_id)
             return
         if result.manifest is None:
-            raise RuntimeError(
-                f"commit_partition: no manifest for non-delete partition {result.security_id}"
-            )
+            raise RuntimeError(f"commit_partition: no manifest for non-delete partition {result.security_id}")
         manifest = result.manifest
         final_path = result.staging.final_partition_dir / "data.parquet"
         if not final_path.exists():

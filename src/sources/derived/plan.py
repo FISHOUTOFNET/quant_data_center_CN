@@ -239,7 +239,7 @@ class BuildPlanner:
             len(missing),
             self.target,
         )
-        for dataset_id, partition_column, partition_value in missing:
+        for dataset_id, _partition_column, partition_value in missing:
             try:
                 rebuild_one_partition_manifest(
                     store=self.store,
@@ -398,10 +398,10 @@ def _hash_source_snapshot(snapshot: PartitionManifestSnapshot, dataset_id: str) 
     """Stable hash of the source manifest rows that feed into ``dataset_id``."""
 
     if snapshot.rows.empty:
-        return hashlib.sha256(f"{dataset_id}:empty".encode("utf-8")).hexdigest()
-    payload = snapshot.rows.sort_values(
-        by=["dataset", "partition_column", "partition_value"]
-    )[["dataset", "partition_column", "partition_value", "semantic_hash", "source_signature"]]
+        return hashlib.sha256(f"{dataset_id}:empty".encode()).hexdigest()
+    payload = snapshot.rows.sort_values(by=["dataset", "partition_column", "partition_value"])[
+        ["dataset", "partition_column", "partition_value", "semantic_hash", "source_signature"]
+    ]
     return hashlib.sha256(
         json.dumps(
             {
@@ -428,9 +428,7 @@ def _hash_plan(
         "signatures": [p.source_signature for p in partitions],
         "reasons": [p.change_reason.value for p in partitions],
     }
-    return hashlib.sha256(
-        json.dumps(payload, sort_keys=True, default=str).encode("utf-8")
-    ).hexdigest()
+    return hashlib.sha256(json.dumps(payload, sort_keys=True, default=str).encode("utf-8")).hexdigest()
 
 
 def _clean_string(value: Any) -> str:

@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import os
-import uuid
 from datetime import datetime
 from pathlib import Path
 
@@ -11,7 +9,6 @@ import pytest
 
 from src.tools import run_logging
 from src.utils import paths
-
 
 # ---------------------------------------------------------------------------
 # RuntimePaths

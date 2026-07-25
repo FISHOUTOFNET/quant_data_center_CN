@@ -101,9 +101,7 @@ def make_build_run_context(
     writing progress to the orchestrator-pinned path.
     """
 
-    journal_path, default_progress_path = build_run_context_paths(
-        metadata_dir=metadata_dir, run_id=journal.run_id
-    )
+    journal_path, default_progress_path = build_run_context_paths(metadata_dir=metadata_dir, run_id=journal.run_id)
     progress_path = progress_path_override or default_progress_path
     return BuildRunContext(
         run_id=journal.run_id,

@@ -30,17 +30,12 @@ from src.sources.derived.common import (
 )
 from src.sources.derived.executor import (
     DEFAULT_MAX_IN_FLIGHT_MULTIPLIER,
-    MAX_WORKERS_CAP,
     BuildCounters,
     PartitionExecutor,
     PartitionPromotion,
-    PreparedPartitionManifest,
     StreamingBuildCoordinator,
-    StagedPartitionResult,
 )
 from src.sources.derived.journal import (
-    JOURNAL_STATUS_CANCELLED,
-    JOURNAL_STATUS_COMPLETED,
     BuildJournal,
     resume_filter_completed,
     validate_completed_partition,
@@ -173,9 +168,7 @@ def _make_plan(store: ParquetStore, master: pd.DataFrame, *, force: bool = True)
         store=store,
         target="daily_bar",
         dataset_id="cn_stock_daily_bar",
-        source_dataset_specs=tuple(
-            (dataset_id, "baostock_code") for dataset_id in BAOSTOCK_DAILY_SOURCES
-        ),
+        source_dataset_specs=tuple((dataset_id, "baostock_code") for dataset_id in BAOSTOCK_DAILY_SOURCES),
         master=master,
         force_rebuild=force,
     )
@@ -371,7 +364,6 @@ def test_streaming_coordinator_rollback_on_manifest_failure(tmp_path: Path) -> N
     meta_store = DuckDBMetadataStore(root=tmp_path)
     with meta_store.manifest_write_session() as session:
         coordinator.attach_manifest_session(session, run_id="test-rollback")
-        original_upsert = session.upsert_partition
         call_count = {"n": 0}
 
         def failing_upsert(row):
@@ -428,9 +420,7 @@ def test_target_manifest_missing_triggers_rebuild_not_skip(tmp_path: Path) -> No
         store=store,
         target="daily_bar",
         dataset_id="cn_stock_daily_bar",
-        source_dataset_specs=tuple(
-            (dataset_id, "baostock_code") for dataset_id in BAOSTOCK_DAILY_SOURCES
-        ),
+        source_dataset_specs=tuple((dataset_id, "baostock_code") for dataset_id in BAOSTOCK_DAILY_SOURCES),
         master=master,
         force_rebuild=True,
     )
@@ -469,9 +459,7 @@ def test_target_manifest_missing_triggers_rebuild_not_skip(tmp_path: Path) -> No
     # Pick the first partition and delete its manifest row (simulate failed
     # manifest write — file exists, manifest row missing).
     target_sid = plan.partitions[0].security_id
-    store._metadata_store.delete_dataset_partition_manifest(
-        "cn_stock_daily_bar", "security_id", target_sid
-    )
+    store._metadata_store.delete_dataset_partition_manifest("cn_stock_daily_bar", "security_id", target_sid)
     store.close()
 
     # Re-plan without force_rebuild: TARGET_MANIFEST_MISSING must be emitted.
@@ -479,9 +467,7 @@ def test_target_manifest_missing_triggers_rebuild_not_skip(tmp_path: Path) -> No
         store=store,
         target="daily_bar",
         dataset_id="cn_stock_daily_bar",
-        source_dataset_specs=tuple(
-            (dataset_id, "baostock_code") for dataset_id in BAOSTOCK_DAILY_SOURCES
-        ),
+        source_dataset_specs=tuple((dataset_id, "baostock_code") for dataset_id in BAOSTOCK_DAILY_SOURCES),
         master=master,
         force_rebuild=False,
     )
@@ -574,9 +560,7 @@ def test_resume_filter_rebuilds_when_signature_mismatch(tmp_path: Path) -> None:
         source_snapshot_hash=plan.source_snapshot_hash,
         schema_version=plan.schema_version,
     )
-    removed = resume_filter_completed(
-        store, journal, tampered_plan, dataset_id="cn_stock_daily_bar"
-    )
+    removed = resume_filter_completed(store, journal, tampered_plan, dataset_id="cn_stock_daily_bar")
     assert removed == 1
     assert not journal.is_completed(target_item.security_id)
 
@@ -627,10 +611,10 @@ def test_manifest_write_session_uses_one_connection(tmp_path: Path) -> None:
     """``manifest_write_session`` opens exactly one DuckDB connection for the
     whole session lifetime (regardless of how many partitions are upserted)."""
 
-    store = _setup_store(tmp_path, n=1)
+    _setup_store(tmp_path, n=1)
     meta_store = DuckDBMetadataStore(root=tmp_path)
     connect_calls = {"n": 0}
-    original_connect = duckdb_connect_spy = None
+    original_connect = None
 
     import duckdb
 
@@ -640,36 +624,38 @@ def test_manifest_write_session_uses_one_connection(tmp_path: Path) -> None:
         connect_calls["n"] += 1
         return original_connect(*args, **kwargs)
 
-    with patch("src.storage.metadata_store.duckdb.connect", spy_connect):
-        with meta_store.manifest_write_session() as session:
-            assert isinstance(session, ManifestWriteSession)
-            # Upsert several rows; they all reuse the same connection.
-            for i in range(5):
-                session.upsert_partition(
-                    {
-                        "dataset": "cn_stock_daily_bar",
-                        "partition_column": "security_id",
-                        "partition_value": f"SH.{600000 + i}",
-                        "output_path": f"data/parquet/cn_stock_daily_bar/security_id=SH.{600000 + i}/data.parquet",
-                        "row_count": 1,
-                        "min_date": "2024-01-02",
-                        "max_date": "2024-01-02",
-                        "content_hash": f"hash-{i}",
-                        "semantic_hash": f"sem-{i}",
-                        "schema_hash": "schema-1",
-                        "source_signature": f"sig-{i}",
-                        "master_row_hash": f"master-{i}",
-                        "file_size_bytes": 1024,
-                        "file_mtime": datetime(2024, 1, 2),
-                        "run_id": "test-session",
-                        "writer_pid": os.getpid(),
-                        "writer_thread": "coordinator",
-                        "updated_at": datetime(2024, 1, 2),
-                    }
-                )
-            # Exactly one connect() call for the whole session.
-            assert connect_calls["n"] == 1, connect_calls["n"]
-            assert session.upsert_count == 5
+    with (
+        patch("src.storage.metadata_store.duckdb.connect", spy_connect),
+        meta_store.manifest_write_session() as session,
+    ):
+        assert isinstance(session, ManifestWriteSession)
+        # Upsert several rows; they all reuse the same connection.
+        for i in range(5):
+            session.upsert_partition(
+                {
+                    "dataset": "cn_stock_daily_bar",
+                    "partition_column": "security_id",
+                    "partition_value": f"SH.{600000 + i}",
+                    "output_path": f"data/parquet/cn_stock_daily_bar/security_id=SH.{600000 + i}/data.parquet",
+                    "row_count": 1,
+                    "min_date": "2024-01-02",
+                    "max_date": "2024-01-02",
+                    "content_hash": f"hash-{i}",
+                    "semantic_hash": f"sem-{i}",
+                    "schema_hash": "schema-1",
+                    "source_signature": f"sig-{i}",
+                    "master_row_hash": f"master-{i}",
+                    "file_size_bytes": 1024,
+                    "file_mtime": datetime(2024, 1, 2),
+                    "run_id": "test-session",
+                    "writer_pid": os.getpid(),
+                    "writer_thread": "coordinator",
+                    "updated_at": datetime(2024, 1, 2),
+                }
+            )
+        # Exactly one connect() call for the whole session.
+        assert connect_calls["n"] == 1, connect_calls["n"]
+        assert session.upsert_count == 5
 
     # After exit, the connection is closed.
 
@@ -704,7 +690,7 @@ def test_manifest_write_session_partitioned_transactions(tmp_path: Path) -> None
         )
         # Second upsert fails (drop the table to force an error mid-transaction).
         session._conn.execute("DROP TABLE dataset_partition_manifest")
-        with pytest.raises(Exception):
+        with pytest.raises(Exception, match="dataset_partition_manifest"):
             session.upsert_partition(
                 {
                     "dataset": "cn_stock_daily_bar",
@@ -785,19 +771,19 @@ def test_lock_not_reclaimed_when_pid_alive_even_if_old(tmp_path: Path) -> None:
         "purpose": "build-derived",
         "stale_after_seconds": 12 * 60 * 60,
     }
-    (lock_dir / "owner.json").write_text(
-        json.dumps(owner, indent=2, sort_keys=True), encoding="utf-8"
-    )
+    (lock_dir / "owner.json").write_text(json.dumps(owner, indent=2, sort_keys=True), encoding="utf-8")
 
     # Try to acquire: should fail because the PID is alive (even though 48h old).
-    with pytest.raises(process_lock.ProcessLockError):
-        with process_lock.acquire_process_lock(
+    with (
+        pytest.raises(process_lock.ProcessLockError),
+        process_lock.acquire_process_lock(
             lock_dir,
             lock_name="build-derived",
             purpose="build-derived",
             stale_after_seconds=12 * 60 * 60,
-        ):
-            pass
+        ),
+    ):
+        pass
 
 
 def test_lock_reclaimed_when_pid_dead(tmp_path: Path) -> None:
@@ -814,9 +800,7 @@ def test_lock_reclaimed_when_pid_dead(tmp_path: Path) -> None:
         "purpose": "build-derived",
         "stale_after_seconds": 12 * 60 * 60,
     }
-    (lock_dir / "owner.json").write_text(
-        json.dumps(owner, indent=2, sort_keys=True), encoding="utf-8"
-    )
+    (lock_dir / "owner.json").write_text(json.dumps(owner, indent=2, sort_keys=True), encoding="utf-8")
 
     # Should succeed: dead PID → reclaim.
     with process_lock.acquire_process_lock(
@@ -874,7 +858,7 @@ def test_cleanup_rejects_drive_root(tmp_path: Path) -> None:
         pytest.skip("drive-root rejection is Windows-specific")
     # C:\ resolves to a drive root.
     drive_root = Path("C:\\")
-    with pytest.raises(log_cleanup.LogCleanupError, match="(drive root|filesystem root)"):
+    with pytest.raises(log_cleanup.LogCleanupError, match=r"(drive root|filesystem root)"):
         log_cleanup.cleanup_logs(drive_root, retention_days=30)
 
 
@@ -940,9 +924,7 @@ def _build_one_partition_for_stat_tests(tmp_path: Path):
     return store, plan, item, manifest_row
 
 
-def _update_manifest_column(
-    store: ParquetStore, dataset_id: str, partition_value: str, column: str, new_value
-) -> None:
+def _update_manifest_column(store: ParquetStore, dataset_id: str, partition_value: str, column: str, new_value) -> None:
     """Directly UPDATE a single manifest column in DuckDB (bypass the session).
 
     Used by stat-validation tests to tamper with the on-disk manifest row.
@@ -951,8 +933,7 @@ def _update_manifest_column(
     meta = store._metadata_store
     with meta._connection() as conn:
         conn.execute(
-            f"UPDATE dataset_partition_manifest SET {column} = ? "
-            f"WHERE dataset = ? AND partition_value = ?",
+            f"UPDATE dataset_partition_manifest SET {column} = ? WHERE dataset = ? AND partition_value = ?",
             [new_value, dataset_id, partition_value],
         )
 
@@ -964,9 +945,7 @@ def test_validate_rejects_file_size_mismatch(tmp_path: Path) -> None:
     store, plan, item, manifest_row = _build_one_partition_for_stat_tests(tmp_path)
     actual_size = int(manifest_row["file_size_bytes"])
     # Tamper: claim a different size.
-    _update_manifest_column(
-        store, "cn_stock_daily_bar", item.security_id, "file_size_bytes", actual_size + 9999
-    )
+    _update_manifest_column(store, "cn_stock_daily_bar", item.security_id, "file_size_bytes", actual_size + 9999)
 
     result = validate_completed_partition(store, item, dataset_id="cn_stock_daily_bar")
     assert not result.valid
@@ -993,7 +972,7 @@ def test_validate_rejects_file_mtime_mismatch(tmp_path: Path) -> None:
     """A manifest file_mtime that disagrees with the actual file mtime
     (beyond millisecond precision) must fail validation and be rebuilt."""
 
-    store, plan, item, manifest_row = _build_one_partition_for_stat_tests(tmp_path)
+    store, _plan, item, manifest_row = _build_one_partition_for_stat_tests(tmp_path)
     # Tamper: shift mtime by 5 seconds (well beyond ms precision).
     from datetime import timedelta
 
@@ -1001,9 +980,7 @@ def test_validate_rejects_file_mtime_mismatch(tmp_path: Path) -> None:
     if isinstance(original_mtime, pd.Timestamp):
         original_mtime = original_mtime.to_pydatetime()
     tampered_mtime = original_mtime + timedelta(seconds=5)
-    _update_manifest_column(
-        store, "cn_stock_daily_bar", item.security_id, "file_mtime", tampered_mtime
-    )
+    _update_manifest_column(store, "cn_stock_daily_bar", item.security_id, "file_mtime", tampered_mtime)
 
     result = validate_completed_partition(store, item, dataset_id="cn_stock_daily_bar")
     assert not result.valid
@@ -1013,10 +990,8 @@ def test_validate_rejects_file_mtime_mismatch(tmp_path: Path) -> None:
 def test_validate_rejects_missing_output_path(tmp_path: Path) -> None:
     """An empty/missing output_path must fail validation (fail-closed)."""
 
-    store, plan, item, _ = _build_one_partition_for_stat_tests(tmp_path)
-    _update_manifest_column(
-        store, "cn_stock_daily_bar", item.security_id, "output_path", ""
-    )
+    store, _plan, item, _ = _build_one_partition_for_stat_tests(tmp_path)
+    _update_manifest_column(store, "cn_stock_daily_bar", item.security_id, "output_path", "")
 
     result = validate_completed_partition(store, item, dataset_id="cn_stock_daily_bar")
     assert not result.valid
@@ -1031,7 +1006,7 @@ def test_validate_rejects_output_path_escaping_store_root(tmp_path: Path) -> Non
     moved or deleted.
     """
 
-    store, plan, item, _ = _build_one_partition_for_stat_tests(tmp_path)
+    store, _plan, item, _ = _build_one_partition_for_stat_tests(tmp_path)
     # Point the output_path at a sibling directory outside the store root.
     outside = tmp_path.parent / "outside_store_root_for_escape_test"
     outside.mkdir(parents=True, exist_ok=True)
@@ -1040,9 +1015,7 @@ def test_validate_rejects_output_path_escaping_store_root(tmp_path: Path) -> Non
     # Store as a path relative-ish string; the validator resolves it against
     # store.root and then checks it stays inside store.root.
     escape_path = "../" + outside.name + "/fake.parquet"
-    _update_manifest_column(
-        store, "cn_stock_daily_bar", item.security_id, "output_path", escape_path
-    )
+    _update_manifest_column(store, "cn_stock_daily_bar", item.security_id, "output_path", escape_path)
 
     result = validate_completed_partition(store, item, dataset_id="cn_stock_daily_bar")
     assert not result.valid
@@ -1053,7 +1026,7 @@ def test_validate_rejects_output_path_escaping_store_root(tmp_path: Path) -> Non
 def test_validate_accepts_valid_completed_partition(tmp_path: Path) -> None:
     """A fully-consistent partition (file + manifest + signature) validates."""
 
-    store, plan, item, _ = _build_one_partition_for_stat_tests(tmp_path)
+    store, _plan, item, _ = _build_one_partition_for_stat_tests(tmp_path)
     result = validate_completed_partition(store, item, dataset_id="cn_stock_daily_bar")
     assert result.valid, f"expected valid, got: {result.reason}"
 
@@ -1132,9 +1105,7 @@ def test_build_run_context_progress_path_matches_journal_run_id(
     assert context.progress_path.suffix == ".json"
     # The progress path is derived from build_run_context_paths using the
     # same run_id — no directory scan.
-    expected_journal, expected_progress = build_run_context_paths(
-        metadata_dir=store.metadata_dir, run_id="OLD-RUN"
-    )
+    expected_journal, expected_progress = build_run_context_paths(metadata_dir=store.metadata_dir, run_id="OLD-RUN")
     assert context.journal_path == expected_journal
     assert context.progress_path == expected_progress
 

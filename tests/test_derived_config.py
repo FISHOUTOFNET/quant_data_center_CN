@@ -35,7 +35,6 @@ from src.sources.derived.config import (
     load_derived_runtime_config_or_default,
 )
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -94,9 +93,7 @@ def test_cli_override_overrides_yaml_even_when_yaml_absent(tmp_path: Path) -> No
 
     config_dir = tmp_path / "config"
     config_dir.mkdir(parents=True, exist_ok=True)
-    (config_dir / "settings.yaml").write_text(
-        "project:\n  name: test\n", encoding="utf-8"
-    )
+    (config_dir / "settings.yaml").write_text("project:\n  name: test\n", encoding="utf-8")
     config = load_derived_runtime_config(root=tmp_path, max_workers_override=7)
     assert config.max_workers == 7
 
@@ -109,8 +106,7 @@ def test_cli_override_overrides_yaml_even_when_yaml_absent(tmp_path: Path) -> No
 def test_in_flight_multiplier_takes_effect(tmp_path: Path) -> None:
     _write_settings(
         tmp_path,
-        "derived:\n  max_workers: 2\n  max_in_flight_multiplier: 4\n"
-        "  heartbeat_seconds: 30\n  stall_seconds: 1800\n",
+        "derived:\n  max_workers: 2\n  max_in_flight_multiplier: 4\n  heartbeat_seconds: 30\n  stall_seconds: 1800\n",
     )
     config = load_derived_runtime_config(root=tmp_path)
     assert config.max_in_flight_multiplier == 4
@@ -125,8 +121,7 @@ def test_in_flight_multiplier_takes_effect(tmp_path: Path) -> None:
 def test_heartbeat_takes_effect(tmp_path: Path) -> None:
     _write_settings(
         tmp_path,
-        "derived:\n  max_workers: 2\n  max_in_flight_multiplier: 2\n"
-        "  heartbeat_seconds: 15\n  stall_seconds: 1800\n",
+        "derived:\n  max_workers: 2\n  max_in_flight_multiplier: 2\n  heartbeat_seconds: 15\n  stall_seconds: 1800\n",
     )
     config = load_derived_runtime_config(root=tmp_path)
     assert config.heartbeat_seconds == 15.0
@@ -140,8 +135,7 @@ def test_heartbeat_takes_effect(tmp_path: Path) -> None:
 def test_stall_threshold_takes_effect(tmp_path: Path) -> None:
     _write_settings(
         tmp_path,
-        "derived:\n  max_workers: 2\n  max_in_flight_multiplier: 2\n"
-        "  heartbeat_seconds: 30\n  stall_seconds: 900\n",
+        "derived:\n  max_workers: 2\n  max_in_flight_multiplier: 2\n  heartbeat_seconds: 30\n  stall_seconds: 900\n",
     )
     config = load_derived_runtime_config(root=tmp_path)
     assert config.stall_seconds == 900
@@ -178,8 +172,7 @@ def test_invalid_max_workers_too_high_fails_fast(tmp_path: Path) -> None:
 def test_invalid_in_flight_multiplier_fails_fast(tmp_path: Path) -> None:
     _write_settings(
         tmp_path,
-        "derived:\n  max_workers: 2\n  max_in_flight_multiplier: 5\n"
-        "  heartbeat_seconds: 30\n  stall_seconds: 1800\n",
+        "derived:\n  max_workers: 2\n  max_in_flight_multiplier: 5\n  heartbeat_seconds: 30\n  stall_seconds: 1800\n",
     )
     with pytest.raises(DerivedConfigError, match="max_in_flight_multiplier"):
         load_derived_runtime_config(root=tmp_path)
@@ -188,8 +181,7 @@ def test_invalid_in_flight_multiplier_fails_fast(tmp_path: Path) -> None:
 def test_invalid_heartbeat_too_low_fails_fast(tmp_path: Path) -> None:
     _write_settings(
         tmp_path,
-        "derived:\n  max_workers: 2\n  max_in_flight_multiplier: 2\n"
-        "  heartbeat_seconds: 1\n  stall_seconds: 1800\n",
+        "derived:\n  max_workers: 2\n  max_in_flight_multiplier: 2\n  heartbeat_seconds: 1\n  stall_seconds: 1800\n",
     )
     with pytest.raises(DerivedConfigError, match="heartbeat_seconds"):
         load_derived_runtime_config(root=tmp_path)
@@ -239,9 +231,7 @@ def test_missing_derived_section_falls_back_to_defaults(tmp_path: Path) -> None:
 
     config_dir = tmp_path / "config"
     config_dir.mkdir(parents=True, exist_ok=True)
-    (config_dir / "settings.yaml").write_text(
-        "project:\n  name: test\n", encoding="utf-8"
-    )
+    (config_dir / "settings.yaml").write_text("project:\n  name: test\n", encoding="utf-8")
     config = load_derived_runtime_config(root=tmp_path)
     assert config.max_workers == DEFAULT_MAX_WORKERS
 
@@ -258,8 +248,7 @@ def test_load_or_default_falls_back_on_invalid_config(tmp_path: Path) -> None:
 
     _write_settings(
         tmp_path,
-        "derived:\n  max_workers: 99\n  max_in_flight_multiplier: 2\n"
-        "  heartbeat_seconds: 30\n  stall_seconds: 1800\n",
+        "derived:\n  max_workers: 99\n  max_in_flight_multiplier: 2\n  heartbeat_seconds: 30\n  stall_seconds: 1800\n",
     )
     config = load_derived_runtime_config_or_default(root=tmp_path)
     # Invalid max_workers=99 → fallback to default 4.
@@ -274,12 +263,9 @@ def test_load_or_default_preserves_cli_override_on_invalid_config(
 
     _write_settings(
         tmp_path,
-        "derived:\n  max_workers: 99\n  max_in_flight_multiplier: 2\n"
-        "  heartbeat_seconds: 30\n  stall_seconds: 1800\n",
+        "derived:\n  max_workers: 99\n  max_in_flight_multiplier: 2\n  heartbeat_seconds: 30\n  stall_seconds: 1800\n",
     )
-    config = load_derived_runtime_config_or_default(
-        root=tmp_path, max_workers_override=5
-    )
+    config = load_derived_runtime_config_or_default(root=tmp_path, max_workers_override=5)
     assert config.max_workers == 5
 
 
@@ -295,7 +281,7 @@ def test_config_is_frozen() -> None:
         heartbeat_seconds=30.0,
         stall_seconds=1800,
     )
-    with pytest.raises(Exception):
+    with pytest.raises(AttributeError):
         config.max_workers = 4  # type: ignore[misc]
 
 

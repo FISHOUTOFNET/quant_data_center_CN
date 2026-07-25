@@ -26,10 +26,6 @@ from src.pipeline.common import (
     latest_trading_day_on_or_before,
 )
 from src.pipeline.step_health import (
-    FAILURE_STATUSES,
-    SKIPPED_STATUSES,
-    SUCCESS_STATUSES,
-    DEGRADED_SUCCESS_STATUSES,
     StepHealthSummary,
     is_failure_status,
     read_step_health_summary,
@@ -138,7 +134,7 @@ SATISFIED_DEPENDENCY_STATUSES = {"success", "success_degraded", "skipped", "skip
 TIMEOUT_EXIT_CODE = 124
 TIMEOUT_CLEANUP_FAILED_EXIT_CODE = 125
 STALLED_EXIT_CODE = 126  # Distinct from timed_out (124) so the state file can
-                         # record ``stalled`` vs ``timed_out`` vs ``failed``.
+# record ``stalled`` vs ``timed_out`` vs ``failed``.
 PROCESS_CLEANUP_WAIT_SECONDS = 30
 RUNNING_ABANDONED_AFTER_SECONDS = 24 * 60 * 60
 RUN_UPDATE_DAILY_LOCK_STALE_AFTER_SECONDS = 24 * 60 * 60
@@ -848,7 +844,7 @@ def run_daily_update(
     steps_by_id = {step.id: step for step in steps}
     step_ids = [step.id for step in steps]
     original_start_at = start_at
-    mapped_start_at = LEGACY_START_AT_ALIASES.get(start_at)
+    mapped_start_at = LEGACY_START_AT_ALIASES.get(start_at) if start_at is not None else None
     if start_at is not None and start_at not in step_ids and mapped_start_at in step_ids:
         start_at = mapped_start_at
 
@@ -876,7 +872,6 @@ def run_daily_update(
     exc_info: tuple[type[BaseException] | None, BaseException | None, object | None] = (None, None, None)
     try:
         state = _read_state_for_run(resolved_state_file, reset_if_corrupt=force)
-        state_needs_write = state.get("version") != 2
         state["version"] = 2
         state.setdefault("runs", {})
         # Record the per-run log context (run_id, path, log_status) so that
@@ -901,7 +896,6 @@ def run_daily_update(
             now,
             active_lock.owner,
         ):
-            state_needs_write = False
             _write_state(resolved_state_file, state)
 
         start_seen = start_at is None
@@ -1025,7 +1019,7 @@ def run_daily_update(
                                 "AkShare daily_bar input is degraded",
                                 console=False,
                             )
-                        else:
+                        elif isinstance(degraded_step, DailyStep):
                             effective_step = degraded_step
                             degraded_success_reason = (
                                 "degraded: excluded target=daily_bar because "
@@ -1049,8 +1043,7 @@ def run_daily_update(
                     )
                     if degraded_success_reason is None:
                         degraded_success_reason = (
-                            "degraded: soft dependency "
-                            f"{dep_id} status={dep_status} for {readable_state_key}"
+                            f"degraded: soft dependency {dep_id} status={dep_status} for {readable_state_key}"
                         )
 
             if blocked_reason is not None:
@@ -1067,9 +1060,7 @@ def run_daily_update(
             # state-file half of the contract; the env-var half is in
             # ``_run_subprocess``.
             if _step_uses_derived_stall_detection(effective_step):
-                pinned_progress_path = _derived_progress_path_for_step(
-                    base, run_instance_key, effective_step.id
-                )
+                pinned_progress_path = _derived_progress_path_for_step(base, run_instance_key, effective_step.id)
                 pinned_derived_run_id = f"{run_instance_key}:{effective_step.id}"
                 step_state[effective_step.id]["progress_path"] = str(pinned_progress_path)
                 step_state[effective_step.id]["derived_run_id"] = pinned_derived_run_id
@@ -1629,8 +1620,7 @@ def _wait_with_stall_detection(
         # Defensive: if a caller forgot to pin a path (e.g. an old test), we
         # refuse to invent one. Treat the build as non-stallable and just wait.
         log.write(
-            "Stall detection skipped: no pinned progress_path was provided; "
-            "waiting for child without stall detection\n"
+            "Stall detection skipped: no pinned progress_path was provided; waiting for child without stall detection\n"
         )
         return int(proc.wait())
 
@@ -1681,9 +1671,7 @@ def _wait_with_stall_detection(
                 try:
                     proc.wait(timeout=60)
                 except subprocess.TimeoutExpired:
-                    log.write(
-                        "Child did not respond to SIGINT within 60s; force-terminating\n"
-                    )
+                    log.write("Child did not respond to SIGINT within 60s; force-terminating\n")
                 # Force-kill whatever is left. If cleanup succeeds, the stall
                 # verdict stands (126). If cleanup fails, escalate to 125.
                 if _terminate_process_tree(proc, log):
@@ -1692,10 +1680,7 @@ def _wait_with_stall_detection(
                         "child exit code is ignored per the stall contract.\n"
                     )
                     return STALLED_EXIT_CODE
-                log.write(
-                    "Process tree cleanup failed after stall; returning "
-                    "TIMEOUT_CLEANUP_FAILED_EXIT_CODE (125)\n"
-                )
+                log.write("Process tree cleanup failed after stall; returning TIMEOUT_CLEANUP_FAILED_EXIT_CODE (125)\n")
                 return TIMEOUT_CLEANUP_FAILED_EXIT_CODE
             previous_processed = report.processed
         # Sleep before next poll. Use a short wait so we don't miss a
@@ -1740,14 +1725,7 @@ def _derived_progress_path_for_step(root: Path, run_instance_key: str, step_id: 
     safe_key = run_instance_key
     if safe_key.startswith("run_instance:"):
         safe_key = safe_key[len("run_instance:") :]
-    return (
-        root
-        / "data"
-        / "metadata"
-        / "derived-step-progress"
-        / safe_key
-        / f"{step_id}.state.json"
-    )
+    return root / "data" / "metadata" / "derived-step-progress" / safe_key / f"{step_id}.state.json"
 
 
 def _extract_derived_target(step: DailyStep) -> str | None:

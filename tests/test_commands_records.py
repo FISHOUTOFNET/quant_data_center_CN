@@ -27,7 +27,9 @@ def _success(dataset: str = "baostock_cn_stock_daily_bar_unadjusted", code: str 
     return {"dataset": dataset, "code": code, "status": "success", "row_count": 1, "error_stack": ""}
 
 
-def _failed(dataset: str = "baostock_cn_stock_daily_bar_unadjusted", code: str = "sh.600000", status: str = "failed") -> dict[str, object]:
+def _failed(
+    dataset: str = "baostock_cn_stock_daily_bar_unadjusted", code: str = "sh.600000", status: str = "failed"
+) -> dict[str, object]:
     return {"dataset": dataset, "code": code, "status": status, "row_count": 0, "error_stack": "boom"}
 
 

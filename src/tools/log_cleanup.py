@@ -19,6 +19,7 @@ Policy:
 
 from __future__ import annotations
 
+import json
 import os
 from collections.abc import Collection
 from dataclasses import dataclass, field
@@ -29,9 +30,9 @@ import click
 
 from src.utils import paths
 from src.utils.paths import (
+    MANAGED_ROOT_LAYOUT_VERSION,
     MANAGED_ROOT_MARKER,
     LogRootAuthorizationError,
-    ensure_managed_log_root,
     validate_managed_log_root,
 )
 
@@ -174,10 +175,7 @@ def cleanup_logs(
     # other non-log infrastructure files are excluded from the size total so a
     # tiny marker cannot trigger spurious evictions.
     if max_bytes is not None and max_bytes > 0:
-        remaining_size = sum(
-            item.size for item in discovered
-            if item.path not in deleted_paths and item.is_log_file
-        )
+        remaining_size = sum(item.size for item in discovered if item.path not in deleted_paths and item.is_log_file)
         if remaining_size > max_bytes:
             survivors = sorted(
                 (
@@ -198,10 +196,7 @@ def cleanup_logs(
 
     # kept_count reports only log files; the managed-root marker is
     # infrastructure and should not appear in user-facing counts.
-    kept_count = sum(
-        1 for item in discovered
-        if item.path not in deleted_paths and item.is_log_file
-    )
+    kept_count = sum(1 for item in discovered if item.path not in deleted_paths and item.is_log_file)
 
     return CleanupResult(
         deleted_count=deleted_count,
@@ -229,9 +224,7 @@ def _reject_dangerous_root(root: Path) -> None:
     if root.is_symlink():
         target = root.resolve()
         if not paths.is_path_inside(target, root.parent):
-            raise LogCleanupError(
-                f"Refusing to clean symlink root that escapes its parent: {root} -> {target}"
-            )
+            raise LogCleanupError(f"Refusing to clean symlink root that escapes its parent: {root} -> {target}")
 
     raw = root
     # Detect Windows junctions/reparse points (is_junction is 3.12+).

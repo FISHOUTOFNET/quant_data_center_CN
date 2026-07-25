@@ -4,7 +4,6 @@ import shutil
 from datetime import date, datetime
 
 import pandas as pd
-import pytest
 
 from src.sources.derived.stock_daily_bar import (
     _assign_source_rank,

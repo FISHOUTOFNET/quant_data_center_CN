@@ -23,7 +23,9 @@ def _env_truthy(value: str | None) -> bool:
     return value is not None and value.strip().lower() in {"1", "true", "yes", "on"}
 
 
-def configure_logging(root: Path | None = None, *, runtime_paths: paths.RuntimePaths | None = None) -> paths.RuntimePaths:
+def configure_logging(
+    root: Path | None = None, *, runtime_paths: paths.RuntimePaths | None = None
+) -> paths.RuntimePaths:
     """Configure Loguru sinks using the unified RuntimePaths resolution.
 
     Subprocesses spawned by ``run-update-daily`` set ``QDC_DISABLE_FILE_LOG=1``

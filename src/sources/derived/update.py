@@ -92,14 +92,14 @@ def build_derived_datasets(
                 "valuation": build_cn_stock_valuation,
             }[target]
             target_security_ids = _target_security_ids(target, mode, incremental_plan or IncrementalPlan({}, (), {}))
-            builder_kwargs: dict[str, object] = dict(
-                root=store.root,
-                security_ids=target_security_ids,
-                changed_since=changed_since,
-                build_views=False,
-                refresh_registry=False,
-                now=now,
-            )
+            builder_kwargs: dict[str, object] = {
+                "root": store.root,
+                "security_ids": target_security_ids,
+                "changed_since": changed_since,
+                "build_views": False,
+                "refresh_registry": False,
+                "now": now,
+            }
             # Only daily_bar (and future BuildPlanner-based targets) consume
             # max_workers. Pass it through where the builder accepts it.
             if target in ("daily_bar",):

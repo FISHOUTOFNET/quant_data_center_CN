@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import os
 from pathlib import Path
 
@@ -78,20 +79,16 @@ def finalize_pipeline_records(
     summary = evaluate_step_health(records, resolved_policy)
     resolved_result_path = _resolve_result_path(result_path)
     if resolved_result_path is not None:
-        try:
+        # The summary file is a hint for the orchestrator; if it cannot
+        # be written we must not abort the command. The orchestrator
+        # will fall back to the sub-process exit code.
+        with contextlib.suppress(OSError):
             write_step_health_summary(resolved_result_path, summary)
-        except OSError:
-            # The summary file is a hint for the orchestrator; if it cannot
-            # be written we must not abort the command. The orchestrator
-            # will fall back to the sub-process exit code.
-            pass
 
     if summary.status == "failed":
         examples = _format_failed_examples(records)
         suffix = f": {'; '.join(examples)}" if examples else ""
-        raise click.ClickException(
-            f"{label} completed with status=failed: {summary.reason}{suffix}"
-        )
+        raise click.ClickException(f"{label} completed with status=failed: {summary.reason}{suffix}")
     if summary.status == "success_degraded":
         click.echo(
             f"{label} completed with status=success_degraded "

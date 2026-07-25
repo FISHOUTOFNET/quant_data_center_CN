@@ -239,7 +239,7 @@ def _stable_value(value: object) -> object:
     if isinstance(value, pd.Timestamp):
         if pd.isna(value):
             return None
-        return value.floor("ms").isoformat()
+        return cast(pd.Timestamp, value).floor("ms").isoformat()
     if isinstance(value, datetime):
         return pd.Timestamp(value).floor("ms").isoformat()
     if isinstance(value, date):

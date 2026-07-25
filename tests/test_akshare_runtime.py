@@ -1,16 +1,16 @@
 from __future__ import annotations
 
-import time
 import os
+import time
 from datetime import datetime
 from pathlib import Path
 
 import pandas as pd
 import pytest
 
+import src.sources.akshare.pipeline.execution as akshare_execution
 from src.sources.akshare.client import AkShareCircuitOpen, AkShareNetworkError
 from src.sources.akshare.core.runtime import AkShareRuntime
-import src.sources.akshare.pipeline.execution as akshare_execution
 from src.sources.akshare.pipeline.execution_types import AkShareUpdateRequest, ConcurrencyPolicy, FetchResult
 from src.utils.config_mgr import ConfigManager
 

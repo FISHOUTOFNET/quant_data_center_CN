@@ -3,11 +3,11 @@
 This module is the single source of truth for the user-facing tunables that
 control the derived build pipeline:
 
-* ``max_workers`` — thread pool size for the partition executor (1–8).
-* ``max_in_flight_multiplier`` — bounded sliding-window cap multiplier (1–4).
-* ``heartbeat_seconds`` — progress/journal heartbeat interval (5–300).
+* ``max_workers`` — thread pool size for the partition executor (1-8).
+* ``max_in_flight_multiplier`` — bounded sliding-window cap multiplier (1-4).
+* ``heartbeat_seconds`` — progress/journal heartbeat interval (5-300).
 * ``stall_seconds`` — heartbeat age threshold before the orchestrator declares
-  the build stalled (must be > ``heartbeat_seconds`` × a reasonable factor).
+  the build stalled (must be > ``heartbeat_seconds`` x a reasonable factor).
 
 Resolution priority (highest first):
 
@@ -27,6 +27,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from src.utils import paths
 from src.utils.config_mgr import ConfigError, ConfigManager
@@ -85,15 +86,9 @@ class DerivedRuntimeConfig:
         """
 
         loaded = _load_raw_config(root=root)
-        effective_max_workers = max_workers_override or loaded.get(
-            "max_workers", DEFAULT_MAX_WORKERS
-        )
-        effective_multiplier = loaded.get(
-            "max_in_flight_multiplier", DEFAULT_MAX_IN_FLIGHT_MULTIPLIER
-        )
-        effective_heartbeat = loaded.get(
-            "heartbeat_seconds", DEFAULT_HEARTBEAT_SECONDS
-        )
+        effective_max_workers = max_workers_override or loaded.get("max_workers", DEFAULT_MAX_WORKERS)
+        effective_multiplier = loaded.get("max_in_flight_multiplier", DEFAULT_MAX_IN_FLIGHT_MULTIPLIER)
+        effective_heartbeat = loaded.get("heartbeat_seconds", DEFAULT_HEARTBEAT_SECONDS)
         effective_stall = loaded.get("stall_seconds", DEFAULT_STALL_SECONDS)
         return cls(
             max_workers=int(effective_max_workers),
@@ -107,20 +102,15 @@ class DerivedRuntimeConfig:
 
         lo, hi = MAX_WORKERS_RANGE
         if not (lo <= self.max_workers <= hi):
-            raise DerivedConfigError(
-                f"derived.max_workers={self.max_workers} out of range [{lo}, {hi}]"
-            )
+            raise DerivedConfigError(f"derived.max_workers={self.max_workers} out of range [{lo}, {hi}]")
         lo, hi = MAX_IN_FLIGHT_MULTIPLIER_RANGE
         if not (lo <= self.max_in_flight_multiplier <= hi):
             raise DerivedConfigError(
-                f"derived.max_in_flight_multiplier={self.max_in_flight_multiplier} "
-                f"out of range [{lo}, {hi}]"
+                f"derived.max_in_flight_multiplier={self.max_in_flight_multiplier} out of range [{lo}, {hi}]"
             )
         lo, hi = HEARTBEAT_SECONDS_RANGE
         if not (lo <= self.heartbeat_seconds <= hi):
-            raise DerivedConfigError(
-                f"derived.heartbeat_seconds={self.heartbeat_seconds} out of range [{lo}, {hi}]"
-            )
+            raise DerivedConfigError(f"derived.heartbeat_seconds={self.heartbeat_seconds} out of range [{lo}, {hi}]")
         if self.stall_seconds < int(self.heartbeat_seconds * STALL_HEARTBEAT_MIN_RATIO):
             raise DerivedConfigError(
                 f"derived.stall_seconds={self.stall_seconds} must be at least "
@@ -143,9 +133,7 @@ def load_derived_runtime_config(
     should catch the exception and use :data:`DEFAULTS` directly.
     """
 
-    config = DerivedRuntimeConfig.with_overrides(
-        root=root, max_workers_override=max_workers_override
-    )
+    config = DerivedRuntimeConfig.with_overrides(root=root, max_workers_override=max_workers_override)
     config.validate()
     return config
 
@@ -163,13 +151,9 @@ def load_derived_runtime_config_or_default(
     """
 
     try:
-        return load_derived_runtime_config(
-            root=root, max_workers_override=max_workers_override
-        )
+        return load_derived_runtime_config(root=root, max_workers_override=max_workers_override)
     except (DerivedConfigError, ConfigError, OSError, ValueError) as exc:
-        logger.warning(
-            "Derived config load failed; falling back to code defaults: {}", exc
-        )
+        logger.warning("Derived config load failed; falling back to code defaults: {}", exc)
         fallback = DerivedRuntimeConfig(
             max_workers=max_workers_override or DEFAULT_MAX_WORKERS,
             max_in_flight_multiplier=DEFAULT_MAX_IN_FLIGHT_MULTIPLIER,
@@ -179,7 +163,7 @@ def load_derived_runtime_config_or_default(
         return fallback
 
 
-def _load_raw_config(*, root: Path | None = None) -> dict[str, object]:
+def _load_raw_config(*, root: Path | None = None) -> dict[str, Any]:
     """Read the ``derived`` section from settings.yaml as a plain dict.
 
     Returns an empty dict when settings.yaml is absent (e.g. fresh test
@@ -196,9 +180,7 @@ def _load_raw_config(*, root: Path | None = None) -> dict[str, object]:
         return {}
     raw = manager.get("derived", {}) or {}
     if not isinstance(raw, dict):
-        raise DerivedConfigError(
-            f"settings.yaml: 'derived' section must be a mapping, got {type(raw).__name__}"
-        )
+        raise DerivedConfigError(f"settings.yaml: 'derived' section must be a mapping, got {type(raw).__name__}")
     return dict(raw)
 
 

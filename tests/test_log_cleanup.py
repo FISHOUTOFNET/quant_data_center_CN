@@ -279,7 +279,7 @@ def test_run_logs_in_runs_subdir_are_identified(tmp_path: Path) -> None:
     old_flat = _touch(tmp_path / "flat.log", now - timedelta(days=365))
 
     _authorize(tmp_path)
-    result = log_cleanup.cleanup_logs(
+    log_cleanup.cleanup_logs(
         tmp_path,
         retention_days=30,
         now=now,
@@ -306,4 +306,3 @@ def test_git_clean_does_not_remove_logs_outside_repo(tmp_path: Path, monkeypatch
     shutil.rmtree(repo)
 
     assert run_log.exists()
-

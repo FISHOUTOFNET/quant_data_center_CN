@@ -33,11 +33,15 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from threading import RLock
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import pandas as pd
 
 from src.utils.logging import logger
+
+if TYPE_CHECKING:
+    from src.sources.derived.plan import DerivedBuildPlan, DerivedPartitionPlan
+    from src.storage.parquet_store import ParquetStore
 
 JOURNAL_STATUS_RUNNING = "running"
 JOURNAL_STATUS_COMPLETED = "completed"
@@ -127,8 +131,7 @@ class BuildJournal:
             return None
         if not isinstance(raw, dict):
             return None
-        required = {"run_id", "target", "dataset_id", "plan_hash", "schema_version",
-                    "source_snapshot_hash", "total"}
+        required = {"run_id", "target", "dataset_id", "plan_hash", "schema_version", "source_snapshot_hash", "total"}
         if not required.issubset(raw.keys()):
             return None
         completed_raw = raw.get("completed", [])
@@ -145,7 +148,7 @@ class BuildJournal:
             started_at=_parse_dt(raw.get("started_at")) or datetime.now(),
             heartbeat_at=_parse_dt(raw.get("heartbeat_at")) or datetime.now(),
             status=str(raw.get("status", JOURNAL_STATUS_RUNNING)),
-            completed=set(str(s) for s in completed_raw if s),
+            completed={str(s) for s in completed_raw if s},
             failed={str(k): str(v) for k, v in (failed_raw.items() if isinstance(failed_raw, dict) else [])},
         )
 
@@ -300,9 +303,7 @@ def find_resumable_journal(
     journal_dir = metadata_dir / "derived-runs"
     if not journal_dir.exists():
         return None
-    candidates: list[Path] = sorted(
-        p for p in journal_dir.glob("*.json") if p.is_file()
-    )
+    candidates: list[Path] = sorted(p for p in journal_dir.glob("*.json") if p.is_file())
     for path in reversed(candidates):  # most recent first
         journal = BuildJournal.load(path)
         if journal is None:
@@ -391,8 +392,8 @@ class CompletedValidation:
 
 
 def validate_completed_partition(
-    store: "ParquetStore",
-    item: "DerivedPartitionPlan",
+    store: ParquetStore,
+    item: DerivedPartitionPlan,
     *,
     dataset_id: str,
 ) -> CompletedValidation:
@@ -523,9 +524,9 @@ def validate_completed_partition(
 
 
 def resume_filter_completed(
-    store: "ParquetStore",
-    journal: "BuildJournal",
-    plan: "DerivedBuildPlan",
+    store: ParquetStore,
+    journal: BuildJournal,
+    plan: DerivedBuildPlan,
     *,
     dataset_id: str,
 ) -> int:

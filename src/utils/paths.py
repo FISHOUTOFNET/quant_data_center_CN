@@ -110,9 +110,7 @@ def validate_managed_log_root(log_root: Path) -> None:
         raw = marker.read_text(encoding="utf-8")
         payload: Any = json.loads(raw)
     except (OSError, json.JSONDecodeError) as exc:
-        raise LogRootAuthorizationError(
-            f"Managed-root marker is unreadable/corrupt at {marker}: {exc}"
-        ) from exc
+        raise LogRootAuthorizationError(f"Managed-root marker is unreadable/corrupt at {marker}: {exc}") from exc
     if not isinstance(payload, dict):
         raise LogRootAuthorizationError(
             f"Managed-root marker must be a JSON object at {marker}; got {type(payload).__name__}"
@@ -125,7 +123,7 @@ def validate_managed_log_root(log_root: Path) -> None:
         )
     layout_version = payload.get("layout_version")
     try:
-        version_int = int(layout_version)
+        version_int = int(str(layout_version)) if layout_version is not None else -1
     except (TypeError, ValueError) as exc:
         raise LogRootAuthorizationError(
             f"Managed-root marker layout_version is not an integer at {marker}: {layout_version!r}"
@@ -157,9 +155,7 @@ def _reject_unsafe_log_root(root: Path) -> None:
     # Windows junction/reparse point — reject.
     is_junction = getattr(root, "is_junction", lambda: False)()
     if is_junction:
-        raise LogRootAuthorizationError(
-            f"Refusing to authorize Windows junction/reparse log root: {root}"
-        )
+        raise LogRootAuthorizationError(f"Refusing to authorize Windows junction/reparse log root: {root}")
 
     resolved = root.resolve()
     resolved_parent = resolved.parent
@@ -182,9 +178,7 @@ def _reject_unsafe_log_root(root: Path) -> None:
     # Repository root or any path inside the repository.
     repo_root = ROOT.resolve()
     if resolved == repo_root or is_path_inside(resolved, repo_root):
-        raise LogRootAuthorizationError(
-            f"Refusing to authorize repository or repo-internal path: {root}"
-        )
+        raise LogRootAuthorizationError(f"Refusing to authorize repository or repo-internal path: {root}")
 
 
 def project_root() -> Path:
@@ -288,9 +282,7 @@ def _config_log_dir(root: Path | None) -> Path | None:
                 resolved_candidate = configured_path.parent if configured_path.parent else None
                 if resolved_candidate is not None:
                     resolved_absolute = (
-                        resolved_candidate
-                        if resolved_candidate.is_absolute()
-                        else (manager.root / resolved_candidate)
+                        resolved_candidate if resolved_candidate.is_absolute() else (manager.root / resolved_candidate)
                     ).resolve()
                     if not is_path_inside(resolved_absolute, manager.root):
                         return resolved_absolute

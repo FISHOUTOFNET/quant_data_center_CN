@@ -27,7 +27,6 @@ import pytest
 from src.sources.derived.plan import BuildPlanner
 from src.sources.derived.stock_daily_bar import (
     BAOSTOCK_DAILY_SOURCES,
-    DEFAULT_MAX_WORKERS,
     build_cn_stock_daily_bar,
 )
 from src.storage import partition_manifest as pm_mod
@@ -120,7 +119,7 @@ def _run_with_instrumentation(
 ) -> dict[str, float | int]:
     """Run a full build with instrumentation and return measured metrics."""
 
-    store = _setup_store(tmp_path, n=N_SECURITIES)
+    _setup_store(tmp_path, n=N_SECURITIES)
 
     # Instrument manifest queries
     batch_calls = {"count": 0}
@@ -211,16 +210,12 @@ def test_derived_performance_serial_vs_parallel(
     # Serial build
     tmp_serial = tmp_path / "serial"
     tmp_serial.mkdir()
-    serial_metrics = _run_with_instrumentation(
-        tmp_serial, max_workers=N_WORKERS_SERIAL, monkeypatch=monkeypatch
-    )
+    serial_metrics = _run_with_instrumentation(tmp_serial, max_workers=N_WORKERS_SERIAL, monkeypatch=monkeypatch)
 
     # Parallel build
     tmp_parallel = tmp_path / "parallel"
     tmp_parallel.mkdir()
-    parallel_metrics = _run_with_instrumentation(
-        tmp_parallel, max_workers=N_WORKERS_PARALLEL, monkeypatch=monkeypatch
-    )
+    parallel_metrics = _run_with_instrumentation(tmp_parallel, max_workers=N_WORKERS_PARALLEL, monkeypatch=monkeypatch)
 
     # Verify manifest queries are O(#datasets), not O(#securities)
     # With 6 source datasets + 1 target, batch queries should be ≤ 2 (initial + post-preflight)
@@ -284,7 +279,8 @@ def test_derived_performance_serial_vs_parallel(
         print(f"{key:<35} {serial_metrics[key]:>15} {parallel_metrics[key]:>15}")
     print("-" * 70)
     print(f"{'memory_ratio':<35} {'1.00x':>15} {f'{memory_ratio:.2f}x':>15}")
-    print(f"{'speedup':<35} {'1.00x':>15} {f'{serial_metrics['total_time_seconds']/max(parallel_metrics['total_time_seconds'],0.001):.2f}x':>15}")
+    speedup = serial_metrics["total_time_seconds"] / max(parallel_metrics["total_time_seconds"], 0.001)
+    print(f"{'speedup':<35} {'1.00x':>15} {f'{speedup:.2f}x':>15}")
     print("=" * 70)
 
 
@@ -298,7 +294,7 @@ def test_derived_performance_planner_only(
     The new planner does O(#datasets) batch queries. This test measures
     the planner time for 100 securities and verifies it completes in
     well under 1 second (the old N+1 path would take 10+ seconds for
-    100 securities × 6 datasets = 600 DuckDB round-trips).
+    100 securities x 6 datasets = 600 DuckDB round-trips).
     """
 
     store = _setup_store(tmp_path, n=N_SECURITIES)
@@ -317,9 +313,7 @@ def test_derived_performance_planner_only(
         store=store,
         target="daily_bar",
         dataset_id="cn_stock_daily_bar",
-        source_dataset_specs=tuple(
-            (dataset_id, "baostock_code") for dataset_id in BAOSTOCK_DAILY_SOURCES
-        ),
+        source_dataset_specs=tuple((dataset_id, "baostock_code") for dataset_id in BAOSTOCK_DAILY_SOURCES),
         master=master,
         force_rebuild=True,
     )
@@ -336,7 +330,7 @@ def test_derived_performance_planner_only(
     print(f"Planned partitions: {plan.total}")
     print("=" * 70)
 
-    # The old N+1 path would do 100×6 = 600 single queries.
+    # The old N+1 path would do 100x6 = 600 single queries.
     # The new batch path should do ≤ 2 queries.
     assert batch_calls["count"] <= 2, f"Expected ≤2 batch queries, got {batch_calls['count']}"
     # Planner should complete in under 2 seconds for 100 securities

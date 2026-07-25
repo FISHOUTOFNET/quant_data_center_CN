@@ -13,13 +13,11 @@ Covers the algorithmic-correctness requirements from the task spec:
 from __future__ import annotations
 
 import json
-import shutil
 import time
 from collections.abc import Callable
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from threading import Event
-from unittest.mock import patch
 
 import pandas as pd
 import pytest
@@ -28,17 +26,14 @@ from src.sources.derived.common import cleanup_stale_derived_staging
 from src.sources.derived.executor import PartitionExecutor, StreamingBuildCoordinator
 from src.sources.derived.journal import (
     JOURNAL_STATUS_COMPLETED,
-    JOURNAL_STATUS_RUNNING,
     BuildJournal,
     cleanup_old_journals,
     find_resumable_journal,
 )
-from src.sources.derived.plan import BuildPlanner, ChangeReason
-from src.sources.derived.progress import ProgressReporter
+from src.sources.derived.plan import BuildPlanner
 from src.sources.derived.stock_daily_bar import (
-    BAOSTOCK_DAILY_SOURCES,
     AKSHARE_DAILY_SOURCES,
-    DEFAULT_MAX_WORKERS,
+    BAOSTOCK_DAILY_SOURCES,
     build_cn_stock_daily_bar,
     materialize_security_daily_bar,
 )
@@ -57,7 +52,6 @@ def _multi_master(n: int = 10) -> pd.DataFrame:
     rows = []
     for i in range(n):
         code_num = 600000 + i
-        sz_num = f"{i:06d}"
         rows.append(
             {
                 "security_id": f"SH.{code_num}",
@@ -156,15 +150,13 @@ def test_planner_loads_source_manifests_in_batch_not_per_security(tmp_path, monk
         store=store,
         target="daily_bar",
         dataset_id="cn_stock_daily_bar",
-        source_dataset_specs=tuple(
-            (dataset_id, "baostock_code") for dataset_id in BAOSTOCK_DAILY_SOURCES
-        ),
+        source_dataset_specs=tuple((dataset_id, "baostock_code") for dataset_id in BAOSTOCK_DAILY_SOURCES),
         master=_multi_master(10),
     )
     planner.plan()
 
     # Batch query is called at most twice (initial + post-preflight-repair).
-    # Even with 10 securities × 6 source datasets, the query count must NOT
+    # Even with 10 securities x 6 source datasets, the query count must NOT
     # grow linearly with the number of securities.
     assert batch_calls["count"] <= 2, batch_calls["count"]
     assert single_calls["count"] == 0, single_calls["count"]
@@ -179,7 +171,7 @@ def test_source_signature_computed_once_per_security(tmp_path, monkeypatch) -> N
     """The planner computes each security's source signature exactly once.
     The executor must NOT re-compute it."""
 
-    store = _setup_multi_security_store(tmp_path, n=10)
+    _setup_multi_security_store(tmp_path, n=10)
     from src.storage import partition_manifest as pm_mod
 
     sig_calls: list[str] = []
@@ -283,9 +275,7 @@ def test_journal_resume_skips_completed_partitions(tmp_path) -> None:
         store=store,
         target="daily_bar",
         dataset_id="cn_stock_daily_bar",
-        source_dataset_specs=tuple(
-            (dataset_id, "baostock_code") for dataset_id in BAOSTOCK_DAILY_SOURCES
-        ),
+        source_dataset_specs=tuple((dataset_id, "baostock_code") for dataset_id in BAOSTOCK_DAILY_SOURCES),
         master=master,
     )
     plan = planner.plan()
@@ -296,9 +286,7 @@ def test_journal_resume_skips_completed_partitions(tmp_path) -> None:
         store=store,
         target="daily_bar",
         dataset_id="cn_stock_daily_bar",
-        source_dataset_specs=tuple(
-            (dataset_id, "baostock_code") for dataset_id in BAOSTOCK_DAILY_SOURCES
-        ),
+        source_dataset_specs=tuple((dataset_id, "baostock_code") for dataset_id in BAOSTOCK_DAILY_SOURCES),
         master=master,
         force_rebuild=True,
     )
@@ -350,9 +338,7 @@ def test_journal_resume_skips_completed_partitions(tmp_path) -> None:
         counters = coordinator.run(plan)
 
     # The first 3 should be skipped (journal-completed), the last 3 committed.
-    assert counters.committed == 3, (
-        f"Expected 3 committed, got {counters.committed}; executed={executed_securities}"
-    )
+    assert counters.committed == 3, f"Expected 3 committed, got {counters.committed}; executed={executed_securities}"
     skipped_ids = {item.security_id for item in plan.partitions[:3]}
     executed_ids = set(executed_securities)
     assert skipped_ids.isdisjoint(executed_ids), f"Skipped IDs were executed: {skipped_ids & executed_ids}"
@@ -363,7 +349,7 @@ def test_journal_rejects_mismatched_plan(tmp_path) -> None:
 
     store = _setup_multi_security_store(tmp_path, n=4)
     # Create a journal with a wrong plan_hash.
-    journal = BuildJournal.create(
+    BuildJournal.create(
         run_id="test-mismatch-journal",
         target="daily_bar",
         dataset_id="cn_stock_daily_bar",
@@ -443,9 +429,7 @@ def test_executor_respects_cancel_event(tmp_path) -> None:
         store=store,
         target="daily_bar",
         dataset_id="cn_stock_daily_bar",
-        source_dataset_specs=tuple(
-            (dataset_id, "baostock_code") for dataset_id in BAOSTOCK_DAILY_SOURCES
-        ),
+        source_dataset_specs=tuple((dataset_id, "baostock_code") for dataset_id in BAOSTOCK_DAILY_SOURCES),
         master=master,
         force_rebuild=True,
     )
@@ -504,7 +488,7 @@ def test_executor_respects_cancel_event(tmp_path) -> None:
 def test_idempotent_rerun_does_not_rebuild(tmp_path) -> None:
     """A second run with no source changes must produce 0 partitions."""
 
-    store = _setup_multi_security_store(tmp_path, n=5)
+    _setup_multi_security_store(tmp_path, n=5)
     result1 = build_cn_stock_daily_bar(
         root=tmp_path,
         build_views=False,
@@ -571,7 +555,7 @@ def test_cleanup_old_journals_keeps_running_and_recent(tmp_path) -> None:
 def test_worker_failure_isolates_partition(tmp_path, monkeypatch) -> None:
     """If one partition's materialize fails, other partitions still commit."""
 
-    store = _setup_multi_security_store(tmp_path, n=6)
+    _setup_multi_security_store(tmp_path, n=6)
     call_count = {"n": 0}
     original = materialize_security_daily_bar
 
@@ -761,9 +745,7 @@ def test_check_stall_not_stalled_when_state_file_missing(tmp_path) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_build_cn_stock_daily_bar_reports_cancelled_when_cancel_event_set(
-    tmp_path, monkeypatch
-) -> None:
+def test_build_cn_stock_daily_bar_reports_cancelled_when_cancel_event_set(tmp_path, monkeypatch) -> None:
     """When the cancel_event is set during a build, the result status is ``cancelled``."""
 
     store = _setup_multi_security_store(tmp_path, n=4)

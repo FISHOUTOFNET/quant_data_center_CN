@@ -102,13 +102,13 @@ def create_run_log_context(
     """
 
     resolved_runtime = runtime_paths or paths.resolve_runtime_paths()
-    timestamp = (now or datetime.now())
+    timestamp = now or datetime.now()
     resolved_run_id = run_id or _format_run_id(timestamp)
     if explicit_path:
         log_path = Path(explicit_path).expanduser().resolve()
     else:
         stamp = timestamp.strftime("%Y%m%d_%H%M%S")
-        safe_nonce = uuid.uuid4().hex[:6]
+        uuid.uuid4().hex[:6]
         log_path = resolved_runtime.run_logs_dir / f"{stamp}_{resolved_run_id}.log"
     try:
         log_path.parent.mkdir(parents=True, exist_ok=True)

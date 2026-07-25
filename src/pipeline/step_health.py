@@ -20,9 +20,10 @@ whether a step should be recorded as ``success``, ``success_degraded``, or
 from __future__ import annotations
 
 import json
+from collections.abc import Iterable
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
 STEP_HEALTH_SCHEMA_VERSION = 1
 STEP_HEALTH_STATUSES: tuple[str, ...] = ("success", "success_degraded", "failed")
@@ -62,30 +63,34 @@ SKIPPED_STATUSES: frozenset[str] = frozenset({"skipped", "skipped_checkpoint"})
 # a tolerant policy. ``partial`` is here because it means a derived target
 # already had partition failures — that is a data-integrity failure, not a
 # threshold question.
-FAILURE_STATUSES: frozenset[str] = frozenset({
-    "failed",
-    "partial",
-    "cancelled",
-    "stalled",
-    "timed_out",
-    "failed_resource_locked",
-    "failed_timeout_cleanup",
-    # ``abandoned`` is an orchestrator-level terminal status set when a prior
-    # run's ``running`` step is found orphaned (orchestrator pid dead or
-    # exceeded RUNNING_ABANDONED_AFTER_SECONDS). It is a fatal failure: a
-    # downstream step must not proceed as if the abandoned step had succeeded.
-    "abandoned",
-})
+FAILURE_STATUSES: frozenset[str] = frozenset(
+    {
+        "failed",
+        "partial",
+        "cancelled",
+        "stalled",
+        "timed_out",
+        "failed_resource_locked",
+        "failed_timeout_cleanup",
+        # ``abandoned`` is an orchestrator-level terminal status set when a prior
+        # run's ``running`` step is found orphaned (orchestrator pid dead or
+        # exceeded RUNNING_ABANDONED_AFTER_SECONDS). It is a fatal failure: a
+        # downstream step must not proceed as if the abandoned step had succeeded.
+        "abandoned",
+    }
+)
 # Statuses that are always fatal regardless of tolerant-policy thresholds.
 # These propagate up as ``failed`` even when a source step has a tolerant
 # policy that would otherwise allow a small number of ordinary ``failed``
 # records to degrade to ``success_degraded``.
-FATAL_TERMINAL_STATUSES: frozenset[str] = frozenset({
-    "partial",
-    "cancelled",
-    "stalled",
-    "timed_out",
-})
+FATAL_TERMINAL_STATUSES: frozenset[str] = frozenset(
+    {
+        "partial",
+        "cancelled",
+        "stalled",
+        "timed_out",
+    }
+)
 
 
 def is_success_status(value: object) -> bool:
@@ -354,9 +359,9 @@ def evaluate_step_health(
         # Fatal terminal statuses (partial/cancelled/stalled/timed_out) are
         # ALWAYS fatal regardless of policy.fatal_statuses — they represent
         # data-integrity failures that no tolerant threshold can absorb.
-        if is_fatal_terminal_status(status) and status not in fatal_statuses_hit:
-            fatal_statuses_hit.append(status)
-        elif status and status in policy.fatal_statuses and status not in fatal_statuses_hit:
+        if (is_fatal_terminal_status(status) and status not in fatal_statuses_hit) or (
+            status and status in policy.fatal_statuses and status not in fatal_statuses_hit
+        ):
             fatal_statuses_hit.append(status)
 
     failed_codes, total_codes = _aggregate_failed_codes(record_list)
@@ -366,10 +371,7 @@ def evaluate_step_health(
     examples = tuple(failed_record_examples(record_list))
 
     if fatal_datasets_hit:
-        reason = (
-            f"fatal dataset failure: {', '.join(fatal_datasets_hit)} "
-            f"({failed_count} failed record(s) of {total})"
-        )
+        reason = f"fatal dataset failure: {', '.join(fatal_datasets_hit)} ({failed_count} failed record(s) of {total})"
         return StepHealthSummary(
             status="failed",
             reason=reason,
@@ -388,10 +390,7 @@ def evaluate_step_health(
         )
 
     if fatal_statuses_hit:
-        reason = (
-            f"fatal status: {', '.join(fatal_statuses_hit)} "
-            f"({failed_count} failed record(s) of {total})"
-        )
+        reason = f"fatal status: {', '.join(fatal_statuses_hit)} ({failed_count} failed record(s) of {total})"
         return StepHealthSummary(
             status="failed",
             reason=reason,
@@ -410,9 +409,7 @@ def evaluate_step_health(
         )
 
     if policy.require_any_success and success_count == 0:
-        reason = (
-            f"no successful records among {total} record(s); require_any_success=True"
-        )
+        reason = f"no successful records among {total} record(s); require_any_success=True"
         return StepHealthSummary(
             status="failed",
             reason=reason,
@@ -431,9 +428,7 @@ def evaluate_step_health(
         )
 
     if failed_count > policy.max_failed_records:
-        reason = (
-            f"failed record count {failed_count} exceeds max_failed_records={policy.max_failed_records}"
-        )
+        reason = f"failed record count {failed_count} exceeds max_failed_records={policy.max_failed_records}"
         return StepHealthSummary(
             status="failed",
             reason=reason,
@@ -474,9 +469,7 @@ def evaluate_step_health(
         )
 
     if len(failed_codes) > policy.max_failed_codes:
-        reason = (
-            f"failed code count {len(failed_codes)} exceeds max_failed_codes={policy.max_failed_codes}"
-        )
+        reason = f"failed code count {len(failed_codes)} exceeds max_failed_codes={policy.max_failed_codes}"
         return StepHealthSummary(
             status="failed",
             reason=reason,
@@ -496,8 +489,7 @@ def evaluate_step_health(
 
     if total_codes > 0 and failed_code_ratio > policy.max_failed_code_ratio:
         reason = (
-            f"failed code ratio {failed_code_ratio:.4f} exceeds "
-            f"max_failed_code_ratio={policy.max_failed_code_ratio}"
+            f"failed code ratio {failed_code_ratio:.4f} exceeds max_failed_code_ratio={policy.max_failed_code_ratio}"
         )
         return StepHealthSummary(
             status="failed",
@@ -611,12 +603,12 @@ def read_step_health_summary(path: Path) -> StepHealthSummary | None:
 __all__ = [
     "DEFAULT_FATAL_STATUSES",
     "DEGRADED_SUCCESS_STATUSES",
-    "FATAL_TERMINAL_STATUSES",
     "FAILURE_STATUSES",
+    "FATAL_TERMINAL_STATUSES",
     "METADATA_DATASET",
     "SKIPPED_STATUSES",
-    "STEP_HEALTH_STATUSES",
     "STEP_HEALTH_SCHEMA_VERSION",
+    "STEP_HEALTH_STATUSES",
     "SUCCESS_STATUSES",
     "StepHealthPolicy",
     "StepHealthSummary",

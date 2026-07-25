@@ -32,7 +32,6 @@ from src.pipeline.step_health import (
 )
 from src.tools.run_update_daily import DailyStep, _final_exit_code
 
-
 # ---------------------------------------------------------------------------
 # Record / step-state builders
 # ---------------------------------------------------------------------------
@@ -75,6 +74,7 @@ def _daily_step(step_id: str) -> DailyStep:
 
 # --- 6.1.1: is_success_status ---
 
+
 def test_is_success_status_true_for_success() -> None:
     assert is_success_status("success") is True
 
@@ -103,6 +103,7 @@ def test_is_success_status_false_for_other_statuses(status: object) -> None:
 
 # --- 6.1.2: is_failure_status for all known failure statuses ---
 
+
 @pytest.mark.parametrize(
     "status",
     [
@@ -122,11 +123,13 @@ def test_is_failure_status_true_for_known_failure_statuses(status: str) -> None:
 
 # --- 6.1.3: is_failure_status prefix match for failed_* ---
 
+
 def test_is_failure_status_true_for_failed_prefix() -> None:
     assert is_failure_status("failed_anything") is True
 
 
 # --- 6.1.4: is_failure_status False for non-failures ---
+
 
 @pytest.mark.parametrize("status", ["success", "skipped", ""])
 def test_is_failure_status_false_for_non_failures(status: str) -> None:
@@ -134,6 +137,7 @@ def test_is_failure_status_false_for_non_failures(status: str) -> None:
 
 
 # --- 6.1.5: is_skipped_status ---
+
 
 @pytest.mark.parametrize(
     "status",
@@ -150,6 +154,7 @@ def test_is_skipped_status_false_for_non_skipped(status: str) -> None:
 
 # --- 6.1.6: is_fatal_terminal_status ---
 
+
 @pytest.mark.parametrize(
     "status",
     ["partial", "cancelled", "stalled", "timed_out"],
@@ -159,6 +164,7 @@ def test_is_fatal_terminal_status_true(status: str) -> None:
 
 
 # --- 6.1.7: failed is NOT fatal-terminal (it's fatal but not terminal) ---
+
 
 def test_is_fatal_terminal_status_false_for_failed() -> None:
     assert is_fatal_terminal_status("failed") is False
@@ -174,6 +180,7 @@ def test_is_fatal_terminal_status_false_for_non_terminal(status: str) -> None:
 
 # --- is_degraded_success_status (part of the single authority) ---
 
+
 def test_is_degraded_success_status_true_for_success_degraded() -> None:
     assert is_degraded_success_status("success_degraded") is True
 
@@ -185,16 +192,17 @@ def test_is_degraded_success_status_false_for_other_statuses(status: str) -> Non
 
 # --- The authority sets must match the helper semantics ---
 
+
 def test_success_statuses_set_only_contains_success() -> None:
-    assert SUCCESS_STATUSES == frozenset({"success"})
+    assert frozenset({"success"}) == SUCCESS_STATUSES
 
 
 def test_degraded_success_statuses_set_only_contains_success_degraded() -> None:
-    assert DEGRADED_SUCCESS_STATUSES == frozenset({"success_degraded"})
+    assert frozenset({"success_degraded"}) == DEGRADED_SUCCESS_STATUSES
 
 
 def test_skipped_statuses_set_contains_skipped_and_checkpoint() -> None:
-    assert SKIPPED_STATUSES == frozenset({"skipped", "skipped_checkpoint"})
+    assert frozenset({"skipped", "skipped_checkpoint"}) == SKIPPED_STATUSES
 
 
 def test_failure_statuses_set_contains_all_specified_failures() -> None:
@@ -210,11 +218,11 @@ def test_failure_statuses_set_contains_all_specified_failures() -> None:
             "abandoned",
         }
     )
-    assert FAILURE_STATUSES == expected
+    assert expected == FAILURE_STATUSES
 
 
 def test_fatal_terminal_statuses_set_contains_only_terminal_four() -> None:
-    assert FATAL_TERMINAL_STATUSES == frozenset({"partial", "cancelled", "stalled", "timed_out"})
+    assert frozenset({"partial", "cancelled", "stalled", "timed_out"}) == FATAL_TERMINAL_STATUSES
 
 
 def test_fatal_terminal_is_subset_of_failure() -> None:
@@ -412,7 +420,7 @@ def test_final_exit_code_fatal_terminal_not_downgraded_by_tolerant_threshold() -
 
 
 @pytest.mark.parametrize(
-    "status,exit_code",
+    ("status", "exit_code"),
     [
         ("partial", 1),
         ("cancelled", 1),

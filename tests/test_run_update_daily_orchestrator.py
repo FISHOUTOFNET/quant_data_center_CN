@@ -745,7 +745,12 @@ def test_repo_workflow_maps_legacy_build_derived_start_at(tmp_path: Path) -> Non
         == 0
     )
 
-    assert calls == ["build-derived-security-master", "build-derived-daily-bar", "build-derived-valuation", "build-duckdb-views"]
+    assert calls == [
+        "build-derived-security-master",
+        "build-derived-daily-bar",
+        "build-derived-valuation",
+        "build-duckdb-views",
+    ]
     states = _steps(state_file, "natural_date:2026-06-06")
     assert states["build-derived-security-master"]["status"] == "success"
     assert "Mapped legacy start-at build-derived to build-derived-security-master" in log_file.read_text(
@@ -1221,9 +1226,7 @@ def test_weekend_daily_bar_failure_blocks_only_daily_bar_stage(tmp_path: Path) -
     assert "status pending" not in log_text
     assert states["build-derived-security-master"]["status"] == "success"
     assert states["build-derived-daily-bar"]["status"] == "blocked"
-    assert states["build-derived-daily-bar"]["reason"].startswith(
-        "degraded: cannot build target=daily_bar"
-    )
+    assert states["build-derived-daily-bar"]["reason"].startswith("degraded: cannot build target=daily_bar")
     assert states["build-derived-valuation"]["status"] == "success"
     assert states["build-duckdb-views"]["status"] == "blocked"
 
@@ -1351,7 +1354,9 @@ def test_failed_optional_hard_status_blocks_followup(status: str) -> None:
     assert run_update_daily._blocked_dependencies(step, step_state) == ("optional-source",)
 
 
-@pytest.mark.parametrize("status", ["failed", "failed_resource_locked", "failed_timeout_cleanup", "blocked", "abandoned"])
+@pytest.mark.parametrize(
+    "status", ["failed", "failed_resource_locked", "failed_timeout_cleanup", "blocked", "abandoned"]
+)
 def test_soft_dependency_failure_does_not_block(status: str) -> None:
     soft_dep = run_update_daily.DailyDependency("soft-source", soft=True)
     hard_dep = run_update_daily.DailyDependency("hard-source")

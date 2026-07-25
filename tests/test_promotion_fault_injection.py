@@ -165,9 +165,7 @@ def _make_plan(store: ParquetStore, master: pd.DataFrame, *, force: bool = True)
         store=store,
         target=TARGET,
         dataset_id=DATASET_ID,
-        source_dataset_specs=tuple(
-            (dataset_id, "baostock_code") for dataset_id in BAOSTOCK_DAILY_SOURCES
-        ),
+        source_dataset_specs=tuple((dataset_id, "baostock_code") for dataset_id in BAOSTOCK_DAILY_SOURCES),
         master=master,
         force_rebuild=force,
     )
@@ -290,9 +288,7 @@ def _patch_rmtree_to_fail(monkeypatch, predicate: Callable[[Path], bool]) -> Non
 # ---------------------------------------------------------------------------
 
 
-def test_fault1_final_to_backup_fails_original_final_preserved(
-    tmp_path: Path, monkeypatch
-) -> None:
+def test_fault1_final_to_backup_fails_original_final_preserved(tmp_path: Path, monkeypatch) -> None:
     """The first rename in ``promote()`` (final -> backup) fails. The original
     final must remain untouched, no backup is created, and the partition is
     recorded as failed."""
@@ -304,7 +300,9 @@ def test_fault1_final_to_backup_fails_original_final_preserved(
 
     # Pre-build so an old final + old manifest exist.
     counters0, _, _ = _run_build(
-        store, master, plan,
+        store,
+        master,
+        plan,
         materialize_fn=_real_materialize_factory(NOW),
         run_id="prebuild",
         tmp_path=tmp_path,
@@ -325,7 +323,9 @@ def test_fault1_final_to_backup_fails_original_final_preserved(
 
     plan2 = _make_plan(store, master, force=True)
     counters, journal, _ = _run_build(
-        store, master, plan2,
+        store,
+        master,
+        plan2,
         materialize_fn=_real_materialize_factory(NOW),
         run_id="fault1",
         tmp_path=tmp_path,
@@ -359,7 +359,9 @@ def test_fault1_final_to_backup_fails_original_final_preserved(
     monkeypatch.undo()
     plan3 = _make_plan(store, master, force=True)
     counters3, _, _ = _run_build(
-        store, master, plan3,
+        store,
+        master,
+        plan3,
         materialize_fn=_real_materialize_factory(NOW),
         run_id="rebuild1",
         tmp_path=tmp_path,
@@ -376,9 +378,7 @@ def test_fault1_final_to_backup_fails_original_final_preserved(
 # ---------------------------------------------------------------------------
 
 
-def test_fault2_staging_to_final_fails_backup_restored(
-    tmp_path: Path, monkeypatch
-) -> None:
+def test_fault2_staging_to_final_fails_backup_restored(tmp_path: Path, monkeypatch) -> None:
     """final -> backup succeeds, then staging -> final rename fails inside
     ``promote()``. The internal rollback restores backup -> final, so the old
     content is preserved."""
@@ -389,7 +389,9 @@ def test_fault2_staging_to_final_fails_backup_restored(
     plan = _make_plan(store, master, force=True)
 
     counters0, _, _ = _run_build(
-        store, master, plan,
+        store,
+        master,
+        plan,
         materialize_fn=_real_materialize_factory(NOW),
         run_id="prebuild",
         tmp_path=tmp_path,
@@ -408,7 +410,9 @@ def test_fault2_staging_to_final_fails_backup_restored(
 
     plan2 = _make_plan(store, master, force=True)
     counters, journal, _ = _run_build(
-        store, master, plan2,
+        store,
+        master,
+        plan2,
         materialize_fn=_real_materialize_factory(NOW),
         run_id="fault2",
         tmp_path=tmp_path,
@@ -436,7 +440,9 @@ def test_fault2_staging_to_final_fails_backup_restored(
     monkeypatch.undo()
     plan3 = _make_plan(store, master, force=True)
     counters3, _, _ = _run_build(
-        store, master, plan3,
+        store,
+        master,
+        plan3,
         materialize_fn=_real_materialize_factory(NOW),
         run_id="rebuild2",
         tmp_path=tmp_path,
@@ -468,7 +474,9 @@ def test_fault3_new_partition_staging_to_final_fails(tmp_path: Path, monkeypatch
     _patch_rename_to_fail(monkeypatch, lambda src, dst: ".staging" in src.parts)
 
     counters, journal, _ = _run_build(
-        store, master, plan,
+        store,
+        master,
+        plan,
         materialize_fn=_real_materialize_factory(NOW),
         run_id="fault3",
         tmp_path=tmp_path,
@@ -492,7 +500,9 @@ def test_fault3_new_partition_staging_to_final_fails(tmp_path: Path, monkeypatch
     monkeypatch.undo()
     plan2 = _make_plan(store, master, force=True)
     counters2, _, _ = _run_build(
-        store, master, plan2,
+        store,
+        master,
+        plan2,
         materialize_fn=_real_materialize_factory(NOW),
         run_id="rebuild3",
         tmp_path=tmp_path,
@@ -510,9 +520,7 @@ def test_fault3_new_partition_staging_to_final_fails(tmp_path: Path, monkeypatch
 # ---------------------------------------------------------------------------
 
 
-def test_fault4_manifest_upsert_fails_rollback_restores_old_final(
-    tmp_path: Path, monkeypatch
-) -> None:
+def test_fault4_manifest_upsert_fails_rollback_restores_old_final(tmp_path: Path, monkeypatch) -> None:
     """``promote()`` succeeds but the manifest upsert fails. The coordinator
     calls ``promotion.rollback()`` which restores the old final. The manifest
     stays in its old state."""
@@ -523,7 +531,9 @@ def test_fault4_manifest_upsert_fails_rollback_restores_old_final(
     plan = _make_plan(store, master, force=True)
 
     counters0, _, _ = _run_build(
-        store, master, plan,
+        store,
+        master,
+        plan,
         materialize_fn=_real_materialize_factory(NOW),
         run_id="prebuild",
         tmp_path=tmp_path,
@@ -543,7 +553,9 @@ def test_fault4_manifest_upsert_fails_rollback_restores_old_final(
 
     plan2 = _make_plan(store, master, force=True)
     counters, journal, _ = _run_build(
-        store, master, plan2,
+        store,
+        master,
+        plan2,
         materialize_fn=_real_materialize_factory(NOW),
         run_id="fault4",
         tmp_path=tmp_path,
@@ -571,7 +583,9 @@ def test_fault4_manifest_upsert_fails_rollback_restores_old_final(
     monkeypatch.undo()
     plan3 = _make_plan(store, master, force=True)
     counters3, _, _ = _run_build(
-        store, master, plan3,
+        store,
+        master,
+        plan3,
         materialize_fn=_real_materialize_factory(NOW),
         run_id="rebuild4",
         tmp_path=tmp_path,
@@ -588,9 +602,7 @@ def test_fault4_manifest_upsert_fails_rollback_restores_old_final(
 # ---------------------------------------------------------------------------
 
 
-def test_fault5_manifest_delete_fails_backup_restored(
-    tmp_path: Path, monkeypatch
-) -> None:
+def test_fault5_manifest_delete_fails_backup_restored(tmp_path: Path, monkeypatch) -> None:
     """Delete-partition flow: ``promote()`` moves final -> backup, then the
     manifest delete fails. ``rollback()`` restores backup -> final so the old
     data and manifest row survive."""
@@ -602,7 +614,9 @@ def test_fault5_manifest_delete_fails_backup_restored(
 
     # Pre-build so an old final + old manifest exist (to be deleted).
     counters0, _, _ = _run_build(
-        store, master, plan,
+        store,
+        master,
+        plan,
         materialize_fn=_real_materialize_factory(NOW),
         run_id="prebuild",
         tmp_path=tmp_path,
@@ -631,7 +645,9 @@ def test_fault5_manifest_delete_fails_backup_restored(
     # Re-plan and run with an empty materialize -> delete-partition path.
     plan2 = _make_plan(store, master, force=True)
     counters, journal, _ = _run_build(
-        store, master, plan2,
+        store,
+        master,
+        plan2,
         materialize_fn=_empty_materialize,
         run_id="fault5",
         tmp_path=tmp_path,
@@ -660,7 +676,9 @@ def test_fault5_manifest_delete_fails_backup_restored(
     monkeypatch.undo()
     plan3 = _make_plan(store, master, force=True)
     counters3, _, _ = _run_build(
-        store, master, plan3,
+        store,
+        master,
+        plan3,
         materialize_fn=_empty_materialize,
         run_id="rebuild5",
         tmp_path=tmp_path,
@@ -676,9 +694,7 @@ def test_fault5_manifest_delete_fails_backup_restored(
 # ---------------------------------------------------------------------------
 
 
-def test_fault6_rollback_rmtree_new_final_fails_recovery_error(
-    tmp_path: Path, monkeypatch
-) -> None:
+def test_fault6_rollback_rmtree_new_final_fails_recovery_error(tmp_path: Path, monkeypatch) -> None:
     """Replace path: ``promote()`` succeeds, manifest upsert fails, and the
     ``rmtree`` of the new final inside ``rollback()`` also fails.
     ``PartitionPromotionRecoveryError`` is raised; the coordinator records the
@@ -690,7 +706,9 @@ def test_fault6_rollback_rmtree_new_final_fails_recovery_error(
     plan = _make_plan(store, master, force=True)
 
     counters0, _, _ = _run_build(
-        store, master, plan,
+        store,
+        master,
+        plan,
         materialize_fn=_real_materialize_factory(NOW),
         run_id="prebuild",
         tmp_path=tmp_path,
@@ -698,7 +716,7 @@ def test_fault6_rollback_rmtree_new_final_fails_recovery_error(
     assert counters0.committed == 1
 
     final = _final_dir(store, sid)
-    old_bytes = (final / "data.parquet").read_bytes()
+    (final / "data.parquet").read_bytes()
     marker = final / "OLD_MARKER"
     marker.write_text("old", encoding="utf-8")
 
@@ -708,13 +726,13 @@ def test_fault6_rollback_rmtree_new_final_fails_recovery_error(
         raise RuntimeError("injected manifest upsert failure")
 
     monkeypatch.setattr(ManifestWriteSession, "upsert_partition", failing_upsert)
-    _patch_rmtree_to_fail(
-        monkeypatch, lambda p: p.resolve() == final.resolve()
-    )
+    _patch_rmtree_to_fail(monkeypatch, lambda p: p.resolve() == final.resolve())
 
     plan2 = _make_plan(store, master, force=True)
     counters, journal, _ = _run_build(
-        store, master, plan2,
+        store,
+        master,
+        plan2,
         materialize_fn=_real_materialize_factory(NOW),
         run_id="fault6",
         tmp_path=tmp_path,
@@ -745,7 +763,9 @@ def test_fault6_rollback_rmtree_new_final_fails_recovery_error(
     monkeypatch.undo()
     plan3 = _make_plan(store, master, force=True)
     counters3, _, _ = _run_build(
-        store, master, plan3,
+        store,
+        master,
+        plan3,
         materialize_fn=_real_materialize_factory(NOW),
         run_id="rebuild6",
         tmp_path=tmp_path,
@@ -762,9 +782,7 @@ def test_fault6_rollback_rmtree_new_final_fails_recovery_error(
 # ---------------------------------------------------------------------------
 
 
-def test_fault7_rollback_backup_to_final_rename_fails_recovery_error(
-    tmp_path: Path, monkeypatch
-) -> None:
+def test_fault7_rollback_backup_to_final_rename_fails_recovery_error(tmp_path: Path, monkeypatch) -> None:
     """Replace path: ``promote()`` succeeds, manifest upsert fails, rollback
     rmtree(new final) succeeds, but the backup -> final rename fails.
     ``PartitionPromotionRecoveryError`` is raised; the partition is left with
@@ -776,7 +794,9 @@ def test_fault7_rollback_backup_to_final_rename_fails_recovery_error(
     plan = _make_plan(store, master, force=True)
 
     counters0, _, _ = _run_build(
-        store, master, plan,
+        store,
+        master,
+        plan,
         materialize_fn=_real_materialize_factory(NOW),
         run_id="prebuild",
         tmp_path=tmp_path,
@@ -799,7 +819,9 @@ def test_fault7_rollback_backup_to_final_rename_fails_recovery_error(
 
     plan2 = _make_plan(store, master, force=True)
     counters, journal, _ = _run_build(
-        store, master, plan2,
+        store,
+        master,
+        plan2,
         materialize_fn=_real_materialize_factory(NOW),
         run_id="fault7",
         tmp_path=tmp_path,
@@ -828,7 +850,9 @@ def test_fault7_rollback_backup_to_final_rename_fails_recovery_error(
     monkeypatch.undo()
     plan3 = _make_plan(store, master, force=True)
     counters3, _, _ = _run_build(
-        store, master, plan3,
+        store,
+        master,
+        plan3,
         materialize_fn=_real_materialize_factory(NOW),
         run_id="rebuild7",
         tmp_path=tmp_path,
@@ -846,9 +870,7 @@ def test_fault7_rollback_backup_to_final_rename_fails_recovery_error(
 # ---------------------------------------------------------------------------
 
 
-def test_fault8_finalize_backup_cleanup_fails_data_consistent(
-    tmp_path: Path, monkeypatch
-) -> None:
+def test_fault8_finalize_backup_cleanup_fails_data_consistent(tmp_path: Path, monkeypatch) -> None:
     """``promote()`` and the manifest write both succeed, but
     ``finalize()`` cannot remove the backup directory. This is a warning only:
     the data (final + manifest) is already consistent, the partition is
@@ -860,7 +882,9 @@ def test_fault8_finalize_backup_cleanup_fails_data_consistent(
     plan = _make_plan(store, master, force=True)
 
     counters0, _, _ = _run_build(
-        store, master, plan,
+        store,
+        master,
+        plan,
         materialize_fn=_real_materialize_factory(NOW),
         run_id="prebuild",
         tmp_path=tmp_path,
@@ -878,7 +902,9 @@ def test_fault8_finalize_backup_cleanup_fails_data_consistent(
 
     plan2 = _make_plan(store, master, force=True)
     counters, journal, _ = _run_build(
-        store, master, plan2,
+        store,
+        master,
+        plan2,
         materialize_fn=_real_materialize_factory(NOW),
         run_id="fault8",
         tmp_path=tmp_path,
@@ -913,7 +939,9 @@ def test_fault8_finalize_backup_cleanup_fails_data_consistent(
     monkeypatch.undo()
     plan3 = _make_plan(store, master, force=True)
     counters3, _, _ = _run_build(
-        store, master, plan3,
+        store,
+        master,
+        plan3,
         materialize_fn=_real_materialize_factory(NOW),
         run_id="rebuild8",
         tmp_path=tmp_path,
@@ -934,9 +962,7 @@ def test_fault8_finalize_backup_cleanup_fails_data_consistent(
 # ---------------------------------------------------------------------------
 
 
-def _make_promotion_with_prior_final(
-    store: ParquetStore, sid: str
-) -> tuple[PartitionPromotion, Path, Path]:
+def _make_promotion_with_prior_final(store: ParquetStore, sid: str) -> tuple[PartitionPromotion, Path, Path]:
     """Create a PartitionPromotion with a prior final and a staging dir.
 
     Returns (promotion, final_dir, backup_dir_placeholder). The staging dir
@@ -952,9 +978,7 @@ def _make_promotion_with_prior_final(
     return promotion, final_dir, staging.backup_dir
 
 
-def test_promotion_direct_fault6_rmtree_new_final_recovery_error(
-    tmp_path: Path, monkeypatch
-) -> None:
+def test_promotion_direct_fault6_rmtree_new_final_recovery_error(tmp_path: Path, monkeypatch) -> None:
     """Directly verify fault point 6: after a successful promote(), calling
     rollback() with rmtree of the new final patched to fail raises
     PartitionPromotionRecoveryError."""
@@ -969,9 +993,7 @@ def test_promotion_direct_fault6_rmtree_new_final_recovery_error(
     assert (final_dir / "data.parquet").read_bytes() == b"new-parquet"
 
     # Inject: rmtree of the new final fails.
-    _patch_rmtree_to_fail(
-        monkeypatch, lambda p: p.resolve() == final_dir.resolve()
-    )
+    _patch_rmtree_to_fail(monkeypatch, lambda p: p.resolve() == final_dir.resolve())
 
     with pytest.raises(PartitionPromotionRecoveryError):
         promotion.rollback()
@@ -981,9 +1003,7 @@ def test_promotion_direct_fault6_rmtree_new_final_recovery_error(
     assert (final_dir / "data.parquet").read_bytes() == b"new-parquet"
 
 
-def test_promotion_direct_fault7_backup_to_final_rename_recovery_error(
-    tmp_path: Path, monkeypatch
-) -> None:
+def test_promotion_direct_fault7_backup_to_final_rename_recovery_error(tmp_path: Path, monkeypatch) -> None:
     """Directly verify fault point 7: after a successful promote(), calling
     rollback() with the backup -> final rename patched to fail raises
     PartitionPromotionRecoveryError. The new final is removed (rmtree

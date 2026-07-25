@@ -230,7 +230,7 @@ def check_stall(
 
     Condition 4 requires the caller to pass the previous ``processed`` value
     from the prior poll. On the first poll (``previous_processed=None``), only
-    conditions 1–3 are checked.
+    conditions 1-3 are checked.
 
     The caller (orchestrator) is expected to poll this every 60 seconds and
     terminate the child process when ``stalled`` is ``True``.

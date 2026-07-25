@@ -150,9 +150,13 @@ class _CapturingPopen:
         return 0
 
 
-def _stale_pinned_path(tmp_path: Path, *, run_instance: str = "run_instance:20260725_120000",
-                       step_id: str = "build-derived-daily-bar",
-                       heartbeat_age_seconds: int = 35 * 60) -> Path:
+def _stale_pinned_path(
+    tmp_path: Path,
+    *,
+    run_instance: str = "run_instance:20260725_120000",
+    step_id: str = "build-derived-daily-bar",
+    heartbeat_age_seconds: int = 35 * 60,
+) -> Path:
     """Create a pinned progress path file with a stale heartbeat."""
 
     pinned = run_update_daily._derived_progress_path_for_step(tmp_path, run_instance, step_id)
@@ -186,12 +190,8 @@ class TestP03FixedProgressPath:
 
     def test_different_run_instances_produce_different_paths(self, tmp_path: Path) -> None:
         step_id = "build-derived-daily-bar"
-        path_a = run_update_daily._derived_progress_path_for_step(
-            tmp_path, "run_instance:20260725_120000", step_id
-        )
-        path_b = run_update_daily._derived_progress_path_for_step(
-            tmp_path, "run_instance:20260726_120000", step_id
-        )
+        path_a = run_update_daily._derived_progress_path_for_step(tmp_path, "run_instance:20260725_120000", step_id)
+        path_b = run_update_daily._derived_progress_path_for_step(tmp_path, "run_instance:20260726_120000", step_id)
 
         assert path_a != path_b
         # Both live under the same ``derived-step-progress`` parent but in
@@ -201,12 +201,8 @@ class TestP03FixedProgressPath:
 
     def test_different_step_ids_produce_different_paths(self, tmp_path: Path) -> None:
         run_instance = "run_instance:20260725_120000"
-        path_a = run_update_daily._derived_progress_path_for_step(
-            tmp_path, run_instance, "build-derived-daily-bar"
-        )
-        path_b = run_update_daily._derived_progress_path_for_step(
-            tmp_path, run_instance, "build-derived-valuation"
-        )
+        path_a = run_update_daily._derived_progress_path_for_step(tmp_path, run_instance, "build-derived-daily-bar")
+        path_b = run_update_daily._derived_progress_path_for_step(tmp_path, run_instance, "build-derived-valuation")
 
         assert path_a != path_b
         # Same run-instance directory, different filenames.
@@ -256,7 +252,7 @@ class TestP03FixedProgressPath:
 
     def test_derived_stall_targets_is_daily_bar_only(self) -> None:
         # P0-3 contract: valuation must NOT be in DERIVED_STALL_TARGETS.
-        assert run_update_daily.DERIVED_STALL_TARGETS == {"daily_bar"}
+        assert {"daily_bar"} == run_update_daily.DERIVED_STALL_TARGETS
         assert "valuation" not in run_update_daily.DERIVED_STALL_TARGETS
 
     def test_run_subprocess_sets_derived_progress_env_for_daily_bar(
@@ -285,9 +281,7 @@ class TestP03FixedProgressPath:
 
         env = captured["env"]
         assert env is not None
-        expected_path = run_update_daily._derived_progress_path_for_step(
-            tmp_path, run_instance_key, step.id
-        )
+        expected_path = run_update_daily._derived_progress_path_for_step(tmp_path, run_instance_key, step.id)
         assert env[run_update_daily.QDC_DERIVED_PROGRESS_PATH_ENV] == str(expected_path)
         assert env[run_update_daily.QDC_DERIVED_RUN_ID_ENV] == f"{run_instance_key}:{step.id}"
 
@@ -399,15 +393,11 @@ class TestP03FixedProgressPath:
         step_id = "build-derived-daily-bar"
 
         # Stale file from a previous run lives in a sibling run_instance dir.
-        old_pinned_path = run_update_daily._derived_progress_path_for_step(
-            tmp_path, old_run_instance, step_id
-        )
+        old_pinned_path = run_update_daily._derived_progress_path_for_step(tmp_path, old_run_instance, step_id)
         _write_progress_state(old_pinned_path, heartbeat_age_seconds=3600)
 
         # Current run's pinned path has a FRESH heartbeat.
-        current_pinned_path = run_update_daily._derived_progress_path_for_step(
-            tmp_path, current_run_instance, step_id
-        )
+        current_pinned_path = run_update_daily._derived_progress_path_for_step(tmp_path, current_run_instance, step_id)
         _write_progress_state(current_pinned_path, heartbeat_age_seconds=0)
 
         step = _make_step(step_id, target="daily_bar")
@@ -460,8 +450,8 @@ class TestP04StalledExitCode:
         proc = _FakePopen(exit_code_after_interrupt=0)
 
         # Cleanup succeeds → stall verdict is preserved as 126.
-        monkeypatch.setattr(run_update_daily, "_terminate_process_tree", lambda p, l: True)
-        monkeypatch.setattr(run_update_daily, "_send_interrupt", lambda p, l: None)
+        monkeypatch.setattr(run_update_daily, "_terminate_process_tree", lambda p, log: True)
+        monkeypatch.setattr(run_update_daily, "_send_interrupt", lambda p, log: None)
 
         exit_code = run_update_daily._wait_with_stall_detection(
             proc,
@@ -484,8 +474,8 @@ class TestP04StalledExitCode:
         step = _make_step("build-derived-daily-bar", target="daily_bar")
         proc = _FakePopen(exit_code_after_interrupt=1)
 
-        monkeypatch.setattr(run_update_daily, "_terminate_process_tree", lambda p, l: True)
-        monkeypatch.setattr(run_update_daily, "_send_interrupt", lambda p, l: None)
+        monkeypatch.setattr(run_update_daily, "_terminate_process_tree", lambda p, log: True)
+        monkeypatch.setattr(run_update_daily, "_send_interrupt", lambda p, log: None)
 
         exit_code = run_update_daily._wait_with_stall_detection(
             proc,
@@ -513,8 +503,8 @@ class TestP04StalledExitCode:
         # preserves the 126 verdict.
         proc = _FakePopen(exit_code_after_interrupt=-9, wait_raises_timeout=True)
 
-        monkeypatch.setattr(run_update_daily, "_terminate_process_tree", lambda p, l: True)
-        monkeypatch.setattr(run_update_daily, "_send_interrupt", lambda p, l: None)
+        monkeypatch.setattr(run_update_daily, "_terminate_process_tree", lambda p, log: True)
+        monkeypatch.setattr(run_update_daily, "_send_interrupt", lambda p, log: None)
 
         exit_code = run_update_daily._wait_with_stall_detection(
             proc,
@@ -539,8 +529,8 @@ class TestP04StalledExitCode:
         step = _make_step("build-derived-daily-bar", target="daily_bar")
         proc = _FakePopen(exit_code_after_interrupt=0)
 
-        monkeypatch.setattr(run_update_daily, "_terminate_process_tree", lambda p, l: False)
-        monkeypatch.setattr(run_update_daily, "_send_interrupt", lambda p, l: None)
+        monkeypatch.setattr(run_update_daily, "_terminate_process_tree", lambda p, log: False)
+        monkeypatch.setattr(run_update_daily, "_send_interrupt", lambda p, log: None)
 
         exit_code = run_update_daily._wait_with_stall_detection(
             proc,
@@ -565,8 +555,8 @@ class TestP04StalledExitCode:
         step = _make_step("build-derived-daily-bar", target="daily_bar")
         proc = _FakePopen(exit_code_after_interrupt=0)
 
-        monkeypatch.setattr(run_update_daily, "_terminate_process_tree", lambda p, l: False)
-        monkeypatch.setattr(run_update_daily, "_send_interrupt", lambda p, l: None)
+        monkeypatch.setattr(run_update_daily, "_terminate_process_tree", lambda p, log: False)
+        monkeypatch.setattr(run_update_daily, "_send_interrupt", lambda p, log: None)
 
         exit_code = run_update_daily._wait_with_stall_detection(
             proc,
@@ -595,16 +585,12 @@ class TestP04StalledExitCode:
         step_id = "build-derived-daily-bar"
 
         # Stale file from a previous run (sibling run_instance directory).
-        old_pinned_path = run_update_daily._derived_progress_path_for_step(
-            tmp_path, old_run_instance, step_id
-        )
+        old_pinned_path = run_update_daily._derived_progress_path_for_step(tmp_path, old_run_instance, step_id)
         _write_progress_state(old_pinned_path, heartbeat_age_seconds=3600)
 
         # Current run's pinned path does NOT exist (build hasn't started yet).
         # check_stall returns stalled=False ("state file not found") for it.
-        current_pinned_path = run_update_daily._derived_progress_path_for_step(
-            tmp_path, current_run_instance, step_id
-        )
+        current_pinned_path = run_update_daily._derived_progress_path_for_step(tmp_path, current_run_instance, step_id)
         assert not current_pinned_path.exists()
 
         step = _make_step(step_id, target="daily_bar")
@@ -629,13 +615,16 @@ class TestP04StalledExitCode:
         assert run_update_daily.TIMEOUT_EXIT_CODE == 124
         assert run_update_daily.TIMEOUT_CLEANUP_FAILED_EXIT_CODE == 125
         assert run_update_daily.STALLED_EXIT_CODE == 126
-        assert len(
-            {
-                run_update_daily.TIMEOUT_EXIT_CODE,
-                run_update_daily.TIMEOUT_CLEANUP_FAILED_EXIT_CODE,
-                run_update_daily.STALLED_EXIT_CODE,
-            }
-        ) == 3
+        assert (
+            len(
+                {
+                    run_update_daily.TIMEOUT_EXIT_CODE,
+                    run_update_daily.TIMEOUT_CLEANUP_FAILED_EXIT_CODE,
+                    run_update_daily.STALLED_EXIT_CODE,
+                }
+            )
+            == 3
+        )
 
     def test_no_pinned_path_skips_stall_detection(self, tmp_path: Path) -> None:
         """Defensive: ``progress_path=None`` means stall detection is skipped.

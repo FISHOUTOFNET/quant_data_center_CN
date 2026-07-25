@@ -38,7 +38,6 @@ from src.utils.paths import (
     validate_managed_log_root,
 )
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -53,9 +52,7 @@ def _touch(path: Path, mtime: datetime, content: bytes = b"log") -> Path:
     return path
 
 
-def _touch_run_log(
-    path: Path, mtime: datetime, run_id: str, content: bytes = b"log"
-) -> Path:
+def _touch_run_log(path: Path, mtime: datetime, run_id: str, content: bytes = b"log") -> Path:
     """Create a run-log file whose name embeds ``run_id``."""
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(content)
@@ -113,10 +110,8 @@ class TestP07MarkerValidation:
     def test_validate_raises_when_marker_corrupt(self, tmp_path: Path) -> None:
         """2. Corrupt/invalid JSON in the marker must be rejected."""
         tmp_path.mkdir(parents=True, exist_ok=True)
-        (tmp_path / MANAGED_ROOT_MARKER).write_text(
-            "not valid json {{{", encoding="utf-8"
-        )
-        with pytest.raises(LogRootAuthorizationError, match="corrupt|unreadable"):
+        (tmp_path / MANAGED_ROOT_MARKER).write_text("not valid json {{{", encoding="utf-8")
+        with pytest.raises(LogRootAuthorizationError, match=r"corrupt|unreadable"):
             validate_managed_log_root(tmp_path)
 
     def test_validate_raises_when_application_wrong(self, tmp_path: Path) -> None:
@@ -325,18 +320,15 @@ class TestP07UnsafeRootRejection:
 
     def test_rejects_filesystem_root(self) -> None:
         """12a. The filesystem root (parent is itself) is rejected."""
-        if os.name == "nt":
-            root = Path("C:\\")
-        else:
-            root = Path("/")
-        with pytest.raises(LogRootAuthorizationError, match="filesystem root|drive root"):
+        root = Path("C:\\") if os.name == "nt" else Path("/")
+        with pytest.raises(LogRootAuthorizationError, match=r"filesystem root|drive root"):
             paths._reject_unsafe_log_root(root)
 
     def test_rejects_drive_root_windows(self) -> None:
         """12b. A bare Windows drive root (C:\\) is rejected."""
         if os.name != "nt":
             pytest.skip("drive-root rejection is Windows-specific")
-        with pytest.raises(LogRootAuthorizationError, match="drive root|filesystem root"):
+        with pytest.raises(LogRootAuthorizationError, match=r"drive root|filesystem root"):
             paths._reject_unsafe_log_root(Path("C:\\"))
 
     def test_rejects_user_home(self) -> None:
@@ -358,9 +350,7 @@ class TestP07UnsafeRootRejection:
         with pytest.raises(LogRootAuthorizationError, match="repositor"):
             paths._reject_unsafe_log_root(repo_internal)
 
-    def test_rejects_windows_junction(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_rejects_windows_junction(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """12f. A Windows junction/reparse point is rejected."""
         junction_dir = tmp_path / "junction-logs"
         junction_dir.mkdir(parents=True, exist_ok=True)
@@ -527,9 +517,7 @@ class TestP08ActiveRunProtection:
         assert not old_inactive.exists()
         assert result.kept_reasons.get(log_cleanup.KEEP_REASON_ACTIVE_RUN) == 3
 
-    def test_active_run_protection_works_with_keep_recent_runs(
-        self, tmp_path: Path
-    ) -> None:
+    def test_active_run_protection_works_with_keep_recent_runs(self, tmp_path: Path) -> None:
         """Active run protection takes priority over both retention and recent-run."""
         now = datetime(2026, 7, 25, 12, 0, tzinfo=timezone.utc)
         runs_dir = tmp_path / "runs"
