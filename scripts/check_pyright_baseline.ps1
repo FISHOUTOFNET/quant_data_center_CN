@@ -1,0 +1,246 @@
+<#
+.SYNOPSIS
+    Reproducible Pyright baseline diagnostic and optional main-vs-feature compare.
+
+.DESCRIPTION
+    P1 (sections 7.3-7.4): make Pyright results reproducible and auditable.
+
+    This script is NOT run on every CI invocation. ``scripts/check_quality.ps1``
+    keeps the per-CI gate as a plain ``python -m pyright`` call. This script is
+    for manual acceptance verification: it pins the environment, emits a stable
+    JSON diagnostic, and (when ``-CompareTo`` is supplied) produces a
+    main-vs-feature diff keyed on (severity, rule, normalized_relative_file,
+    message) so that "all errors are pre-existing" can be backed by evidence
+    rather than asserted.
+
+    Usage (acceptance):
+
+        # 1. Capture baseline on main
+        git checkout main
+        python -m pip install -e ".[dev]"
+        pwsh scripts/check_pyright_baseline.ps1 -OutFile baseline-main.json
+
+        # 2. Capture baseline on feature
+        git checkout feature/derived-pipeline-refactor
+        python -m pip install -e ".[dev]"
+        pwsh scripts/check_pyright_baseline.ps1 -OutFile baseline-feature.json
+
+        # 3. Compare
+        pwsh scripts/check_pyright_baseline.ps1 -CompareTo baseline-main.json -OutFile baseline-feature.json
+
+    The script does NOT mutate the working tree, install dependencies, or check
+    out branches. It only runs ``python -m pyright --outputjson`` and writes a
+    diagnostic envelope. The caller is responsible for ensuring the same venv,
+    same pinned pyright (see pyproject.toml ``[project.optional-dependencies]
+    dev``), and same Python interpreter are used for both captures.
+
+.PARAMETER OutFile
+    Path to write the diagnostic envelope (JSON). Defaults to
+    ``.pyright_baseline.json`` in the repository root. When ``-CompareTo`` is
+    also supplied, this file is the FEATURE capture.
+
+.PARAMETER CompareTo
+    Optional path to a previously captured baseline envelope (typically main).
+    When supplied, the script runs pyright on the current tree, writes the
+    current envelope to ``-OutFile``, and prints a main-vs-feature diff:
+    new errors, resolved errors, unchanged diagnostics. Exit code is non-zero
+    when the feature introduces ANY new error (warnings are reported but do
+    not fail).
+
+.PARAMETER PyrightArgs
+    Extra arguments forwarded to ``python -m pyright``. Defaults to none.
+
+.EXAMPLE
+    pwsh scripts/check_pyright_baseline.ps1
+    # Captures .pyright_baseline.json and prints a summary.
+
+.EXAMPLE
+    pwsh scripts/check_pyright_baseline.ps1 -CompareTo .\baseline-main.json -OutFile .\baseline-feature.json
+    # Compares current tree against main baseline; exits non-zero on new errors.
+#>
+
+[CmdletBinding()]
+param(
+    [string] $OutFile = ".pyright_baseline.json",
+    [string] $CompareTo = "",
+    [string[]] $PyrightArgs = @()
+)
+
+$ErrorActionPreference = "Stop"
+Set-StrictMode -Version Latest
+
+$repoRoot = (Resolve-Path "$PSScriptRoot/..").Path
+Set-Location $repoRoot
+
+function Test-PyrightAvailable {
+    try {
+        & python -m pyright --version 2>$null | Out-Null
+        return $LASTEXITCODE -eq 0
+    } catch {
+        return $false
+    }
+}
+
+if (-not (Test-PyrightAvailable)) {
+    Write-Error "pyright is not installed in the current interpreter. Run: python -m pip install -e `".[dev]`""
+    exit 2
+}
+
+# Capture environment facts required by section 7.3.
+$pythonExecutable = (Get-Command python).Source
+$pythonVersion = (& python -c "import sys; print(sys.version.split()[0])").Trim()
+$pyrightVersion = (& python -m pyright --version).Trim()
+$repositorySha = (git rev-parse HEAD).Trim()
+$configPath = (Resolve-Path "$repoRoot/pyproject.toml").Path
+
+Write-Host "== Pyright baseline capture =="
+Write-Host "python_executable : $pythonExecutable"
+Write-Host "python_version    : $pythonVersion"
+Write-Host "pyright_version   : $pyrightVersion"
+Write-Host "repository_sha    : $repositorySha"
+Write-Host "config_path       : $configPath"
+Write-Host ""
+
+# Run pyright --outputjson. We deliberately ignore its exit code (non-zero when
+# any diagnostic is emitted) and read the diagnostic counts from the JSON.
+$rawJson = & python @("-m", "pyright", "--outputjson") $PyrightArgs 2>$null | Out-String
+if ([string]::IsNullOrWhiteSpace($rawJson)) {
+    Write-Error "pyright produced no JSON output. Re-run with: python -m pyright --outputjson"
+    exit 3
+}
+
+$report = $rawJson | ConvertFrom-Json
+
+# Normalize diagnostics into a stable key per section 7.4.
+# Primary key (strict): severity, rule, normalized_relative_file, range.start.line, range.start.character, message
+# Secondary key (loose): severity, rule, normalized_relative_file, message
+# We emit both so line drift between branches does not erase evidence.
+function ConvertTo-NormalizedRelative {
+    param([string] $AbsPath)
+    if ([string]::IsNullOrEmpty($AbsPath)) { return "" }
+    try {
+        $resolved = (Resolve-Path $AbsPath -ErrorAction SilentlyContinue).Path
+        if (-not $resolved) { $resolved = $AbsPath }
+        $rel = $resolved.Substring($repoRoot.Length).TrimStart('\', '/')
+        return ($rel -replace '\\', '/')
+    } catch {
+        return ($AbsPath -replace '\\', '/')
+    }
+}
+
+$diagnostics = @()
+if ($report.generalDiagnostics) {
+    foreach ($d in $report.generalDiagnostics) {
+        $rel = ConvertTo-NormalizedRelative $d.file
+        $startLine = if ($d.range.start.line) { [int]$d.range.start.line } else { -1 }
+        $startChar = if ($d.range.start.character) { [int]$d.range.start.character } else { -1 }
+        $rule = if ($d.rule) { $d.rule } else { "" }
+        $message = if ($d.message) { $d.message } else { "" }
+        $diagnostics += [pscustomobject]@{
+            severity               = $d.severity
+            rule                   = $rule
+            normalized_relative_file = $rel
+            start_line             = $startLine
+            start_character        = $startChar
+            message                = $message
+            strict_key             = "$($d.severity)|$rule|$rel|$startLine|$startChar|$message"
+            loose_key              = "$($d.severity)|$rule|$rel|$message"
+        }
+    }
+}
+
+$errorCount = ($diagnostics | Where-Object { $_.severity -eq "error" }).Count
+$warningCount = ($diagnostics | Where-Object { $_.severity -eq "warning" }).Count
+
+$envelope = [pscustomobject]@{
+    schema_version        = 1
+    captured_at           = (Get-Date -Format "o")
+    python_executable     = $pythonExecutable
+    python_version        = $pythonVersion
+    pyright_version       = $pyrightVersion
+    repository_sha        = $repositorySha
+    config_path           = $configPath
+    errors                = $errorCount
+    warnings              = $warningCount
+    result_json_path      = (Resolve-Path $OutFile -ErrorAction SilentlyContinue).Path
+    diagnostics           = $diagnostics
+}
+
+$envelope | ConvertTo-Json -Depth 10 | Set-Content -Path $OutFile -Encoding UTF8
+
+Write-Host "errors            : $errorCount"
+Write-Host "warnings          : $warningCount"
+Write-Host "result_json_path  : $OutFile"
+Write-Host ""
+
+# Section 7.4: baseline comparison.
+if (-not [string]::IsNullOrEmpty($CompareTo)) {
+    if (-not (Test-Path $CompareTo)) {
+        Write-Error "CompareTo baseline not found: $CompareTo"
+        exit 4
+    }
+    $baseline = Get-Content $CompareTo -Raw | ConvertFrom-Json
+
+    $baselineStrict = @{}
+    foreach ($d in $baseline.diagnostics) { $baselineStrict[$d.strict_key] = $true }
+    $baselineLoose = @{}
+    foreach ($d in $baseline.diagnostics) { $baselineLoose[$d.loose_key] = $true }
+
+    $newErrors = @()
+    $resolvedErrors = @()
+    $unchanged = @()
+    $newWarnings = @()
+
+    foreach ($d in $diagnostics) {
+        if ($baselineStrict.ContainsKey($d.strict_key)) {
+            $unchanged += $d
+        } elseif ($baselineLoose.ContainsKey($d.loose_key)) {
+            # Same severity+rule+file+message but different line: treat as
+            # environment/line-drift, NOT a new error.
+            $unchanged += $d
+        } else {
+            if ($d.severity -eq "error") { $newErrors += $d }
+            else { $newWarnings += $d }
+        }
+    }
+
+    $featureStrict = @{}
+    foreach ($d in $diagnostics) { $featureStrict[$d.strict_key] = $true }
+    $featureLoose = @{}
+    foreach ($d in $diagnostics) { $featureLoose[$d.loose_key] = $true }
+
+    foreach ($d in $baseline.diagnostics) {
+        if ($d.severity -ne "error") { continue }
+        if ($featureStrict.ContainsKey($d.strict_key)) { continue }
+        if ($featureLoose.ContainsKey($d.loose_key)) { continue }
+        $resolvedErrors += $d
+    }
+
+    Write-Host "== Baseline compare =="
+    Write-Host "baseline_sha      : $($baseline.repository_sha)"
+    Write-Host "baseline_errors   : $($baseline.errors)"
+    Write-Host "baseline_warnings : $($baseline.warnings)"
+    Write-Host "feature_errors    : $errorCount"
+    Write-Host "feature_warnings  : $warningCount"
+    Write-Host "new_errors        : $($newErrors.Count)"
+    Write-Host "resolved_errors   : $($resolvedErrors.Count)"
+    Write-Host "new_warnings      : $($newWarnings.Count)"
+    Write-Host "unchanged         : $($unchanged.Count)"
+    Write-Host ""
+
+    if ($newErrors.Count -gt 0) {
+        Write-Host "== NEW feature errors (must fix) =="
+        foreach ($d in $newErrors) {
+            Write-Host ("  [{0}] {1}:{2}  rule={3}  {4}" -f $d.severity, $d.normalized_relative_file, $d.start_line, $d.rule, $d.message)
+        }
+        Write-Host ""
+        Write-Host "FAIL: feature introduces $($newErrors.Count) new pyright error(s)."
+        exit 5
+    }
+
+    Write-Host "PASS: feature introduces 0 new pyright errors (warnings and unchanged diagnostics may still be present)."
+    exit 0
+}
+
+Write-Host "Baseline captured. Re-run with -CompareTo <baseline.json> to diff against another capture."
+exit 0
