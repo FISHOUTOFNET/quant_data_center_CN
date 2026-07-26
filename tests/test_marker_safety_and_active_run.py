@@ -995,3 +995,377 @@ class TestRootSymlinkRejection:
             pytest.skip("symlink not supported on this platform")
         with pytest.raises(LogRootAuthorizationError, match="symlink"):
             validate_managed_log_root(link)
+
+
+# ---------------------------------------------------------------------------
+# P0: Entry-point raw-path validation (no .resolve() before safety check)
+#
+# Spec section 7: directly testing ``_reject_unsafe_log_root`` is NOT enough
+# to prove the CLI / create / adopt entries do not call ``.resolve()`` first.
+# These tests drive the actual entry points with a symlink managed root and
+# assert the entry rejects it. If the entry called ``.resolve()`` before the
+# safety check, the symlink would be washed away to its real target and the
+# rejection would NOT fire — which is exactly the regression we must catch.
+# ---------------------------------------------------------------------------
+
+
+def _make_symlink_root(tmp_path: Path) -> tuple[Path, Path]:
+    """Create a symlink managed root and return (link, real_dir).
+
+    The real directory is pre-populated so the symlink resolves to a valid,
+    non-escaping target — the safety check must STILL reject it because the
+    managed root itself is a symlink. Skips the test on platforms without
+    symlink support.
+    """
+
+    real_dir = tmp_path / "real-logs"
+    real_dir.mkdir(parents=True, exist_ok=True)
+    link = tmp_path / "link-logs"
+    try:
+        link.symlink_to(real_dir, target_is_directory=True)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlink not supported on this platform")
+    return link, real_dir
+
+
+def _make_junction_root(tmp_path: Path) -> tuple[Path, Path]:
+    """Create a Windows junction managed root and return (link, real_dir).
+
+    Uses ``_mklink /J`` via ``subprocess``. Skips on non-Windows or when the
+    runner lacks permission. Caller should fall back to patching
+    ``Path.is_junction`` when this helper skips.
+    """
+
+    import subprocess
+
+    real_dir = tmp_path / "real-logs"
+    real_dir.mkdir(parents=True, exist_ok=True)
+    link = tmp_path / "link-logs"
+    try:
+        subprocess.check_call(
+            ["cmd", "/c", "mklink", "/J", str(link), str(real_dir)],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except (OSError, subprocess.CalledProcessError):
+        pytest.skip("junction creation not supported on this platform/runner")
+    return link, real_dir
+
+
+class TestCliSymlinkRootRejection:
+    """Spec 7: the ``log_cleanup`` CLI must reject a symlink managed root at
+    the ENTRY — ``--log-dir`` must NOT be ``.resolve()``-d before the safety
+    check runs. If it were, the symlink would be washed away and the marker
+    would be created on the real target.
+    """
+
+    def test_initialize_managed_root_rejects_symlink(self, tmp_path: Path) -> None:
+        """``--initialize-managed-root --log-dir <symlink>`` exits non-zero
+        and does NOT create a marker on the symlink target.
+        """
+
+        from click.testing import CliRunner
+
+        link, real_dir = _make_symlink_root(tmp_path)
+        runner = CliRunner()
+        result = runner.invoke(
+            log_cleanup.main,
+            ["--initialize-managed-root", "--log-dir", str(link)],
+        )
+        assert result.exit_code != 0
+        # The real target must NOT receive a marker — the entry must not
+        # have resolved the symlink before the safety check.
+        assert not (real_dir / MANAGED_ROOT_MARKER).exists()
+        # And the symlink path itself must not have a marker either.
+        assert not (link / MANAGED_ROOT_MARKER).exists()
+
+    def test_cleanup_rejects_symlink_root(self, tmp_path: Path) -> None:
+        """``cleanup --log-dir <symlink>`` exits non-zero and does NOT delete
+        any logs from the symlink target.
+        """
+
+        from click.testing import CliRunner
+
+        link, real_dir = _make_symlink_root(tmp_path)
+        # Pre-authorize the REAL dir (simulating an attacker who got a marker
+        # placed on the real target somehow) and put a stale log there. The
+        # CLI must STILL reject the symlink at the entry — cleanup must not
+        # reach into the real dir via the symlink.
+        _authorize(real_dir)
+        stale_log = real_dir / "stale.log"
+        stale_log.write_bytes(b"old")
+        runner = CliRunner()
+        result = runner.invoke(
+            log_cleanup.main,
+            ["--log-dir", str(link), "--retention-days", "0"],
+        )
+        assert result.exit_code != 0
+        # The stale log must survive — cleanup did not run.
+        assert stale_log.exists()
+
+    def test_initialize_managed_root_rejects_junction(self, tmp_path: Path) -> None:
+        """``--initialize-managed-root --log-dir <junction>`` exits non-zero
+        on Windows junctions. Skipped if junction creation is unavailable.
+        """
+
+        from click.testing import CliRunner
+
+        link, real_dir = _make_junction_root(tmp_path)
+        runner = CliRunner()
+        result = runner.invoke(
+            log_cleanup.main,
+            ["--initialize-managed-root", "--log-dir", str(link)],
+        )
+        assert result.exit_code != 0
+        assert not (real_dir / MANAGED_ROOT_MARKER).exists()
+
+
+class TestCreateAdoptRunLogSymlinkRejection:
+    """Spec 7: ``create_run_log_context`` and ``adopt_run_log_context`` must
+    reject an explicit path whose managed root is a symlink. The entry must
+    NOT call ``.resolve()`` before the safety check — otherwise a symlink
+    managed root would be washed away to its real target.
+    """
+
+    def test_create_run_log_context_rejects_symlink_managed_root(self, tmp_path: Path) -> None:
+        link, real_dir = _make_symlink_root(tmp_path)
+        runtime_paths = paths.resolve_runtime_paths(explicit_log_dir=tmp_path / "default")
+        explicit_path = link / "run.log"
+        with pytest.raises(run_logging.RunLogContextError, match="symlink"):
+            run_logging.create_run_log_context(
+                runtime_paths=runtime_paths,
+                explicit_path=explicit_path,
+            )
+        # No marker on the real target.
+        assert not (real_dir / MANAGED_ROOT_MARKER).exists()
+
+    def test_adopt_run_log_context_rejects_symlink_managed_root(self, tmp_path: Path) -> None:
+        link, real_dir = _make_symlink_root(tmp_path)
+        runtime_paths = paths.resolve_runtime_paths(explicit_log_dir=tmp_path / "default")
+        run_log_path = link / "run.log"
+        with pytest.raises(run_logging.RunLogContextError, match="symlink"):
+            run_logging.adopt_run_log_context(
+                path=run_log_path,
+                runtime_paths=runtime_paths,
+            )
+        # No marker on the real target.
+        assert not (real_dir / MANAGED_ROOT_MARKER).exists()
+
+    def test_create_run_log_context_rejects_junction_managed_root(self, tmp_path: Path) -> None:
+        link, real_dir = _make_junction_root(tmp_path)
+        runtime_paths = paths.resolve_runtime_paths(explicit_log_dir=tmp_path / "default")
+        explicit_path = link / "run.log"
+        with pytest.raises(run_logging.RunLogContextError):
+            run_logging.create_run_log_context(
+                runtime_paths=runtime_paths,
+                explicit_path=explicit_path,
+            )
+        assert not (real_dir / MANAGED_ROOT_MARKER).exists()
+
+
+class TestEntryRawPathValidationPatched:
+    """Spec 7: "at least one test must cover the entry does not call
+    .resolve() first". On platforms/permissions where real symlinks and
+    junctions cannot be created, this test patches ``Path.is_symlink`` to
+    simulate a symlink at the entry and asserts the entry rejects it WITHOUT
+    having resolved it away.
+    """
+
+    def test_create_run_log_context_rejects_patched_symlink_root(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Patch ``Path.is_symlink`` to return True for the managed root.
+        If ``create_run_log_context`` called ``.resolve()`` before the safety
+        check, the patched ``is_symlink`` would no longer see the symlink
+        (because the resolved path is the real directory) and the entry would
+        NOT raise — which is the regression we must catch.
+        """
+
+        log_root = tmp_path / "logs"
+        log_root.mkdir(parents=True, exist_ok=True)
+        runtime_paths = paths.resolve_runtime_paths(explicit_log_dir=log_root)
+        explicit_path = runtime_paths.run_logs_dir / "run.log"
+
+        # Track whether the entry ever resolves the path before checking.
+        resolve_calls: list[Path] = []
+        real_resolve = Path.resolve
+
+        def _tracking_resolve(self: Path) -> Path:
+            # Only track resolves of paths inside log_root (the managed root
+            # candidate). Other resolves (e.g. runtime_paths internals) are
+            # noise.
+            try:
+                self.relative_to(log_root)
+                resolve_calls.append(self)
+            except ValueError:
+                pass
+            return real_resolve(self)
+
+        # Patch is_symlink to True for log_root so the safety check must
+        # reject it. If the entry resolves log_root first, is_symlink would
+        # be called on the resolved real path (which is not a symlink) and
+        # would return False — defeating the check.
+        original_is_symlink = Path.is_symlink
+
+        def _patched_is_symlink(self: Path) -> bool:
+            if self == log_root:
+                return True
+            return original_is_symlink(self)
+
+        monkeypatch.setattr(Path, "resolve", _tracking_resolve)
+        monkeypatch.setattr(Path, "is_symlink", _patched_is_symlink)
+
+        with pytest.raises(run_logging.RunLogContextError, match="symlink"):
+            run_logging.create_run_log_context(
+                runtime_paths=runtime_paths,
+                explicit_path=explicit_path,
+            )
+
+
+# ---------------------------------------------------------------------------
+# P1: Active run ID normalization (spec section 11)
+# ---------------------------------------------------------------------------
+
+
+class TestNormalizeActiveRunIds:
+    """Spec 11.3: ``_normalize_active_run_ids`` strips whitespace, filters
+    empties, de-duplicates exactly (case-sensitive, no substring), and
+    preserves first-seen order. CLI and env share the helper.
+    """
+
+    def test_single_value(self) -> None:
+        assert log_cleanup._normalize_active_run_ids(["id-a"]) == ("id-a",)
+
+    def test_comma_separated_with_spaces(self) -> None:
+        # The helper receives already-split values; the CLI splits on commas.
+        # Simulate the CLI's split output for "id-a, id-b , ,id-a".
+        values = ["id-a", " id-b ", " ", "id-a"]
+        assert log_cleanup._normalize_active_run_ids(values) == ("id-a", "id-b")
+
+    def test_duplicate_values_de_duplicated(self) -> None:
+        assert log_cleanup._normalize_active_run_ids(["id-a", "id-b", "id-a"]) == (
+            "id-a",
+            "id-b",
+        )
+
+    def test_empty_values_filtered(self) -> None:
+        assert log_cleanup._normalize_active_run_ids(["", "  ", "id-a", ""]) == ("id-a",)
+
+    def test_case_sensitive(self) -> None:
+        assert log_cleanup._normalize_active_run_ids(["ID-a", "id-a"]) == (
+            "ID-a",
+            "id-a",
+        )
+
+    def test_preserves_first_seen_order(self) -> None:
+        assert log_cleanup._normalize_active_run_ids(["id-b", "id-a", "id-b"]) == (
+            "id-b",
+            "id-a",
+        )
+
+
+class TestActiveRunIdProtectionWithWhitespace:
+    """Spec 11.3: active run IDs with surrounding whitespace must still be
+    protected by retention and capacity. The CLI/env parsing must strip the
+    whitespace before the protection check, and ``cleanup_logs`` must
+    defensively normalize too.
+    """
+
+    def test_active_id_with_spaces_protected_from_retention(self, tmp_path: Path) -> None:
+        """A run log tagged ``" run-abc "`` (with spaces) must be protected
+        when the caller passes ``"  run-abc  "`` in ``active_run_ids``.
+        """
+
+        now = datetime(2026, 7, 25, 12, 0, tzinfo=timezone.utc)
+        log_dir = tmp_path / "logs"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        _authorize(log_dir)
+        # Run logs live in the ``runs/`` subdirectory; only files there are
+        # tagged with an ``active_run_id`` by ``_discover_log_files``.
+        runs_dir = log_dir / "runs"
+        runs_dir.mkdir(parents=True, exist_ok=True)
+        # Old run log (would be deleted by retention) — but it's active.
+        old_time = now - timedelta(days=365)
+        run_log = _touch_run_log(runs_dir / "run-abc.log", old_time, run_id="run-abc")
+        # Caller passes the id with surrounding whitespace.
+        result = log_cleanup.cleanup_logs(
+            log_dir,
+            retention_days=30,
+            now=now,
+            active_run_ids=("  run-abc  ",),
+        )
+        assert result.deleted_count == 0
+        assert run_log.exists()
+
+    def test_active_id_with_spaces_protected_from_capacity(self, tmp_path: Path) -> None:
+        """A run log tagged ``"run-abc"`` must be protected from capacity
+        eviction when the caller passes ``" run-abc"`` (leading space).
+        """
+
+        now = datetime(2026, 7, 25, 12, 0, tzinfo=timezone.utc)
+        log_dir = tmp_path / "logs"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        _authorize(log_dir)
+        runs_dir = log_dir / "runs"
+        runs_dir.mkdir(parents=True, exist_ok=True)
+        old_time = now - timedelta(days=365)
+        run_log = _touch_run_log(runs_dir / "run-abc.log", old_time, run_id="run-abc")
+        # Capacity cap of 1 byte forces eviction of everything not protected.
+        log_cleanup.cleanup_logs(
+            log_dir,
+            retention_days=0,
+            now=now,
+            max_bytes=1,
+            active_run_ids=(" run-abc",),
+        )
+        assert run_log.exists()
+
+    def test_id_a_does_not_protect_id_ab(self, tmp_path: Path) -> None:
+        """``active_run_ids=["id-a"]`` must NOT protect a run log tagged
+        ``id-ab`` (no substring matching).
+        """
+
+        now = datetime(2026, 7, 25, 12, 0, tzinfo=timezone.utc)
+        log_dir = tmp_path / "logs"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        _authorize(log_dir)
+        runs_dir = log_dir / "runs"
+        runs_dir.mkdir(parents=True, exist_ok=True)
+        old_time = now - timedelta(days=365)
+        other_log = _touch_run_log(runs_dir / "id-ab.log", old_time, run_id="id-ab")
+        result = log_cleanup.cleanup_logs(
+            log_dir,
+            retention_days=0,
+            keep_recent_runs=0,
+            now=now,
+            active_run_ids=("id-a",),
+        )
+        # id-ab is NOT protected by id-a — it should be deleted.
+        assert result.deleted_count == 1
+        assert not other_log.exists()
+
+    def test_cli_env_merge_with_spaces(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The CLI must merge ``--active-run-id`` and ``QDC_ACTIVE_RUN_ID``
+        (comma-separated) and strip whitespace from both. A run log tagged
+        ``run-abc`` must be protected when the env var is ``" run-abc "``.
+        """
+
+        from click.testing import CliRunner
+
+        # Use a fixed old mtime so retention_days=0 will delete the log
+        # unless it is protected by the active-run-id check.
+        old_time = datetime(2025, 7, 25, 12, 0, tzinfo=timezone.utc)
+        log_dir = tmp_path / "logs"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        _authorize(log_dir)
+        runs_dir = log_dir / "runs"
+        runs_dir.mkdir(parents=True, exist_ok=True)
+        run_log = _touch_run_log(runs_dir / "run-abc.log", old_time, run_id="run-abc")
+        monkeypatch.setenv("QDC_ACTIVE_RUN_ID", " run-abc ,")
+        runner = CliRunner()
+        result = runner.invoke(
+            log_cleanup.main,
+            ["--log-dir", str(log_dir), "--retention-days", "0"],
+        )
+        assert result.exit_code == 0, result.output
+        assert run_log.exists()

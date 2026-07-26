@@ -23,7 +23,7 @@ Policy:
 from __future__ import annotations
 
 import os
-from collections.abc import Collection
+from collections.abc import Collection, Iterable
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -72,6 +72,39 @@ class CleanupResult:
     kept_reasons: dict[str, int] = field(default_factory=dict)
 
 
+def _normalize_active_run_ids(values: Iterable[str]) -> tuple[str, ...]:
+    """Normalize a sequence of active-run IDs into a stable, de-duplicated tuple.
+
+    P1 fix: the CLI ``--active-run-id`` option and the ``QDC_ACTIVE_RUN_ID``
+    env var (comma-separated) previously fed raw strings into the active-id
+    set. A value like ``" id-a , id-b , ,id-a"`` would produce distinct
+    entries ``" id-a "`` and ``"id-a"`` — so a run log tagged ``id-a`` was
+    NOT protected even though the user thought it was. This helper closes
+    that gap and is shared by the CLI and ``cleanup_logs`` (defensive
+    normalization at the entry point, not just at the CLI).
+
+    Rules:
+    * ``str(value).strip()`` — remove leading/trailing whitespace.
+    * Filter out empty strings (so trailing commas / doubled commas are
+      ignored).
+    * Exact de-duplication (case-sensitive — run IDs are case-sensitive).
+    * Preserve first-seen order for stable output.
+    * NO substring matching: ``id-a`` does NOT protect ``id-ab``.
+    """
+
+    seen: set[str] = set()
+    result: list[str] = []
+    for value in values:
+        normalized = str(value).strip()
+        if not normalized:
+            continue
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        result.append(normalized)
+    return tuple(result)
+
+
 def cleanup_logs(
     log_dir: str | Path,
     retention_days: int = DEFAULT_RETENTION_DAYS,
@@ -102,6 +135,12 @@ def cleanup_logs(
     # ``LogCleanupError`` (surfaced as a CLI non-zero exit). The marker is
     # created by ``paths.ensure_managed_log_root`` from application logging
     # init / ``create_run_log_context`` — never by cleanup.
+    #
+    # P0: ``validate_managed_log_root`` runs ``_reject_unsafe_log_root`` on
+    # the RAW (expanduser-only) path BEFORE resolving internally, so a symlink
+    # or junction managed root is rejected here. We must NOT call
+    # ``root.resolve()`` before this check or the symlink would be washed
+    # away.
     try:
         validate_managed_log_root(root)
     except LogRootAuthorizationError as exc:
@@ -118,7 +157,12 @@ def cleanup_logs(
 
     reference_time = now or datetime.now(timezone.utc)
     cutoff_timestamp = reference_time.timestamp() - retention_days * 24 * 60 * 60
-    active_ids = {str(value) for value in (active_run_ids or ()) if value}
+    # Defensive normalization at the cleanup_logs() entry too — do NOT rely
+    # solely on the CLI. Active run IDs are stripped, de-duplicated (exact
+    # match, case-sensitive, no substring), and order-preserved so a run-id
+    # with surrounding whitespace cannot slip past retention/capacity
+    # protection.
+    active_ids = set(_normalize_active_run_ids(active_run_ids or ()))
 
     discovered = _discover_log_files(root)
     run_logs = [item for item in discovered if item.is_run_log]
@@ -337,7 +381,14 @@ def main(
 ) -> None:
     """Clean expired log files under the managed log root."""
 
-    target_dir = log_dir.resolve() if log_dir else default_log_dir()
+    # P0 fix: validate the RAW (expanduser-only) log dir BEFORE resolution.
+    # ``paths.ensure_managed_log_root`` and ``validate_managed_log_root``
+    # both run ``_reject_unsafe_log_root`` on the raw path (checking
+    # ``is_symlink`` / ``is_junction``) and only then resolve internally. If
+    # we called ``.resolve()`` here, a symlink or junction managed root
+    # would be washed away to its real target and the safety check would be
+    # bypassed.
+    target_dir = log_dir.expanduser() if log_dir else default_log_dir()
 
     # P0-3: --initialize-managed-root only authorizes the directory and exits.
     # It never runs cleanup in the same call, so a user cannot accidentally
@@ -354,9 +405,15 @@ def main(
         return
 
     effective_max = max_bytes if max_bytes > 0 else None
+    # P1: normalize active run IDs (strip whitespace, de-duplicate, preserve
+    # order). Both the CLI ``--active-run-id`` option and the
+    # ``QDC_ACTIVE_RUN_ID`` env var (comma-separated) flow through the same
+    # helper so a run-id with surrounding whitespace cannot slip past
+    # retention/capacity protection. ``cleanup_logs`` also normalizes
+    # defensively, but normalizing here keeps the echo'd summary accurate.
     env_active = os.environ.get("QDC_ACTIVE_RUN_ID", "")
-    env_ids = tuple(value for value in env_active.split(",") if value)
-    all_active_ids = (*active_run_ids, *env_ids)
+    env_ids = tuple(value for value in env_active.split(","))
+    all_active_ids = _normalize_active_run_ids((*active_run_ids, *env_ids))
     try:
         result = cleanup_logs(
             target_dir,

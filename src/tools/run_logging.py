@@ -77,6 +77,23 @@ class RunLogContext:
         }
 
 
+@dataclass(frozen=True)
+class ValidatedRunLogPath:
+    """Result of validating an explicit run-log path.
+
+    Carries both the raw (unresolved) and resolved forms so callers can use
+    the resolved path for file operations while retaining the raw path for
+    diagnostics. The ``raw_managed_root`` is the directory that was checked
+    for symlink/junction/repo/home/root safety BEFORE resolution — this is
+    the P0 fix that prevents ``.resolve()`` from washing away a symlink root.
+    """
+
+    raw_log_path: Path
+    resolved_log_path: Path
+    raw_managed_root: Path
+    resolved_managed_root: Path
+
+
 def create_run_log_context(
     *,
     runtime_paths: paths.RuntimePaths | None = None,
@@ -109,26 +126,30 @@ def create_run_log_context(
     resolved_runtime = runtime_paths or paths.resolve_runtime_paths()
     timestamp = now or datetime.now()
     resolved_run_id = run_id or _format_run_id(timestamp)
-    if explicit_path:
-        log_path = Path(explicit_path).expanduser().resolve()
-    else:
-        stamp = timestamp.strftime("%Y%m%d_%H%M%S")
-        log_path = resolved_runtime.run_logs_dir / f"{stamp}_{resolved_run_id}.log"
-    # Determine the managed-root for this log file. When the log file lives
-    # inside the unified ``logs_dir``, that directory is the managed root
-    # (NOT the ``runs/`` subdirectory). When the log file lives outside
-    # ``logs_dir`` (explicit --run-log pointing elsewhere), the parent of the
-    # log file is the managed root. ``ensure_managed_log_root`` runs
-    # ``_reject_unsafe_log_root`` so repo-internal / home / root / symlink /
-    # junction paths are rejected fail-fast.
-    managed_root = _resolve_managed_log_root(log_path, resolved_runtime)
     try:
-        log_path.parent.mkdir(parents=True, exist_ok=True)
-        # Ensure the managed-root marker exists so that log_cleanup can later
-        # authorize this directory. ``ensure_managed_log_root`` is the single
-        # authority that creates the marker; cleanup only validates (P0-7).
-        paths.ensure_managed_log_root(managed_root)
+        if explicit_path:
+            # P0 fix: validate the RAW explicit path BEFORE resolution so a
+            # symlink/junction managed root cannot be washed away by
+            # ``.resolve()``. ``_validate_explicit_run_log_path`` calls
+            # ``ensure_managed_log_root`` on the raw managed root (which
+            # runs ``_reject_unsafe_log_root`` then creates the marker) and
+            # only then resolves. The ``LogRootAuthorizationError`` raised
+            # here is caught below and wrapped in ``RunLogContextError``.
+            validated = _validate_explicit_run_log_path(explicit_path, resolved_runtime)
+            log_path = validated.resolved_log_path
+            managed_root = validated.resolved_managed_root
+        else:
+            stamp = timestamp.strftime("%Y%m%d_%H%M%S")
+            log_path = resolved_runtime.run_logs_dir / f"{stamp}_{resolved_run_id}.log"
+            managed_root = _resolve_managed_log_root(log_path, resolved_runtime)
+            # Ensure the managed-root marker exists so that log_cleanup can
+            # later authorize this directory. ``ensure_managed_log_root`` is
+            # the single authority that creates the marker; cleanup only
+            # validates (P0-7). For the explicit-path branch this is already
+            # done inside ``_validate_explicit_run_log_path``.
+            paths.ensure_managed_log_root(managed_root)
         # Create/truncate the file so the orchestrator is the sole owner.
+        log_path.parent.mkdir(parents=True, exist_ok=True)
         log_path.touch(exist_ok=False)
     except paths.LogRootAuthorizationError as exc:
         raise RunLogContextError(str(exc)) from exc
@@ -165,15 +186,20 @@ def adopt_run_log_context(
     junction) are rejected fail-fast.
     """
 
-    log_path = Path(path).expanduser().resolve()
+    resolved_runtime = runtime_paths or paths.resolve_runtime_paths()
     timestamp = now or datetime.now()
     resolved_run_id = run_id or _format_run_id(timestamp)
-    resolved_runtime = runtime_paths or paths.resolve_runtime_paths()
-    managed_root = _resolve_managed_log_root(log_path, resolved_runtime)
     try:
+        # P0 fix: validate the RAW path BEFORE resolution so a symlink/junction
+        # managed root cannot be washed away by ``.resolve()``.
+        # ``_validate_explicit_run_log_path`` calls ``ensure_managed_log_root``
+        # on the raw managed root (which runs ``_reject_unsafe_log_root`` then
+        # creates/validates the marker) and only then resolves. The
+        # ``LogRootAuthorizationError`` raised here is caught below and wrapped
+        # in ``RunLogContextError``.
+        validated = _validate_explicit_run_log_path(path, resolved_runtime)
+        log_path = validated.resolved_log_path
         log_path.parent.mkdir(parents=True, exist_ok=True)
-        # Authorize the managed root so cleanup can later clean this directory.
-        paths.ensure_managed_log_root(managed_root)
         if not log_path.exists():
             log_path.touch(exist_ok=False)
         else:
@@ -184,6 +210,51 @@ def adopt_run_log_context(
     except OSError as exc:
         raise RunLogContextError(f"Failed to adopt run log at {log_path}: {exc}") from exc
     return RunLogContext(run_id=resolved_run_id, path=log_path, created_at=timestamp)
+
+
+def _validate_explicit_run_log_path(
+    explicit_path: str | Path,
+    runtime_paths: paths.RuntimePaths,
+) -> ValidatedRunLogPath:
+    """Validate an explicit run-log path and return the validated paths.
+
+    This is the unified helper shared by :func:`create_run_log_context` and
+    :func:`adopt_run_log_context`. It enforces the P0 contract: the RAW
+    (unresolved) managed root is checked for symlink/junction/repo/home/root
+    safety BEFORE any ``.resolve()`` call, so a symlink managed root cannot
+    be washed away by resolution.
+
+    Steps:
+    1. Expand the raw explicit path (``~`` etc.) without resolving symlinks.
+    2. Identify the raw managed root (either ``runtime_paths.logs_dir`` or
+       ``raw_log_path.parent``) using the RAW path.
+    3. Call :func:`paths.ensure_managed_log_root` on the raw managed root —
+       this runs ``_reject_unsafe_log_root`` which checks symlink, junction,
+       repo, home, and filesystem root on the UNRESOLVED path.
+    4. Only after validation passes, resolve both the log path and the
+       managed root.
+    """
+
+    raw_log_path = Path(explicit_path).expanduser()
+    raw_managed_root = _resolve_managed_log_root_raw(raw_log_path, runtime_paths)
+    # Validate the raw managed root BEFORE resolution. This is the core P0
+    # fix: if the managed root is a symlink/junction, ``.resolve()`` would
+    # follow it to the real target and the safety check would be bypassed.
+    # ``ensure_managed_log_root`` calls ``_reject_unsafe_log_root`` on the
+    # raw (expanduser-only) path, then resolves internally.
+    try:
+        paths.ensure_managed_log_root(raw_managed_root)
+    except paths.LogRootAuthorizationError:
+        # Re-raise as-is so the caller can wrap it in RunLogContextError.
+        raise
+    resolved_log_path = raw_log_path.resolve()
+    resolved_managed_root = raw_managed_root.resolve()
+    return ValidatedRunLogPath(
+        raw_log_path=raw_log_path,
+        resolved_log_path=resolved_log_path,
+        raw_managed_root=raw_managed_root,
+        resolved_managed_root=resolved_managed_root,
+    )
 
 
 def _resolve_managed_log_root(log_path: Path, runtime_paths: paths.RuntimePaths) -> Path:
@@ -202,6 +273,40 @@ def _resolve_managed_log_root(log_path: Path, runtime_paths: paths.RuntimePaths)
     if paths.is_path_inside(resolved_parent, logs_dir) or resolved_parent == logs_dir:
         return logs_dir
     return resolved_parent
+
+
+def _resolve_managed_log_root_raw(
+    raw_log_path: Path,
+    runtime_paths: paths.RuntimePaths,
+) -> Path:
+    """Identify the managed root from a RAW (unresolved) log path.
+
+    This is the raw-path counterpart of :func:`_resolve_managed_log_root`.
+    It returns the RAW managed root (expanded but not resolved) so the caller
+    can validate it BEFORE resolution — the P0 fix that prevents a symlink
+    managed root from being washed away by ``.resolve()``.
+
+    The comparison still uses resolved paths internally (because
+    ``runtime_paths.logs_dir`` is already resolved by
+    :func:`paths.resolve_runtime_paths`), but the RETURNED path is the raw
+    form so the safety check sees the original symlink/junction.
+    """
+
+    logs_dir = runtime_paths.logs_dir
+    raw_parent = raw_log_path.parent
+    # Resolve the parent ONLY for the inside-logs_dir comparison. The returned
+    # path stays raw so the safety check can see the original symlink.
+    resolved_parent = raw_parent.resolve()
+    resolved_logs_dir = logs_dir.resolve()
+    if paths.is_path_inside(resolved_parent, resolved_logs_dir) or resolved_parent == resolved_logs_dir:
+        # The log file lives inside the unified logs_dir, so logs_dir is the
+        # managed root. logs_dir is already resolved (by resolve_runtime_paths),
+        # so we return it as-is — the safety check in ensure_managed_log_root
+        # will see it as a real directory (which it is, post-resolution).
+        return logs_dir
+    # The log file lives outside logs_dir, so the parent is the managed root.
+    # Return the RAW parent so the safety check can detect a symlink/junction.
+    return raw_parent
 
 
 def _format_run_id(timestamp: datetime) -> str:
