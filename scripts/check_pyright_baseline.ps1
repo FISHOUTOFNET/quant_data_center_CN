@@ -72,6 +72,18 @@ Set-StrictMode -Version Latest
 $repoRoot = (Resolve-Path "$PSScriptRoot/..").Path
 Set-Location $repoRoot
 
+# Fail fast: pyproject.toml is the SOLE Pyright configuration authority. A
+# stray pyrightconfig.json at the repository root would override pyproject.toml
+# (Pyright prefers pyrightconfig.json when both exist), re-creating local vs
+# CI divergence and making baseline comparisons meaningless. Behaviour is
+# identical to scripts/check_quality.ps1 so the baseline and the regular
+# quality gate cannot disagree. See section 8.3 of the PR-2 acceptance plan.
+$unexpectedConfig = Join-Path $repoRoot "pyrightconfig.json"
+if (Test-Path $unexpectedConfig) {
+    Write-Error "Unexpected repository-root pyrightconfig.json found. Remove it; pyproject.toml is the authoritative Pyright configuration."
+    exit 13
+}
+
 function Test-PyrightAvailable {
     try {
         & python -m pyright --version 2>$null | Out-Null
@@ -152,6 +164,25 @@ if ($report.generalDiagnostics) {
 $errorCount = ($diagnostics | Where-Object { $_.severity -eq "error" }).Count
 $warningCount = ($diagnostics | Where-Object { $_.severity -eq "warning" }).Count
 
+# Resolve the output file to an ABSOLUTE path BEFORE writing. The previous
+# implementation used ``Resolve-Path $OutFile -ErrorAction SilentlyContinue``
+# which returns $null when the file does not yet exist (first run), leaving
+# ``result_json_path`` empty in the JSON envelope. Use
+# ``[System.IO.Path]::GetFullPath`` instead — it computes the absolute path
+# purely from the string + CWD without requiring the file to exist. Handle
+# relative paths, absolute paths, and the current directory uniformly. Create
+# the parent directory if it does not exist so first-run captures do not fail
+# on a missing output directory. See section 9 of the PR-2 acceptance plan.
+if ([System.IO.Path]::IsPathRooted($OutFile)) {
+    $resolvedOutFile = [System.IO.Path]::GetFullPath($OutFile)
+} else {
+    $resolvedOutFile = [System.IO.Path]::GetFullPath((Join-Path $repoRoot $OutFile))
+}
+$outDirectory = Split-Path $resolvedOutFile -Parent
+if ($outDirectory -and -not (Test-Path $outDirectory)) {
+    New-Item -ItemType Directory -Force -Path $outDirectory | Out-Null
+}
+
 $envelope = [pscustomobject]@{
     schema_version        = 1
     captured_at           = (Get-Date -Format "o")
@@ -162,15 +193,15 @@ $envelope = [pscustomobject]@{
     config_path           = $configPath
     errors                = $errorCount
     warnings              = $warningCount
-    result_json_path      = (Resolve-Path $OutFile -ErrorAction SilentlyContinue).Path
+    result_json_path      = $resolvedOutFile
     diagnostics           = $diagnostics
 }
 
-$envelope | ConvertTo-Json -Depth 10 | Set-Content -Path $OutFile -Encoding UTF8
+$envelope | ConvertTo-Json -Depth 10 | Set-Content -Path $resolvedOutFile -Encoding UTF8
 
 Write-Host "errors            : $errorCount"
 Write-Host "warnings          : $warningCount"
-Write-Host "result_json_path  : $OutFile"
+Write-Host "result_json_path  : $resolvedOutFile"
 Write-Host ""
 
 # Section 7.4: baseline comparison.
