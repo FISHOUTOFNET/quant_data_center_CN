@@ -30,7 +30,11 @@ from src.pipeline.step_health import (
     is_failure_status,
     read_step_health_summary,
 )
-from src.sources.derived.progress import make_progress_contract_id
+from src.sources.derived.progress import (
+    PROGRESS_SNAPSHOT_SCHEMA_VERSION,
+    ProgressIdentity,
+    make_progress_contract_id,
+)
 from src.storage.metadata_store import default_metadata_duckdb_file
 from src.storage.parquet_store import ParquetStore
 from src.tools.run_logging import (
@@ -115,6 +119,35 @@ SCHEDULE_POLICIES = {"daily", "market_window", "legacy_when"}
 STATE_KEY_POLICIES = {"natural_date", "market_date", "run_instance"}
 RESUME_POLICIES = {"skip_if_success", "always_run"}
 DATA_FRESHNESS_POLICIES = {"market_session", "natural_daily", "disclosure_calendar", "maintenance"}
+
+
+@dataclass(frozen=True)
+class DerivedProgressContract:
+    """Immutable progress contract for one derived build step.
+
+    Generated ONCE per (run_instance, step) by :func:`_make_derived_progress_contract`
+    and consumed unchanged by:
+
+    * the daily state file (``progress_path`` / ``progress_contract_id`` /
+      ``progress_target`` / ``progress_dataset_id``);
+    * :func:`_run_subprocess` (child env vars ``QDC_DERIVED_PROGRESS_PATH`` /
+      ``QDC_DERIVED_PROGRESS_CONTRACT_ID``);
+    * :func:`_wait_with_stall_detection` (the expected contract id);
+    * :func:`_read_verified_progress_identity` (the expected identity used to
+      validate the child's final snapshot before backfilling ``journal_run_id``).
+
+    Carrying the contract as a single frozen object guarantees the four
+    consumers cannot drift apart (the original P0 bug was two independent
+    ``make_progress_contract_id`` calls producing two different ids for the
+    same step: state had id-A while env/snapshot/stall had id-B).
+    """
+
+    path: Path
+    contract_id: str
+    target: str
+    dataset_id: str
+
+
 # Dependency-status sets. These MUST stay aligned with the unified authority
 # in :mod:`src.pipeline.step_health` (FAILURE_STATUSES / SKIPPED_STATUSES /
 # SUCCESS_STATUSES). ``partial``, ``cancelled``, ``stalled`` and ``timed_out``
@@ -842,13 +875,21 @@ def run_daily_update(
             row["child_pid"] = child_pid
             _write_state(resolved_state_file, state)
 
+    # Mutable cell that carries the per-step :class:`DerivedProgressContract`
+    # from the step loop into ``_default_runner`` without changing the
+    # ``CommandRunner`` callable signature (synthetic test runners ignore it).
+    # The cell is reassigned at the top of each step iteration and read
+    # synchronously when ``runner(...)`` is called, so there is no risk of
+    # cross-step bleed.
+    progress_contract_cell: list[DerivedProgressContract | None] = [None]
+
     def _default_runner(step: DailyStep, log_path: Path) -> int:
         return _run_subprocess(
             step,
             log_path,
             base,
             run_log_context=run_log_context,
-            run_instance_key=run_instance_key,
+            progress_contract=progress_contract_cell[0],
             on_spawn=lambda pid: _on_child_spawn(pid, step.id, step_state),
         )
 
@@ -1066,22 +1107,28 @@ def run_daily_update(
                 continue
 
             _record_step(step_state, effective_step, "running", None, resolved_log, now)
-            # For derived build steps that use the unified progress contract,
-            # record the orchestrator-pinned progress path and progress
-            # contract id in the state file so crash recovery and external
-            # monitors can find the exact file the stall detector is reading.
-            # This is the state-file half of the contract; the env-var half is
-            # in ``_run_subprocess``. The ``progress_contract_id`` is unique
-            # per (run_instance, step) and is verified by the stall detector
-            # so a stale file from a different run cannot mask a real stall.
+            # Generate the single :class:`DerivedProgressContract` for this
+            # derived step ONCE. The same frozen object flows to the daily
+            # state, the child env (via ``_run_subprocess``), the stall
+            # detector, and the verified journal-id backfill. This eliminates
+            # the original P0 bug where ``run_daily_update`` and
+            # ``_run_subprocess`` each called ``make_progress_contract_id``
+            # independently, producing two different ids for the same step
+            # (state had id-A while env/snapshot/stall had id-B).
             # ``journal_run_id`` is filled in later by the child via the
             # progress snapshot (the orchestrator does not know the journal
             # run id until the child decides whether to resume or start fresh).
-            if _step_uses_derived_stall_detection(effective_step):
-                pinned_progress_path = _derived_progress_path_for_step(base, run_instance_key, effective_step.id)
-                pinned_progress_contract_id = make_progress_contract_id(effective_step.id)
-                step_state[effective_step.id]["progress_path"] = str(pinned_progress_path)
-                step_state[effective_step.id]["progress_contract_id"] = pinned_progress_contract_id
+            progress_contract = _make_derived_progress_contract(
+                root=base,
+                run_instance_key=run_instance_key,
+                step=effective_step,
+            )
+            progress_contract_cell[0] = progress_contract
+            if progress_contract is not None:
+                step_state[effective_step.id]["progress_path"] = str(progress_contract.path)
+                step_state[effective_step.id]["progress_contract_id"] = progress_contract.contract_id
+                step_state[effective_step.id]["progress_target"] = progress_contract.target
+                step_state[effective_step.id]["progress_dataset_id"] = progress_contract.dataset_id
             _write_state(resolved_state_file, state)
             _emit(
                 resolved_log,
@@ -1121,14 +1168,20 @@ def run_daily_update(
             # id until the child writes its first snapshot (the child decides
             # whether to resume an existing journal or start a fresh one), so
             # we read it from the pinned progress file after the step
-            # completes. ``progress_contract_id`` was already recorded before
-            # spawn; ``journal_run_id`` is recorded here.
-            if _step_uses_derived_stall_detection(effective_step):
-                pinned_path = step_state[effective_step.id].get("progress_path")
-                if pinned_path:
-                    journal_run_id = _read_journal_run_id_from_progress(Path(pinned_path))
-                    if journal_run_id is not None:
-                        step_state[effective_step.id]["journal_run_id"] = journal_run_id
+            # completes. The snapshot's full identity (contract id, target,
+            # dataset id, schema version) is verified against the
+            # :class:`DerivedProgressContract` pinned before spawn so a stale
+            # or mismatched snapshot cannot pollute the state with a wrong
+            # journal run id.
+            if progress_contract is not None:
+                identity = _read_verified_progress_identity(
+                    progress_contract.path,
+                    expected_contract_id=progress_contract.contract_id,
+                    expected_target=progress_contract.target,
+                    expected_dataset_id=progress_contract.dataset_id,
+                )
+                if identity is not None:
+                    step_state[effective_step.id]["journal_run_id"] = identity.journal_run_id
             if exit_code != 0:
                 timed_out = exit_code == TIMEOUT_EXIT_CODE and step.timeout_seconds is not None
                 timeout_cleanup_failed = (
@@ -1486,15 +1539,20 @@ def _run_subprocess(
     root: Path,
     *,
     run_log_context: RunLogContext | None = None,
-    run_instance_key: str | None = None,
+    progress_contract: DerivedProgressContract | None = None,
     on_spawn: Callable[[int], None] | None = None,
 ) -> int:
     """Spawn a step's command as a subprocess and wait for it (with stall detection).
 
-    For derived build steps in :data:`DERIVED_STALL_TARGETS`, the orchestrator
-    pins a unique progress-state path per (run_instance, step_id) BEFORE spawn
-    and passes it to the child via :data:`QDC_DERIVED_PROGRESS_PATH_ENV`. The
-    stall detector reads only that path — never a directory scan.
+    For derived build steps in :data:`DERIVED_STALL_TARGETS`, the caller
+    generates a single :class:`DerivedProgressContract` BEFORE spawn (via
+    :func:`_make_derived_progress_contract`) and passes it as
+    ``progress_contract``. This function only CONSUMES the contract — it never
+    regenerates the contract id or progress path. The contract's ``path`` and
+    ``contract_id`` flow to the child env (``QDC_DERIVED_PROGRESS_PATH`` /
+    ``QDC_DERIVED_PROGRESS_CONTRACT_ID``) and to the stall detector
+    (:func:`_wait_with_stall_detection`), guaranteeing all four consumers
+    (state, env, stall detector, snapshot identity) share one id.
 
     For the cleanup step (and any step that respects ``--active-run-id``), the
     orchestrator's current run-id is propagated via
@@ -1526,23 +1584,15 @@ def _run_subprocess(
     # relying on a stale env var would defeat the protection.
     if run_log_context is not None:
         env[QDC_ACTIVE_RUN_ID_ENV] = run_log_context.run_id
-    # For derived build steps that use the unified progress contract, pin a
-    # unique progress-state path per (run_instance, step_id) and pass it to
-    # the child. The child (build_cn_stock_daily_bar) reads this env var via
-    # ``_progress_path_override_from_env`` and writes its ProgressReporter
-    # state to exactly this file. The stall detector below reads the same
-    # path — no directory scan is involved. The progress_contract_id is also
-    # passed to the child so the snapshot carries identity fields; the stall
-    # detector verifies the contract id so a stale file from a different run
-    # cannot mask a real stall.
-    derived_target = _extract_derived_target(step) if _step_uses_derived_stall_detection(step) else None
-    progress_path: Path | None = None
-    progress_contract_id: str | None = None
-    if derived_target is not None and run_instance_key is not None:
-        progress_path = _derived_progress_path_for_step(root, run_instance_key, step.id)
-        progress_contract_id = make_progress_contract_id(step.id)
-        env[QDC_DERIVED_PROGRESS_PATH_ENV] = str(progress_path)
-        env[QDC_DERIVED_PROGRESS_CONTRACT_ID_ENV] = progress_contract_id
+    # Consume the single progress contract pinned by the caller. The child
+    # (build_cn_stock_daily_bar) reads these env vars via
+    # ``_progress_path_override_from_env`` and ``_progress_contract_id_from_env_or_local``
+    # and writes its ProgressReporter state to exactly this file. The stall
+    # detector below reads the same path and verifies the same contract id —
+    # no directory scan is involved and no second id is generated here.
+    if progress_contract is not None:
+        env[QDC_DERIVED_PROGRESS_PATH_ENV] = str(progress_contract.path)
+        env[QDC_DERIVED_PROGRESS_CONTRACT_ID_ENV] = progress_contract.contract_id
     with log_path.open("a", encoding="utf-8") as log:
         popen_kwargs: dict[str, Any] = {
             "cwd": root,
@@ -1580,14 +1630,14 @@ def _run_subprocess(
             # a last-resort fallback. See ``progress.check_stall`` for details.
             if step.timeout_seconds is not None:
                 return int(proc.wait(timeout=step.timeout_seconds))
-            if derived_target is not None:
+            if progress_contract is not None:
                 return _wait_with_stall_detection(
                     proc,
                     step,
                     log,
                     root,
-                    progress_path=progress_path,
-                    progress_contract_id=progress_contract_id,
+                    progress_path=progress_contract.path,
+                    progress_contract_id=progress_contract.contract_id,
                 )
             return int(proc.wait())
         except subprocess.TimeoutExpired:
@@ -1767,27 +1817,161 @@ def _derived_progress_path_for_step(root: Path, run_instance_key: str, step_id: 
     return root / "data" / "metadata" / "derived-step-progress" / safe_key / f"{step_id}.state.json"
 
 
-def _read_journal_run_id_from_progress(progress_path: Path) -> str | None:
-    """Read ``journal_run_id`` from a child's progress snapshot, if present.
+def _make_derived_progress_contract(
+    *,
+    root: Path,
+    run_instance_key: str,
+    step: DailyStep,
+) -> DerivedProgressContract | None:
+    """Generate the single progress contract for one derived step.
 
-    Returns ``None`` when the file is missing, unreadable, or does not carry
-    a ``journal_run_id`` field (e.g. the child crashed before writing its
-    first identity-bearing snapshot). Used by the orchestrator to backfill
-    the real journal run id into the daily state after the step completes.
+    This is the ONLY place that calls :func:`make_progress_contract_id` for a
+    derived step in production. The returned :class:`DerivedProgressContract`
+    is a frozen value object consumed unchanged by the daily state, the child
+    env (via :func:`_run_subprocess`), the stall detector, and the verified
+    journal-id backfill. Generating the contract here — instead of separately
+    in ``run_daily_update`` and ``_run_subprocess`` — eliminates the original
+    P0 bug where two independent calls produced two different ids for the same
+    step.
+
+    Returns ``None`` when the step does not use derived stall detection (i.e.
+    is not in :data:`DERIVED_STALL_TARGETS`) or when the target/dataset
+    mapping cannot be resolved. A ``None`` contract means no progress env vars
+    are set and no stall detection runs.
+    """
+
+    if not _step_uses_derived_stall_detection(step):
+        return None
+    target = _extract_derived_target(step)
+    if target is None:
+        return None
+    dataset_id = _derived_dataset_id_for_target(target)
+    if dataset_id is None:
+        return None
+    progress_path = _derived_progress_path_for_step(root, run_instance_key, step.id)
+    contract_id = make_progress_contract_id(step.id)
+    return DerivedProgressContract(
+        path=progress_path,
+        contract_id=contract_id,
+        target=target,
+        dataset_id=dataset_id,
+    )
+
+
+def _derived_dataset_id_for_target(target: str) -> str | None:
+    """Map a derived ``--target`` name to its canonical dataset id.
+
+    Reuses the single :data:`src.sources.derived.update.DATASET_BY_TARGET`
+    mapping so the orchestrator and the derived builders cannot drift apart.
+    Imported lazily to avoid an import cycle (``src.sources.derived.update``
+    pulls in the derived builder stack).
+    """
+
+    from src.sources.derived.update import DATASET_BY_TARGET
+
+    return DATASET_BY_TARGET.get(target)
+
+
+def _read_verified_progress_identity(
+    progress_path: Path,
+    *,
+    expected_contract_id: str,
+    expected_target: str,
+    expected_dataset_id: str,
+) -> ProgressIdentity | None:
+    """Read and fully verify the child's final progress snapshot.
+
+    Replaces the previous ``_read_journal_run_id_from_progress`` which only
+    read ``journal_run_id`` and could therefore backfill a wrong id from a
+    stale or mismatched snapshot. This function validates the snapshot's
+    COMPLETE identity before returning the journal run id:
+
+    * ``schema_version`` == :data:`PROGRESS_SNAPSHOT_SCHEMA_VERSION`
+    * ``progress_contract_id`` == ``expected_contract_id``
+    * ``target`` == ``expected_target``
+    * ``dataset_id`` == ``expected_dataset_id``
+    * ``journal_run_id`` is a non-empty string
+
+    On ANY mismatch the function returns ``None`` (no backfill), logs a
+    warning with the path and the expected vs actual values, and never raises
+    — a corrupt or stale snapshot must not overwrite the step's actual result.
+    It never scans sibling progress files (O(1)).
     """
 
     if not progress_path.exists():
         return None
     try:
         data = json.loads(progress_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+    except (OSError, json.JSONDecodeError) as exc:
+        logger.warning(
+            "Progress snapshot unreadable; not backfilling journal_run_id: path={} error={}",
+            progress_path,
+            exc,
+        )
         return None
     if not isinstance(data, dict):
+        logger.warning(
+            "Progress snapshot is not a JSON object; not backfilling journal_run_id: path={} type={}",
+            progress_path,
+            type(data).__name__,
+        )
         return None
-    value = data.get("journal_run_id")
-    if isinstance(value, str) and value:
-        return value
-    return None
+
+    schema_version = data.get("schema_version")
+    if schema_version != PROGRESS_SNAPSHOT_SCHEMA_VERSION:
+        logger.warning(
+            "Progress snapshot schema_version mismatch; not backfilling journal_run_id: path={} expected={} actual={}",
+            progress_path,
+            PROGRESS_SNAPSHOT_SCHEMA_VERSION,
+            schema_version,
+        )
+        return None
+
+    actual_contract_id = data.get("progress_contract_id")
+    if actual_contract_id != expected_contract_id:
+        logger.warning(
+            "Progress snapshot progress_contract_id mismatch; not backfilling journal_run_id: "
+            "path={} expected={} actual={}",
+            progress_path,
+            expected_contract_id,
+            actual_contract_id,
+        )
+        return None
+
+    actual_target = data.get("target")
+    if actual_target != expected_target:
+        logger.warning(
+            "Progress snapshot target mismatch; not backfilling journal_run_id: path={} expected={} actual={}",
+            progress_path,
+            expected_target,
+            actual_target,
+        )
+        return None
+
+    actual_dataset_id = data.get("dataset_id")
+    if actual_dataset_id != expected_dataset_id:
+        logger.warning(
+            "Progress snapshot dataset_id mismatch; not backfilling journal_run_id: path={} expected={} actual={}",
+            progress_path,
+            expected_dataset_id,
+            actual_dataset_id,
+        )
+        return None
+
+    journal_run_id = data.get("journal_run_id")
+    if not isinstance(journal_run_id, str) or not journal_run_id:
+        logger.warning(
+            "Progress snapshot journal_run_id missing or empty; not backfilling: path={}",
+            progress_path,
+        )
+        return None
+
+    return ProgressIdentity(
+        progress_contract_id=str(actual_contract_id),
+        target=str(actual_target),
+        dataset_id=str(actual_dataset_id),
+        journal_run_id=journal_run_id,
+    )
 
 
 def _extract_derived_target(step: DailyStep) -> str | None:
@@ -2152,14 +2336,20 @@ def _record_step(
     previous_child_pid = previous.get("child_pid") if isinstance(previous, dict) else None
     if previous_child_pid is not None:
         row["child_pid"] = previous_child_pid
-    # Preserve the orchestrator-pinned derived progress path and progress
-    # contract id across status transitions (running → stalled/failed/success).
-    # These are written once before spawn and must survive the row rewrite so
-    # crash recovery can locate the exact progress file the stall detector was
+    # Preserve the orchestrator-pinned derived progress contract fields
+    # across status transitions (running → stalled/failed/success). These are
+    # written once before spawn and must survive the row rewrite so crash
+    # recovery can locate the exact progress file the stall detector was
     # reading and verify the snapshot identity. ``journal_run_id`` is also
     # preserved once the child's first snapshot lands (the orchestrator
-    # backfills it from the progress file when it sees the first heartbeat).
-    for preserve_key in ("progress_path", "progress_contract_id", "journal_run_id"):
+    # backfills it from the verified progress snapshot after step completion).
+    for preserve_key in (
+        "progress_path",
+        "progress_contract_id",
+        "progress_target",
+        "progress_dataset_id",
+        "journal_run_id",
+    ):
         previous_value = previous.get(preserve_key) if isinstance(previous, dict) else None
         if previous_value is not None:
             row[preserve_key] = previous_value

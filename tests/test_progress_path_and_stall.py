@@ -20,7 +20,9 @@ import dataclasses
 import io
 import json
 import subprocess
-from datetime import datetime, timedelta
+import sys
+from collections.abc import Callable
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -74,6 +76,9 @@ def _write_progress_state(
     heartbeat_age_seconds: int = 0,
     progress_contract_id: str | None = None,
     journal_run_id: str | None = None,
+    target: str | None = None,
+    dataset_id: str | None = None,
+    schema_version: int | None = 1,
 ) -> None:
     """Write a progress state JSON file with the requested heartbeat age.
 
@@ -85,6 +90,13 @@ def _write_progress_state(
     ``expected_contract_id`` passed to :func:`check_stall` or the stall
     detector treats the snapshot as "not our contract" and returns
     ``stalled=False``.
+
+    ``schema_version`` defaults to ``PROGRESS_SNAPSHOT_SCHEMA_VERSION`` (1).
+    Pass ``None`` to omit it, or an unsupported integer to simulate a
+    forward-incompatible snapshot.
+
+    ``target`` / ``dataset_id`` are optional identity fields used by
+    :func:`run_update_daily._read_verified_progress_identity`.
     """
 
     heartbeat_at = datetime.now() - timedelta(seconds=heartbeat_age_seconds)
@@ -99,10 +111,16 @@ def _write_progress_state(
         "started_at": heartbeat_at.isoformat(timespec="seconds"),
         "failed_security_ids": [],
     }
+    if schema_version is not None:
+        payload["schema_version"] = schema_version
     if progress_contract_id is not None:
         payload["progress_contract_id"] = progress_contract_id
     if journal_run_id is not None:
         payload["journal_run_id"] = journal_run_id
+    if target is not None:
+        payload["target"] = target
+    if dataset_id is not None:
+        payload["dataset_id"] = dataset_id
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
         json.dumps(payload, ensure_ascii=False, indent=2),
@@ -168,6 +186,30 @@ class _CapturingPopen:
 
     def poll(self) -> int | None:
         return 0
+
+
+def _make_contract(
+    tmp_path: Path,
+    *,
+    run_instance: str = "run_instance:20260725_120000",
+    step_id: str = "build-derived-daily-bar",
+    target: str = "daily_bar",
+    dataset_id: str = "cn_stock_daily_bar",
+    contract_id: str | None = None,
+) -> run_update_daily.DerivedProgressContract:
+    """Build a DerivedProgressContract for tests.
+
+    The contract_id defaults to a deterministic value so tests can assert
+    exact env-var equality; production code generates a uuid-based id.
+    """
+
+    path = run_update_daily._derived_progress_path_for_step(tmp_path, run_instance, step_id)
+    return run_update_daily.DerivedProgressContract(
+        path=path,
+        contract_id=contract_id or f"derived-progress:{step_id}:abc12345",
+        target=target,
+        dataset_id=dataset_id,
+    )
 
 
 def _stale_pinned_path(
@@ -301,25 +343,21 @@ class TestP03FixedProgressPath:
 
         monkeypatch.setattr(run_update_daily.subprocess, "Popen", _Capturing)
 
-        run_instance_key = "run_instance:20260725_120000"
+        contract = _make_contract(tmp_path)
         run_update_daily._run_subprocess(
             step,
             log_file,
             tmp_path,
-            run_instance_key=run_instance_key,
+            progress_contract=contract,
         )
 
         env = captured["env"]
         assert env is not None
-        expected_path = run_update_daily._derived_progress_path_for_step(tmp_path, run_instance_key, step.id)
-        assert env[run_update_daily.QDC_DERIVED_PROGRESS_PATH_ENV] == str(expected_path)
-        # New contract: the env var is QDC_DERIVED_PROGRESS_CONTRACT_ID and the
-        # value is a uuid-based ``derived-progress:<step_id>:<uuid_hex>``. The
-        # exact uuid is not deterministic; we verify the prefix and that the
-        # legacy QDC_DERIVED_RUN_ID is NOT set (the new name is the single
-        # authoritative value).
-        contract_id = env[run_update_daily.QDC_DERIVED_PROGRESS_CONTRACT_ID_ENV]
-        assert contract_id.startswith(f"derived-progress:{step.id}:")
+        assert env[run_update_daily.QDC_DERIVED_PROGRESS_PATH_ENV] == str(contract.path)
+        # The env var must carry EXACTLY the contract id pinned by the caller
+        # — _run_subprocess must NOT regenerate it. This is the core P0 fix:
+        # state, env, snapshot and stall detector all share one id.
+        assert env[run_update_daily.QDC_DERIVED_PROGRESS_CONTRACT_ID_ENV] == contract.contract_id
         assert run_update_daily.QDC_DERIVED_RUN_ID_ENV not in env
 
     def test_run_subprocess_does_not_set_derived_progress_env_for_valuation(
@@ -328,8 +366,8 @@ class TestP03FixedProgressPath:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         log_file = tmp_path / "run.log"
-        # Valuation is NOT in DERIVED_STALL_TARGETS, so the derived env vars
-        # must NOT be set.
+        # Valuation is NOT in DERIVED_STALL_TARGETS, so the caller passes
+        # progress_contract=None and the derived env vars must NOT be set.
         step = _make_step("build-derived-valuation", target="valuation")
         captured: dict[str, Any] = {}
 
@@ -344,7 +382,7 @@ class TestP03FixedProgressPath:
             step,
             log_file,
             tmp_path,
-            run_instance_key="run_instance:20260725_120000",
+            progress_contract=None,
         )
 
         env = captured["env"]
@@ -379,7 +417,7 @@ class TestP03FixedProgressPath:
             log_file,
             tmp_path,
             run_log_context=run_log_context,
-            run_instance_key="run_instance:20260725_120000",
+            progress_contract=_make_contract(tmp_path),
         )
 
         env = captured["env"]
@@ -407,7 +445,7 @@ class TestP03FixedProgressPath:
             step,
             log_file,
             tmp_path,
-            run_instance_key="run_instance:20260725_120000",
+            progress_contract=_make_contract(tmp_path),
         )
 
         env = captured["env"]
@@ -1029,36 +1067,587 @@ class TestNoDirectoryScan:
         assert exit_code == 0
 
 
-class TestOrchestratorBackfillsJournalRunId:
-    """The orchestrator backfills ``journal_run_id`` from the child's final
-    progress snapshot into the daily state. ``progress_contract_id`` is
-    recorded before spawn; ``journal_run_id`` is recorded after the step
-    completes.
+class TestVerifiedProgressIdentityBackfill:
+    """``_read_verified_progress_identity`` validates the snapshot's COMPLETE
+    identity before returning the journal run id. A stale, mismatched, or
+    corrupt snapshot must NOT pollute the daily state with a wrong journal id.
+
+    These tests cover the spec section 5.3 matrix:
+
+    * matching contract/target/dataset/schema → backfill;
+    * wrong contract → no backfill;
+    * wrong target → no backfill;
+    * wrong dataset → no backfill;
+    * missing schema_version → no backfill;
+    * unsupported schema_version → no backfill;
+    * missing journal_run_id → no backfill;
+    * malformed JSON → no backfill;
+    * stale sibling file → never read (O(1): only the pinned path is opened).
     """
 
-    def test_read_journal_run_id_from_progress_returns_value(self, tmp_path: Path) -> None:
+    CONTRACT_ID = "derived-progress:build-derived-daily-bar:abc12345"
+    TARGET = "daily_bar"
+    DATASET_ID = "cn_stock_daily_bar"
+    JOURNAL_RUN_ID = "run-20260726-abcdef"
+
+    def _read(self, path: Path) -> ProgressIdentity | None:
+        return run_update_daily._read_verified_progress_identity(
+            path,
+            expected_contract_id=self.CONTRACT_ID,
+            expected_target=self.TARGET,
+            expected_dataset_id=self.DATASET_ID,
+        )
+
+    def test_matching_identity_backfills_journal_run_id(self, tmp_path: Path) -> None:
         path = tmp_path / "state.json"
         _write_progress_state(
             path,
-            progress_contract_id="derived-progress:daily_bar:abc12345",
-            journal_run_id="run-20260726-abcdef",
+            progress_contract_id=self.CONTRACT_ID,
+            journal_run_id=self.JOURNAL_RUN_ID,
+            target=self.TARGET,
+            dataset_id=self.DATASET_ID,
+            schema_version=1,
         )
-        assert run_update_daily._read_journal_run_id_from_progress(path) == "run-20260726-abcdef"
+        identity = self._read(path)
+        assert identity is not None
+        assert identity.journal_run_id == self.JOURNAL_RUN_ID
+        assert identity.progress_contract_id == self.CONTRACT_ID
+        assert identity.target == self.TARGET
+        assert identity.dataset_id == self.DATASET_ID
 
-    def test_read_journal_run_id_returns_none_when_missing(self, tmp_path: Path) -> None:
+    def test_wrong_contract_id_does_not_backfill(self, tmp_path: Path) -> None:
         path = tmp_path / "state.json"
-        _write_progress_state(path)
-        assert run_update_daily._read_journal_run_id_from_progress(path) is None
+        _write_progress_state(
+            path,
+            progress_contract_id="derived-progress:build-derived-daily-bar:WRONG",
+            journal_run_id=self.JOURNAL_RUN_ID,
+            target=self.TARGET,
+            dataset_id=self.DATASET_ID,
+        )
+        assert self._read(path) is None
 
-    def test_read_journal_run_id_returns_none_when_file_missing(self, tmp_path: Path) -> None:
-        assert run_update_daily._read_journal_run_id_from_progress(tmp_path / "nope.json") is None
+    def test_wrong_target_does_not_backfill(self, tmp_path: Path) -> None:
+        path = tmp_path / "state.json"
+        _write_progress_state(
+            path,
+            progress_contract_id=self.CONTRACT_ID,
+            journal_run_id=self.JOURNAL_RUN_ID,
+            target="valuation",
+            dataset_id=self.DATASET_ID,
+        )
+        assert self._read(path) is None
 
-    def test_read_journal_run_id_returns_none_on_invalid_json(self, tmp_path: Path) -> None:
+    def test_wrong_dataset_id_does_not_backfill(self, tmp_path: Path) -> None:
+        path = tmp_path / "state.json"
+        _write_progress_state(
+            path,
+            progress_contract_id=self.CONTRACT_ID,
+            journal_run_id=self.JOURNAL_RUN_ID,
+            target=self.TARGET,
+            dataset_id="cn_stock_valuation",
+        )
+        assert self._read(path) is None
+
+    def test_missing_schema_version_does_not_backfill(self, tmp_path: Path) -> None:
+        path = tmp_path / "state.json"
+        _write_progress_state(
+            path,
+            progress_contract_id=self.CONTRACT_ID,
+            journal_run_id=self.JOURNAL_RUN_ID,
+            target=self.TARGET,
+            dataset_id=self.DATASET_ID,
+            schema_version=None,
+        )
+        assert self._read(path) is None
+
+    def test_unsupported_schema_version_does_not_backfill(self, tmp_path: Path) -> None:
+        path = tmp_path / "state.json"
+        _write_progress_state(
+            path,
+            progress_contract_id=self.CONTRACT_ID,
+            journal_run_id=self.JOURNAL_RUN_ID,
+            target=self.TARGET,
+            dataset_id=self.DATASET_ID,
+            schema_version=999,
+        )
+        assert self._read(path) is None
+
+    def test_missing_journal_run_id_does_not_backfill(self, tmp_path: Path) -> None:
+        path = tmp_path / "state.json"
+        _write_progress_state(
+            path,
+            progress_contract_id=self.CONTRACT_ID,
+            target=self.TARGET,
+            dataset_id=self.DATASET_ID,
+        )
+        assert self._read(path) is None
+
+    def test_empty_journal_run_id_does_not_backfill(self, tmp_path: Path) -> None:
+        path = tmp_path / "state.json"
+        _write_progress_state(
+            path,
+            progress_contract_id=self.CONTRACT_ID,
+            journal_run_id="",
+            target=self.TARGET,
+            dataset_id=self.DATASET_ID,
+        )
+        assert self._read(path) is None
+
+    def test_non_string_journal_run_id_does_not_backfill(self, tmp_path: Path) -> None:
+        path = tmp_path / "state.json"
+        path.write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "progress_contract_id": self.CONTRACT_ID,
+                    "target": self.TARGET,
+                    "dataset_id": self.DATASET_ID,
+                    "journal_run_id": 123,
+                }
+            ),
+            encoding="utf-8",
+        )
+        assert self._read(path) is None
+
+    def test_malformed_json_does_not_backfill(self, tmp_path: Path) -> None:
         path = tmp_path / "state.json"
         path.write_text("{not json", encoding="utf-8")
-        assert run_update_daily._read_journal_run_id_from_progress(path) is None
+        assert self._read(path) is None
 
-    def test_read_journal_run_id_returns_none_when_field_not_string(self, tmp_path: Path) -> None:
+    def test_missing_file_does_not_backfill(self, tmp_path: Path) -> None:
+        assert self._read(tmp_path / "nope.json") is None
+
+    def test_non_dict_json_does_not_backfill(self, tmp_path: Path) -> None:
         path = tmp_path / "state.json"
-        path.write_text(json.dumps({"journal_run_id": 123}), encoding="utf-8")
-        assert run_update_daily._read_journal_run_id_from_progress(path) is None
+        path.write_text(json.dumps(["not", "an", "object"]), encoding="utf-8")
+        assert self._read(path) is None
+
+    def test_stale_sibling_file_is_never_read(self, tmp_path: Path) -> None:
+        """A stale sibling progress file must NOT be opened. The verifier only
+        reads the pinned path passed in by the caller (O(1) — never a
+        directory scan).
+        """
+
+        # Pinned path (current run) carries a fresh, matching snapshot.
+        current = tmp_path / "current.state.json"
+        _write_progress_state(
+            current,
+            progress_contract_id=self.CONTRACT_ID,
+            journal_run_id=self.JOURNAL_RUN_ID,
+            target=self.TARGET,
+            dataset_id=self.DATASET_ID,
+        )
+
+        # Sibling stale file from a previous run with a WRONG journal id. The
+        # verifier must NOT fall back to scanning the directory and pick this
+        # one up.
+        sibling = tmp_path / "stale.state.json"
+        _write_progress_state(
+            sibling,
+            progress_contract_id="derived-progress:build-derived-daily-bar:OLD",
+            journal_run_id="run-OLD-WRONG",
+            target=self.TARGET,
+            dataset_id=self.DATASET_ID,
+        )
+
+        identity = self._read(current)
+        assert identity is not None
+        assert identity.journal_run_id == self.JOURNAL_RUN_ID
+
+
+class TestSingleContractThreading:
+    """Spec 5.1: a single ``DerivedProgressContract`` threads the same id
+    through state → subprocess env → stall detector → snapshot → state.
+
+    This is the end-to-end P0 regression test: the original bug was two
+    independent ``make_progress_contract_id`` calls (one in
+    ``run_daily_update``, one in ``_run_subprocess``) producing two different
+    ids for the same step. The fix generates the contract ONCE in
+    ``_make_derived_progress_contract`` and threads the frozen object through
+    every consumer.
+    """
+
+    def test_state_env_snapshot_stall_share_one_contract_id(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Drive ``run_daily_update`` for one derived step and assert the
+        contract id recorded in the daily state equals the env var passed to
+        the subprocess, the snapshot's ``progress_contract_id``, and the
+        stall detector's ``expected_contract_id``.
+        """
+
+        captured_env: dict[str, str] = {}
+        captured_stall_contract_id: dict[str, str | None] = {}
+        captured_progress_path: dict[str, Path | None] = {}
+
+        # Pin a deterministic contract so the test can assert exact ids.
+        pinned_path = tmp_path / "pinned.state.json"
+        fixed_contract = run_update_daily.DerivedProgressContract(
+            path=pinned_path,
+            contract_id="derived-progress:build-derived-daily-bar:FIXED",
+            target="daily_bar",
+            dataset_id="cn_stock_daily_bar",
+        )
+
+        def _fixed_contract(*args: Any, **kwargs: Any) -> run_update_daily.DerivedProgressContract:
+            return fixed_contract
+
+        monkeypatch.setattr(run_update_daily, "_make_derived_progress_contract", _fixed_contract)
+
+        # Capture the env vars handed to Popen so we can assert the child env
+        # contract id matches the state contract id. Replace the command with
+        # a no-op so the child exits immediately (the stall detector wrapper
+        # below writes the snapshot before returning).
+        real_popen = run_update_daily.subprocess.Popen
+
+        class _EnvCapturingPopen(real_popen):  # type: ignore[misc, valid-type]
+            def __init__(self, args: Any, *rest: Any, **kwargs: Any) -> None:  # type: ignore[no-redef]
+                env = kwargs.get("env") or {}
+                captured_env.update(env)
+                kwargs["args"] = [sys.executable, "-c", "import sys; sys.exit(0)"]
+                super().__init__(*rest, **kwargs)
+
+        monkeypatch.setattr(run_update_daily.subprocess, "Popen", _EnvCapturingPopen)
+
+        # Capture the stall detector's expected_contract_id AND write a
+        # snapshot carrying the matching identity so the orchestrator's
+        # post-step ``_read_verified_progress_identity`` can backfill the
+        # journal_run_id. The real stall detector would poll the child; here
+        # the no-op child exits immediately so we just return 0.
+        def _capturing_wait(
+            proc: Any,
+            step: Any,
+            log: Any,
+            root: Any,
+            *,
+            progress_path: Path | None = None,
+            progress_contract_id: str | None = None,
+        ) -> int:
+            captured_stall_contract_id["value"] = progress_contract_id
+            captured_progress_path["value"] = progress_path
+            _write_progress_state(
+                pinned_path,
+                progress_contract_id=fixed_contract.contract_id,
+                journal_run_id="run-20260726-abcdef",
+                target=fixed_contract.target,
+                dataset_id=fixed_contract.dataset_id,
+            )
+            return 0
+
+        monkeypatch.setattr(run_update_daily, "_wait_with_stall_detection", _capturing_wait)
+
+        # Minimal workflow + settings so the orchestrator schedules exactly
+        # one derived step. NO custom command_runner — let the default runner
+        # be used so ``_run_subprocess`` is actually invoked (that's where
+        # the env vars and stall detector contract id come from).
+        config_dir = tmp_path / "config"
+        config_dir.mkdir(exist_ok=True)
+        (config_dir / "settings.yaml").write_text("project:\n  timezone: Asia/Shanghai\n", encoding="utf-8")
+        (config_dir / "daily_workflow.yaml").write_text(
+            """
+steps:
+  - id: build-derived-daily-bar
+    name: build
+    schedule_policy: daily
+    state_key_policy: natural_date
+    resume_policy: skip_if_success
+    data_freshness_policy: natural_daily
+    command: ["cmd", "build", "--target", "daily_bar"]
+""".lstrip(),
+            encoding="utf-8",
+        )
+
+        state_file = tmp_path / "state.json"
+        run_update_daily.run_daily_update(
+            root=tmp_path,
+            state_file=state_file,
+            run_log=tmp_path / "run.log",
+            today=date(2026, 7, 26),
+            market_date="2026-07-26",
+            now=lambda: datetime(2026, 7, 26, 18, 0),
+        )
+
+        # 1. Daily state contract id == the frozen contract id.
+        steps = json.loads(state_file.read_text(encoding="utf-8"))["runs"]["natural_date:2026-07-26"]["steps"]
+        step_state = steps["build-derived-daily-bar"]
+        assert step_state["progress_contract_id"] == fixed_contract.contract_id
+        assert step_state["progress_target"] == "daily_bar"
+        assert step_state["progress_dataset_id"] == "cn_stock_daily_bar"
+        assert step_state["progress_path"] == str(pinned_path)
+        # journal_run_id was backfilled from the verified snapshot.
+        assert step_state["journal_run_id"] == "run-20260726-abcdef"
+
+        # 2. Subprocess env contract id == the frozen contract id.
+        assert captured_env.get(run_update_daily.QDC_DERIVED_PROGRESS_CONTRACT_ID_ENV) == (fixed_contract.contract_id)
+        assert captured_env.get(run_update_daily.QDC_DERIVED_PROGRESS_PATH_ENV) == str(pinned_path)
+
+        # 3. Stall detector expected_contract_id == the frozen contract id.
+        assert captured_stall_contract_id["value"] == fixed_contract.contract_id
+        assert captured_progress_path["value"] == pinned_path
+
+        # 4. The four consumers share ONE id.
+        assert (
+            step_state["progress_contract_id"]
+            == captured_env[run_update_daily.QDC_DERIVED_PROGRESS_CONTRACT_ID_ENV]
+            == captured_stall_contract_id["value"]
+            == fixed_contract.contract_id
+        )
+
+
+class TestContractIdGeneratedOnce:
+    """Spec 5.2: ``make_progress_contract_id`` is called exactly ONCE per
+    derived step. The original P0 bug called it twice (once in
+    ``run_daily_update`` and once in ``_run_subprocess``), producing two
+    different ids. The fix funnels all calls through
+    ``_make_derived_progress_contract``.
+    """
+
+    def test_make_progress_contract_id_called_once_per_derived_step(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        call_count = {"n": 0}
+        real_make = run_update_daily.make_progress_contract_id
+
+        def _counting_make(step_id: str) -> str:
+            call_count["n"] += 1
+            return real_make(step_id)
+
+        monkeypatch.setattr(run_update_daily, "make_progress_contract_id", _counting_make)
+
+        contract = run_update_daily._make_derived_progress_contract(
+            root=tmp_path,
+            run_instance_key="run_instance:20260726_120000-abc12345",
+            step=_make_step("build-derived-daily-bar", target="daily_bar"),
+        )
+        assert contract is not None
+        # The factory is the ONLY production call site.
+        assert call_count["n"] == 1
+
+        # Driving ``_run_subprocess`` with the contract must NOT trigger a
+        # second call — the subprocess only CONSUMES the contract.
+        log_file = tmp_path / "run.log"
+
+        class _NoOpPopen(_CapturingPopen):
+            pass
+
+        monkeypatch.setattr(run_update_daily.subprocess, "Popen", _NoOpPopen)
+        run_update_daily._run_subprocess(
+            _make_step("build-derived-daily-bar", target="daily_bar"),
+            log_file,
+            tmp_path,
+            progress_contract=contract,
+        )
+        assert call_count["n"] == 1
+
+    def test_run_subprocess_does_not_call_make_progress_contract_id(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """``_run_subprocess`` must CONSUME the contract, never regenerate it."""
+
+        call_count = {"n": 0}
+
+        def _explode(_step_id: str) -> str:
+            call_count["n"] += 1
+            raise AssertionError(
+                "_run_subprocess must not call make_progress_contract_id; "
+                "the caller pins the contract via _make_derived_progress_contract"
+            )
+
+        monkeypatch.setattr(run_update_daily, "make_progress_contract_id", _explode)
+
+        log_file = tmp_path / "run.log"
+        monkeypatch.setattr(run_update_daily.subprocess, "Popen", _CapturingPopen)
+
+        # With a contract: consume, do not regenerate.
+        run_update_daily._run_subprocess(
+            _make_step("build-derived-daily-bar", target="daily_bar"),
+            log_file,
+            tmp_path,
+            progress_contract=_make_contract(tmp_path),
+        )
+        assert call_count["n"] == 0
+
+        # Without a contract (e.g. valuation step): still no regeneration —
+        # the env vars are simply not set.
+        run_update_daily._run_subprocess(
+            _make_step("build-derived-valuation", target="valuation"),
+            log_file,
+            tmp_path,
+            progress_contract=None,
+        )
+        assert call_count["n"] == 0
+
+
+class TestResumePreservesJournalRunId:
+    """Spec 5.4: on resume, the orchestrator uses a NEW ``progress_contract_id``
+    (per-invocation nonce) but PRESERVES the prior ``journal_run_id`` (stable
+    recovery identity). The two must not be semantically conflated.
+    """
+
+    def test_each_invocation_generates_new_contract_id(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        step = _make_step("build-derived-daily-bar", target="daily_bar")
+        contract_a = run_update_daily._make_derived_progress_contract(
+            root=tmp_path,
+            run_instance_key="run_instance:20260726_120000-aaa11111",
+            step=step,
+        )
+        contract_b = run_update_daily._make_derived_progress_contract(
+            root=tmp_path,
+            run_instance_key="run_instance:20260726_130000-bbb22222",
+            step=step,
+        )
+        assert contract_a is not None
+        assert contract_b is not None
+        # New run instance → new contract id (uuid-based nonce).
+        assert contract_a.contract_id != contract_b.contract_id
+        # Same target/dataset id (semantic identity is preserved across resume).
+        assert contract_a.target == contract_b.target == "daily_bar"
+        assert contract_a.dataset_id == contract_b.dataset_id == "cn_stock_daily_bar"
+        # Different run instance → different progress path (no path reuse).
+        assert contract_a.path != contract_b.path
+
+    def test_resume_state_preserves_journal_run_id_across_invocations(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A second orchestrator invocation must NOT lose the journal_run_id
+        backfilled by the first invocation, even though it generates a NEW
+        ``progress_contract_id``.
+        """
+
+        # Pin a deterministic contract for both invocations so we control the
+        # journal backfill. The counter changes between invocations to
+        # simulate resume's new per-invocation contract nonce.
+        pinned_path = tmp_path / "pinned.state.json"
+
+        def _fixed_contract(*args: Any, **kwargs: Any) -> run_update_daily.DerivedProgressContract:
+            return run_update_daily.DerivedProgressContract(
+                path=pinned_path,
+                contract_id=f"derived-progress:build-derived-daily-bar:{_fixed_contract.counter}",  # type: ignore[attr-defined]
+                target="daily_bar",
+                dataset_id="cn_stock_daily_bar",
+            )
+
+        _fixed_contract.counter = "aaa11111"  # type: ignore[attr-defined]
+
+        monkeypatch.setattr(run_update_daily, "_make_derived_progress_contract", _fixed_contract)
+
+        # Replace Popen with a no-op so the child exits immediately. The
+        # stall-detector wrapper writes the snapshot before returning.
+        class _NoOpPopen(_CapturingPopen):
+            pass
+
+        monkeypatch.setattr(run_update_daily.subprocess, "Popen", _NoOpPopen)
+
+        def _make_stall_wrapper(journal_run_id: str) -> Callable[..., int]:
+            def _wait(
+                proc: Any,
+                step: Any,
+                log: Any,
+                root: Any,
+                *,
+                progress_path: Path | None = None,
+                progress_contract_id: str | None = None,
+            ) -> int:
+                _write_progress_state(
+                    pinned_path,
+                    progress_contract_id=_fixed_contract().contract_id,
+                    journal_run_id=journal_run_id,
+                    target="daily_bar",
+                    dataset_id="cn_stock_daily_bar",
+                )
+                return 0
+
+            return _wait
+
+        monkeypatch.setattr(run_update_daily, "_wait_with_stall_detection", _make_stall_wrapper("JID-1"))
+
+        config_dir = tmp_path / "config"
+        config_dir.mkdir(exist_ok=True)
+        (config_dir / "settings.yaml").write_text("project:\n  timezone: Asia/Shanghai\n", encoding="utf-8")
+        (config_dir / "daily_workflow.yaml").write_text(
+            """
+steps:
+  - id: build-derived-daily-bar
+    name: build
+    schedule_policy: daily
+    state_key_policy: natural_date
+    resume_policy: skip_if_success
+    data_freshness_policy: natural_daily
+    command: ["cmd", "build", "--target", "daily_bar"]
+""".lstrip(),
+            encoding="utf-8",
+        )
+
+        # First invocation: step runs, child writes a snapshot with
+        # journal_run_id JID-1, orchestrator backfills it into state.
+        state_file = tmp_path / "state.json"
+        run_update_daily.run_daily_update(
+            root=tmp_path,
+            state_file=state_file,
+            run_log=tmp_path / "run.log",
+            today=date(2026, 7, 26),
+            market_date="2026-07-26",
+            now=lambda: datetime(2026, 7, 26, 18, 0),
+        )
+
+        steps1 = json.loads(state_file.read_text(encoding="utf-8"))["runs"]["natural_date:2026-07-26"]["steps"][
+            "build-derived-daily-bar"
+        ]
+        assert steps1["status"] == "success"
+        assert steps1["progress_contract_id"] == "derived-progress:build-derived-daily-bar:aaa11111"
+        assert steps1["journal_run_id"] == "JID-1"
+
+        # Second invocation: NEW contract id (resume nonce), but the state's
+        # journal_run_id is preserved by ``_record_step`` (it carries forward
+        # prior journal_run_id). We force the step to run again by setting
+        # resume_policy=always_run via a workflow rewrite.
+        (config_dir / "daily_workflow.yaml").write_text(
+            """
+steps:
+  - id: build-derived-daily-bar
+    name: build
+    schedule_policy: daily
+    state_key_policy: natural_date
+    resume_policy: always_run
+    data_freshness_policy: natural_daily
+    command: ["cmd", "build", "--target", "daily_bar"]
+""".lstrip(),
+            encoding="utf-8",
+        )
+
+        _fixed_contract.counter = "bbb22222"  # type: ignore[attr-defined]
+
+        # Second invocation: child reuses journal_run_id JID-1 (stable
+        # recovery identity) but writes under the new contract id.
+        run_update_daily.run_daily_update(
+            root=tmp_path,
+            state_file=state_file,
+            run_log=tmp_path / "run.log",
+            today=date(2026, 7, 26),
+            market_date="2026-07-26",
+            now=lambda: datetime(2026, 7, 26, 19, 0),
+        )
+
+        steps2 = json.loads(state_file.read_text(encoding="utf-8"))["runs"]["natural_date:2026-07-26"]["steps"][
+            "build-derived-daily-bar"
+        ]
+        assert steps2["status"] == "success"
+        # New contract id (resume nonce) — NOT the old one.
+        assert steps2["progress_contract_id"] == "derived-progress:build-derived-daily-bar:bbb22222"
+        # journal_run_id is preserved (stable recovery identity).
+        assert steps2["journal_run_id"] == "JID-1"
+        # The two ids are semantically distinct: contract_id changed, journal
+        # id did not.
+        assert steps1["progress_contract_id"] != steps2["progress_contract_id"]
+        assert steps1["journal_run_id"] == steps2["journal_run_id"]
