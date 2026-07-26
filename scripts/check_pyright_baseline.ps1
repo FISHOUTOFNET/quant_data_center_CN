@@ -85,23 +85,34 @@ if (Test-Path $unexpectedConfig) {
 }
 
 function Test-PyrightAvailable {
+    param([string] $PythonExe)
     try {
-        & python -m pyright --version 2>$null | Out-Null
+        & $PythonExe -m pyright --version 2>$null | Out-Null
         return $LASTEXITCODE -eq 0
     } catch {
         return $false
     }
 }
 
-if (-not (Test-PyrightAvailable)) {
+# Capture the Python executable ONCE. All subsequent pyright/version calls use
+# this exact path instead of re-resolving ``python`` from the PATH. This
+# guarantees the script uses the same interpreter it identified at the start,
+# even if the PATH changes in a subprocess or ``python`` would resolve to a
+# different executable in a child shell.
+$pythonExecutable = (Get-Command python).Source
+if (-not $pythonExecutable) {
+    Write-Error "python not found on PATH. Activate the project virtual environment first."
+    exit 12
+}
+
+if (-not (Test-PyrightAvailable -PythonExe $pythonExecutable)) {
     Write-Error "pyright is not installed in the current interpreter. Run: python -m pip install -e `".[dev]`""
     exit 2
 }
 
 # Capture environment facts required by section 7.3.
-$pythonExecutable = (Get-Command python).Source
-$pythonVersion = (& python -c "import sys; print(sys.version.split()[0])").Trim()
-$pyrightVersion = (& python -m pyright --version).Trim()
+$pythonVersion = (& $pythonExecutable -c "import sys; print(sys.version.split()[0])").Trim()
+$pyrightVersion = (& $pythonExecutable -m pyright --version).Trim()
 $repositorySha = (git rev-parse HEAD).Trim()
 $configPath = (Resolve-Path "$repoRoot/pyproject.toml").Path
 
@@ -115,7 +126,21 @@ Write-Host ""
 
 # Run pyright --outputjson. We deliberately ignore its exit code (non-zero when
 # any diagnostic is emitted) and read the diagnostic counts from the JSON.
-$rawJson = & python @("-m", "pyright", "--outputjson") $PyrightArgs 2>$null | Out-String
+# Use temp files for both stdout and stderr: PowerShell's `2>$null` can
+# silently corrupt the stdout stream when the JSON is large, producing an empty
+# generalDiagnostics array. Redirecting stderr to a temp file (and discarding
+# it) avoids this while still suppressing pyright's human-readable progress
+# output. Temp files are placed in the repo root (not [System.IO.Path]::GetTempFileName())
+# to avoid non-ASCII characters in the user profile path breaking redirection.
+$pyrightTempOut = Join-Path $repoRoot ".pyright-baseline-stdout.tmp"
+$pyrightTempErr = Join-Path $repoRoot ".pyright-baseline-stderr.tmp"
+try {
+    & $pythonExecutable @("-m", "pyright", "--outputjson") $PyrightArgs > $pyrightTempOut 2> $pyrightTempErr
+    $rawJson = Get-Content $pyrightTempOut -Raw -Encoding UTF8
+} finally {
+    if (Test-Path $pyrightTempOut) { Remove-Item $pyrightTempOut -Force -ErrorAction SilentlyContinue }
+    if (Test-Path $pyrightTempErr) { Remove-Item $pyrightTempErr -Force -ErrorAction SilentlyContinue }
+}
 if ([string]::IsNullOrWhiteSpace($rawJson)) {
     Write-Error "pyright produced no JSON output. Re-run with: python -m pyright --outputjson"
     exit 3
@@ -161,8 +186,12 @@ if ($report.generalDiagnostics) {
     }
 }
 
-$errorCount = ($diagnostics | Where-Object { $_.severity -eq "error" }).Count
-$warningCount = ($diagnostics | Where-Object { $_.severity -eq "warning" }).Count
+# Wrap in @(...) so the result is always an array even when Where-Object
+# returns $null (no matching diagnostics) or a single object. Without this,
+# Set-StrictMode -Version Latest throws "The property 'Count' cannot be found
+# on this object" when there are zero errors or zero warnings.
+$errorCount = @($diagnostics | Where-Object { $_.severity -eq "error" }).Count
+$warningCount = @($diagnostics | Where-Object { $_.severity -eq "warning" }).Count
 
 # Resolve the output file to an ABSOLUTE path BEFORE writing. The previous
 # implementation used ``Resolve-Path $OutFile -ErrorAction SilentlyContinue``
