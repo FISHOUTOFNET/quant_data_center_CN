@@ -29,7 +29,6 @@ import click
 
 from src.utils import paths
 from src.utils.paths import (
-    MANAGED_ROOT_MARKER,
     LogRootAuthorizationError,
     validate_managed_log_root,
 )

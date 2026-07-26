@@ -7,7 +7,7 @@ from datetime import datetime
 from pathlib import Path
 
 from src.pipeline.common import DAILY_BAR_DATASETS, date_iso
-from src.pipeline.step_health import StepHealthSummary, read_step_health_summary
+from src.pipeline.step_health import StepHealthSummary, is_failure_status, read_step_health_summary
 from src.sources.baostock.adjustments import (
     BAOSTOCK_CN_STOCK_ADJUSTMENT_FACTOR_DATASET,
     UNADJUSTED_DAILY_DATASET,
@@ -81,7 +81,7 @@ def build_baostock_market_session_manifest(
         status = str(record.get("status", "") or "")
         if status == "success":
             _append_dataset(success_by_code, code, dataset)
-        elif _is_failed_status(status):
+        elif is_failure_status(status):
             _append_dataset(failed_by_code, code, dataset)
         elif status.startswith("skipped"):
             _append_dataset(skipped_by_code, code, dataset)
@@ -165,8 +165,3 @@ def _timestamp_text(value: datetime | str) -> str:
     if isinstance(value, datetime):
         return value.isoformat()
     return str(value)
-
-
-def _is_failed_status(value: object) -> bool:
-    status = str(value or "")
-    return status == "failed" or status.startswith("failed_")

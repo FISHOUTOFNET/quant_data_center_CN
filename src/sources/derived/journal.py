@@ -396,6 +396,7 @@ def validate_completed_partition(
     item: DerivedPartitionPlan,
     *,
     dataset_id: str,
+    manifests: pd.DataFrame | None = None,
 ) -> CompletedValidation:
     """Verify that a journal-completed partition is truly committed.
 
@@ -416,6 +417,9 @@ def validate_completed_partition(
     could skip a partition whose file was lost, replaced, or whose manifest
     write failed in the previous run's failure window. All checks fail CLOSED:
     a partition that cannot be fully validated is rebuilt, not skipped.
+
+    Pass ``manifests`` to reuse a pre-loaded manifest snapshot (e.g. from
+    :func:`resume_filter_completed`) and avoid repeated disk reads.
     """
 
     from src.storage.dataset_catalog import dataset_definition
@@ -433,7 +437,8 @@ def validate_completed_partition(
         return CompletedValidation(False, "target parquet file missing")
 
     # 2. Manifest row exists.
-    manifests = store.read_dataset_partition_manifest_batch([dataset_id])
+    if manifests is None:
+        manifests = store.read_dataset_partition_manifest_batch([dataset_id])
     if manifests.empty:
         return CompletedValidation(False, "manifest batch empty")
     mask = (
@@ -534,13 +539,20 @@ def resume_filter_completed(
 
     Returns the number of partitions removed from ``completed`` (i.e. the
     number that must be rebuilt on this resume).
+
+    The manifest snapshot is loaded once and reused across all partition
+    validations to avoid repeated disk reads.
     """
+
+    # Pre-load the manifest snapshot once; pass it to each validation call so
+    # we don't re-read the same manifest file from disk for every partition.
+    manifest_snapshot = store.read_dataset_partition_manifest_batch([dataset_id])
 
     removed = 0
     for item in plan.partitions:
         if not journal.is_completed(item.security_id):
             continue
-        result = validate_completed_partition(store, item, dataset_id=dataset_id)
+        result = validate_completed_partition(store, item, dataset_id=dataset_id, manifests=manifest_snapshot)
         if not result.valid:
             journal.discard_completed(item.security_id, reason=result.reason or "validation failed")
             removed += 1

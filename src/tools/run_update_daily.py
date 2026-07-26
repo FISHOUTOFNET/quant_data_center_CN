@@ -143,16 +143,15 @@ LEGACY_START_AT_ALIASES = {"build-derived": "build-derived-security-master"}
 # Derived build steps use stall detection instead of a fixed timeout.
 # The orchestrator polls the child's progress state file every
 # ``DERIVED_STALL_POLL_SECONDS`` and declares the build stalled when the
-# heartbeat is older than ``DERIVED_STALL_HEARTBEAT_SECONDS`` AND
+# heartbeat is older than the configured ``stall_seconds`` AND
 # ``processed`` is unchanged. A safety timeout of
 # ``DERIVED_SAFETY_TIMEOUT_SECONDS`` (18h, well above historical P99)
 # acts as a last-resort fallback.
 DERIVED_STALL_POLL_SECONDS = 60
-# Default heartbeat staleness threshold. The effective value is resolved from
-# ``config/settings.yaml`` (``derived.stall_seconds``) via
-# :func:`derived_runtime_config`; this constant is only the fallback when the
-# config cannot be read (e.g. tests without a settings.yaml).
-DERIVED_STALL_HEARTBEAT_SECONDS = 25 * 60
+# The effective stall threshold is resolved from ``config/settings.yaml``
+# (``derived.stall_seconds``) via :func:`load_derived_runtime_config_or_default`.
+# The fallback default lives in :mod:`src.sources.derived.config` so there is
+# exactly one source of truth.
 DERIVED_SAFETY_TIMEOUT_SECONDS = 18 * 60 * 60
 # Only ``daily_bar`` is wired into the unified derived progress contract
 # (BuildRunContext + journal heartbeat + StreamingBuildCoordinator +
@@ -1696,18 +1695,16 @@ def _resolve_derived_stall_seconds(root: Path) -> float:
     """Resolve the stall heartbeat threshold from settings.yaml.
 
     Priority: settings.yaml (``derived.stall_seconds``) > code default
-    (:data:`DERIVED_STALL_HEARTBEAT_SECONDS`). Configuration errors fall back
-    to the code default rather than aborting the build — a missing or invalid
-    settings.yaml must not prevent stall detection from running at all.
+    (``DEFAULT_STALL_SECONDS`` in :mod:`src.sources.derived.config`).
+    Configuration errors fall back to the code default rather than aborting
+    the build — a missing or invalid settings.yaml must not prevent stall
+    detection from running at all.
     """
 
-    try:
-        from src.sources.derived.config import load_derived_runtime_config
+    from src.sources.derived.config import load_derived_runtime_config_or_default
 
-        config = load_derived_runtime_config(root=root)
-        return float(config.stall_seconds)
-    except Exception:
-        return float(DERIVED_STALL_HEARTBEAT_SECONDS)
+    config = load_derived_runtime_config_or_default(root=root)
+    return float(config.stall_seconds)
 
 
 def _derived_progress_path_for_step(root: Path, run_instance_key: str, step_id: str) -> Path:

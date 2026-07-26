@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import math
 import shutil
+import sys
 import tarfile
 import tempfile
 import threading
@@ -395,7 +396,12 @@ def download_and_extract_qlib_asset(
             extract_started = time.perf_counter()
             _check_deadline(deadline, stage)
             with tarfile.open(archive_path, "r:gz") as tar:
-                tar.extractall(temp_root, filter="data")
+                # The ``filter`` kwarg was added in Python 3.11 to harden extraction
+                # against path traversal. Fall back to the plain call on 3.10.
+                if sys.version_info >= (3, 11):
+                    tar.extractall(temp_root, filter="data")
+                else:
+                    tar.extractall(temp_root)
             extracted = _find_extracted_qlib_dir(temp_root)
             logger.info("Qlib asset extracted elapsed={:.3f}s", time.perf_counter() - extract_started)
 

@@ -826,21 +826,21 @@ def test_managed_root_marker_is_required_for_cleanup(tmp_path: Path) -> None:
     and application logging init), not by ``cleanup_logs``.
     """
 
-    from src.utils.paths import MANAGED_ROOT_LAYOUT_VERSION, ensure_managed_log_root
+    from src.utils.paths import MANAGED_ROOT_LAYOUT_VERSION, MANAGED_ROOT_MARKER, ensure_managed_log_root
 
     log_root = tmp_path / "logs"
     log_root.mkdir()
     # No marker yet.
-    assert not (log_root / log_cleanup.MANAGED_ROOT_MARKER).exists()
+    assert not (log_root / MANAGED_ROOT_MARKER).exists()
     # Cleanup must refuse.
     with pytest.raises(log_cleanup.LogCleanupError, match="marker"):
         log_cleanup.cleanup_logs(log_root, retention_days=30)
     # Still no marker — cleanup did not create one.
-    assert not (log_root / log_cleanup.MANAGED_ROOT_MARKER).exists()
+    assert not (log_root / MANAGED_ROOT_MARKER).exists()
 
     # After explicit authorization, cleanup succeeds and the marker exists.
     ensure_managed_log_root(log_root)
-    marker = log_root / log_cleanup.MANAGED_ROOT_MARKER
+    marker = log_root / MANAGED_ROOT_MARKER
     assert marker.exists()
     payload = json.loads(marker.read_text(encoding="utf-8"))
     assert payload["application"] == "QuantDataCenter"

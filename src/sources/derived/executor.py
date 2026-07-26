@@ -48,6 +48,12 @@ from src.sources.derived.common import (
     cleanup_derived_partition_staging,
     create_derived_partition_staging_area,
 )
+from src.sources.derived.config import (
+    DEFAULT_HEARTBEAT_SECONDS,
+    DEFAULT_MAX_IN_FLIGHT_MULTIPLIER,
+    DEFAULT_MAX_WORKERS,
+    MAX_WORKERS_RANGE,
+)
 from src.sources.derived.journal import BuildJournal
 from src.sources.derived.plan import ChangeReason, DerivedBuildPlan, DerivedPartitionPlan
 from src.sources.derived.progress import ProgressReporter
@@ -61,10 +67,10 @@ from src.storage.partition_manifest import (
 )
 from src.utils.logging import logger
 
-DEFAULT_MAX_WORKERS = 4
-MAX_WORKERS_CAP = 8
-DEFAULT_MAX_IN_FLIGHT_MULTIPLIER = 2
-DEFAULT_HEARTBEAT_INTERVAL_SECONDS = 30.0
+# Defaults are sourced from :mod:`src.sources.derived.config` so the executor,
+# the streaming coordinator, and the orchestrator all share one set of values.
+MAX_WORKERS_CAP = MAX_WORKERS_RANGE[1]
+DEFAULT_HEARTBEAT_INTERVAL_SECONDS = DEFAULT_HEARTBEAT_SECONDS
 
 
 # ---------------------------------------------------------------------------

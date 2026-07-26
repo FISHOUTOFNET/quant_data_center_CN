@@ -433,9 +433,9 @@ class TestP04StalledExitCode:
     def stale_pinned_path(self, tmp_path: Path) -> Path:
         """A pinned progress path with a stale heartbeat (35 minutes old).
 
-        35 minutes exceeds the default ``DERIVED_STALL_HEARTBEAT_SECONDS``
-        (25 minutes), so ``check_stall`` returns ``stalled=True`` on the first
-        poll (where ``previous_processed`` is still ``None``).
+        35 minutes exceeds the default ``DEFAULT_STALL_SECONDS`` (30 minutes),
+        so ``check_stall`` returns ``stalled=True`` on the first poll (where
+        ``previous_processed`` is still ``None``).
         """
 
         return _stale_pinned_path(tmp_path, heartbeat_age_seconds=35 * 60)
