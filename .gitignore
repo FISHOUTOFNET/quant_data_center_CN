@@ -12,6 +12,9 @@ __pycache__/
 venv/
 env/
 
+# Local pyright override (points to .venv; not committed so CI uses pyproject.toml)
+pyrightconfig.json
+
 # Runtime data
 data/
 logs/
