@@ -391,8 +391,10 @@ class TestP07UnsafeRootRejection:
         junction_dir.mkdir(parents=True, exist_ok=True)
 
         # Simulate a junction by patching is_junction. The production code
-        # uses getattr(root, "is_junction", lambda: False)() so patching the
-        # class attribute is sufficient regardless of Python version.
+        # calls root.is_junction() when available (Python 3.12+) or falls
+        # back to os.stat FILE_ATTRIBUTE_REPARSE_POINT on Python 3.10/3.11,
+        # so patching the class attribute is sufficient regardless of Python
+        # version.
         original = getattr(Path, "is_junction", None)
 
         def fake_is_junction(self: Path) -> bool:

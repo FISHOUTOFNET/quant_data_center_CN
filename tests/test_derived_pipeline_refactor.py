@@ -1050,8 +1050,6 @@ def test_cleanup_rejects_junction_root(tmp_path: Path) -> None:
 
     if os.name != "nt":
         pytest.skip("junction rejection is Windows-specific")
-    if not hasattr(Path, "is_junction"):
-        pytest.skip("Path.is_junction not available on this Python")
     # Create a junction target outside tmp_path.
     real_target = tmp_path / "real-logs"
     real_target.mkdir()

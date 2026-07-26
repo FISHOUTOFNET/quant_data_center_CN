@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import os
+import stat
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -164,8 +166,24 @@ def _reject_unsafe_log_root(root: Path) -> None:
         target = root.resolve()
         raise LogRootAuthorizationError(f"Refusing to authorize symlink log root: {root} -> {target}")
 
-    # Windows junction/reparse point — reject.
-    is_junction = getattr(root, "is_junction", lambda: False)()
+    # Windows junction/reparse point — reject. ``Path.is_junction()`` is only
+    # available on Python 3.12+; on Python 3.10/3.11, fall back to checking
+    # ``FILE_ATTRIBUTE_REPARSE_POINT`` via ``os.stat(follow_symlinks=False)``,
+    # which detects all reparse points (junctions, mount points, etc.) that
+    # ``is_symlink()`` does not catch. See PR-2 acceptance plan section 6.5.
+    is_junction = False
+    is_junction_method = getattr(root, "is_junction", None)
+    if callable(is_junction_method):
+        try:
+            is_junction = is_junction_method()
+        except OSError:
+            is_junction = False
+    elif sys.platform == "win32":
+        try:
+            st = os.stat(root, follow_symlinks=False)
+            is_junction = bool(st.st_file_attributes & stat.FILE_ATTRIBUTE_REPARSE_POINT)
+        except (OSError, AttributeError):
+            is_junction = False
     if is_junction:
         raise LogRootAuthorizationError(f"Refusing to authorize Windows junction/reparse log root: {root}")
 
