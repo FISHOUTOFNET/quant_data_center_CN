@@ -4,11 +4,14 @@ Policy:
 * Only delete files inside the resolved managed log root.
 * The root must carry a valid ``.qdc-managed-log-root`` marker. Cleanup MUST
   NOT auto-create the marker — that would let cleanup claim any external
-  directory. The marker is created by ``paths.ensure_managed_log_root``,
-  which is called from application logging init and ``create_run_log_context``.
+  directory. The marker is created by ``paths.ensure_managed_log_root`` (the
+  single authority), which is called from application logging init,
+  ``create_run_log_context``, ``adopt_run_log_context``, and the
+  ``--initialize-managed-root`` CLI flag of this module.
+* Root safety rules (symlink/junction/home/root/repo rejection) live in
+  ``paths._reject_unsafe_log_root`` — the single authority. This module does
+  NOT maintain a duplicate set of root safety rules.
 * Never follow symlinks or junctions that escape the log root.
-* Reject dangerous roots: filesystem root, drive root, home, repo root,
-  repo-internal paths, symlinks, and Windows junctions/reparse points.
 * Keep the most recent ``keep_recent_runs`` per-run logs regardless of age.
 * Never delete logs belonging to an active run (``active_run_ids``).
 * Delete files older than ``retention_days`` (except the protected ones).
@@ -210,52 +213,6 @@ def default_log_dir() -> Path:
     return paths.resolve_runtime_paths().logs_dir
 
 
-def _reject_dangerous_root(root: Path) -> None:
-    """Reject log roots that are unsafe to clean.
-
-    Evaluated on the ORIGINAL (pre-resolve) path so symlinks/junctions are
-    still detectable. The managed-root marker check is performed separately
-    in :func:`cleanup_logs` after resolution.
-    """
-
-    if root.is_symlink():
-        target = root.resolve()
-        if not paths.is_path_inside(target, root.parent):
-            raise LogCleanupError(f"Refusing to clean symlink root that escapes its parent: {root} -> {target}")
-
-    raw = root
-    # Detect Windows junctions/reparse points (is_junction is 3.12+).
-    is_junction = getattr(raw, "is_junction", lambda: False)()
-    if is_junction:
-        raise LogCleanupError(f"Refusing to clean Windows junction/reparse root: {raw}")
-
-    resolved = raw.resolve()
-    resolved_parent = resolved.parent
-
-    # Reject filesystem root: a path whose parent is itself.
-    if resolved == resolved_parent:
-        raise LogCleanupError(f"Refusing to clean filesystem root: {raw}")
-
-    # Reject a bare Windows drive root (e.g. C:\).
-    drive = resolved.anchor
-    if drive and resolved == Path(drive):
-        raise LogCleanupError(f"Refusing to clean drive root: {raw}")
-
-    # Reject the user home directory.
-    import pathlib
-
-    home = pathlib.Path.home().resolve()
-    if resolved == home:
-        raise LogCleanupError(f"Refusing to clean user home directory: {raw}")
-
-    # Reject the repository root and any path inside the repository.
-    # Use ``project_root()`` (from ``__file__``) rather than the module-level
-    # ``ROOT`` so test monkeypatching does not bypass this safety check.
-    repo_root = paths.project_root().resolve()
-    if resolved == repo_root or paths.is_path_inside(resolved, repo_root):
-        raise LogCleanupError(f"Refusing to clean repository or repo-internal path: {raw}")
-
-
 @dataclass(frozen=True)
 class _LogFile:
     path: Path
@@ -359,6 +316,16 @@ def _extract_run_id(filename: str) -> str | None:
     "Also read from QDC_ACTIVE_RUN_ID (comma-separated).",
 )
 @click.option("--dry-run", is_flag=True, help="Report expired logs without deleting files.")
+@click.option(
+    "--initialize-managed-root",
+    "initialize_managed_root",
+    is_flag=True,
+    default=False,
+    help="Only create the managed-root marker in --log-dir and exit. "
+    "Does NOT run cleanup in the same call. Idempotent for a valid marker; "
+    "refuses to overwrite a corrupt/wrong-application marker. "
+    "Root symlink/junction/home/root/repo paths are rejected.",
+)
 def main(
     log_dir: Path | None,
     retention_days: int,
@@ -366,10 +333,26 @@ def main(
     max_bytes: int,
     active_run_ids: tuple[str, ...],
     dry_run: bool,
+    initialize_managed_root: bool,
 ) -> None:
     """Clean expired log files under the managed log root."""
 
     target_dir = log_dir.resolve() if log_dir else default_log_dir()
+
+    # P0-3: --initialize-managed-root only authorizes the directory and exits.
+    # It never runs cleanup in the same call, so a user cannot accidentally
+    # authorize and clean in one step. The underlying authority is
+    # ``paths.ensure_managed_log_root`` (single source of truth). It is
+    # idempotent for a valid marker, refuses to overwrite a corrupt/wrong
+    # marker, and rejects root symlink/junction/home/root/repo paths.
+    if initialize_managed_root:
+        try:
+            paths.ensure_managed_log_root(target_dir)
+        except LogRootAuthorizationError as exc:
+            raise click.ClickException(str(exc)) from exc
+        click.echo(f"managed log root authorized: {target_dir}")
+        return
+
     effective_max = max_bytes if max_bytes > 0 else None
     env_active = os.environ.get("QDC_ACTIVE_RUN_ID", "")
     env_ids = tuple(value for value in env_active.split(",") if value)

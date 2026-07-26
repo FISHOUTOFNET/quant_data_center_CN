@@ -94,7 +94,12 @@ def create_run_log_context(
         now: Optional clock for deterministic tests.
         explicit_path: Optional explicit run-log path. When provided it wins
             over the runtime path's ``run_logs_dir``; the parent directory
-            must already exist or be creatable.
+            must already exist or be creatable. The parent (or, when the
+            explicit path lives inside ``runtime_paths.logs_dir``, the
+            ``logs_dir`` itself) is authorized via
+            :func:`paths.ensure_managed_log_root` so cleanup can later clean
+            it. Explicit paths inside the repo, home, filesystem root, a
+            symlink root, or a junction root are rejected fail-fast.
 
     The log file is created (truncated) immediately so that crash recovery can
     detect ``log_status=missing`` later. Failure to create the file raises
@@ -108,16 +113,25 @@ def create_run_log_context(
         log_path = Path(explicit_path).expanduser().resolve()
     else:
         stamp = timestamp.strftime("%Y%m%d_%H%M%S")
-        uuid.uuid4().hex[:6]
         log_path = resolved_runtime.run_logs_dir / f"{stamp}_{resolved_run_id}.log"
+    # Determine the managed-root for this log file. When the log file lives
+    # inside the unified ``logs_dir``, that directory is the managed root
+    # (NOT the ``runs/`` subdirectory). When the log file lives outside
+    # ``logs_dir`` (explicit --run-log pointing elsewhere), the parent of the
+    # log file is the managed root. ``ensure_managed_log_root`` runs
+    # ``_reject_unsafe_log_root`` so repo-internal / home / root / symlink /
+    # junction paths are rejected fail-fast.
+    managed_root = _resolve_managed_log_root(log_path, resolved_runtime)
     try:
         log_path.parent.mkdir(parents=True, exist_ok=True)
         # Ensure the managed-root marker exists so that log_cleanup can later
         # authorize this directory. ``ensure_managed_log_root`` is the single
         # authority that creates the marker; cleanup only validates (P0-7).
-        paths.ensure_managed_log_root(resolved_runtime.logs_dir)
+        paths.ensure_managed_log_root(managed_root)
         # Create/truncate the file so the orchestrator is the sole owner.
         log_path.touch(exist_ok=False)
+    except paths.LogRootAuthorizationError as exc:
+        raise RunLogContextError(str(exc)) from exc
     except FileExistsError as exc:
         raise RunLogContextError(
             f"Run log already exists; refusing to overwrite: {log_path}. "
@@ -133,6 +147,7 @@ def adopt_run_log_context(
     path: str | Path,
     run_id: str | None = None,
     now: datetime | None = None,
+    runtime_paths: paths.RuntimePaths | None = None,
 ) -> RunLogContext:
     """Adopt an existing run log file (created by the BAT entrypoint).
 
@@ -140,21 +155,53 @@ def adopt_run_log_context(
     deterministic name. The orchestrator reuses the file rather than
     creating a parallel one. If the file does not exist a new one is created
     so that the orchestrator remains the owner of the log lifecycle.
+
+    P0-3 contract: the function authorizes the managed root (creating the
+    marker if missing, validating it if present) via
+    :func:`paths.ensure_managed_log_root`. When ``runtime_paths`` is provided
+    and the log path lives inside ``runtime_paths.logs_dir``, that directory
+    is the managed root; otherwise the parent of the log file is the managed
+    root. Unsafe roots (repo-internal, home, filesystem root, symlink,
+    junction) are rejected fail-fast.
     """
 
     log_path = Path(path).expanduser().resolve()
     timestamp = now or datetime.now()
     resolved_run_id = run_id or _format_run_id(timestamp)
+    resolved_runtime = runtime_paths or paths.resolve_runtime_paths()
+    managed_root = _resolve_managed_log_root(log_path, resolved_runtime)
     try:
         log_path.parent.mkdir(parents=True, exist_ok=True)
+        # Authorize the managed root so cleanup can later clean this directory.
+        paths.ensure_managed_log_root(managed_root)
         if not log_path.exists():
             log_path.touch(exist_ok=False)
         else:
             # The BAT script pre-wrote a header line; preserve it.
             pass
+    except paths.LogRootAuthorizationError as exc:
+        raise RunLogContextError(str(exc)) from exc
     except OSError as exc:
         raise RunLogContextError(f"Failed to adopt run log at {log_path}: {exc}") from exc
     return RunLogContext(run_id=resolved_run_id, path=log_path, created_at=timestamp)
+
+
+def _resolve_managed_log_root(log_path: Path, runtime_paths: paths.RuntimePaths) -> Path:
+    """Return the managed-root directory that owns ``log_path``.
+
+    When ``log_path`` lives inside ``runtime_paths.logs_dir``, that directory
+    is the managed root (NOT the ``runs/`` subdirectory). When ``log_path``
+    lives outside ``logs_dir`` (e.g. an explicit ``--run-log`` pointing
+    elsewhere), the parent of the log file is the managed root. This is the
+    single place that decides which directory gets the marker, so
+    ``create_run_log_context`` and ``adopt_run_log_context`` agree.
+    """
+
+    logs_dir = runtime_paths.logs_dir.resolve()
+    resolved_parent = log_path.parent.resolve()
+    if paths.is_path_inside(resolved_parent, logs_dir) or resolved_parent == logs_dir:
+        return logs_dir
+    return resolved_parent
 
 
 def _format_run_id(timestamp: datetime) -> str:

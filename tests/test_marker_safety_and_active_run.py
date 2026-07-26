@@ -152,17 +152,52 @@ class TestP07EnsureManagedLogRoot:
         assert payload["application"] == MANAGED_ROOT_APPLICATION
         assert payload["layout_version"] == MANAGED_ROOT_LAYOUT_VERSION
 
-    def test_ensure_is_idempotent_does_not_overwrite(self, tmp_path: Path) -> None:
-        """7. An existing marker is never overwritten, even with different content."""
+    def test_ensure_is_idempotent_for_valid_marker(self, tmp_path: Path) -> None:
+        """7. ``ensure_managed_log_root`` is idempotent for a VALID marker.
+
+        A second call on a directory that already carries a correct marker
+        must NOT overwrite it and must NOT raise. This is the P0-3 contract:
+        ``ensure`` validates the existing marker (rather than blindly trusting
+        it) and a valid marker passes validation.
+        """
+        tmp_path.mkdir(parents=True, exist_ok=True)
+        ensure_managed_log_root(tmp_path)
+        first_payload = _read_marker(tmp_path)
+        # A second call must succeed (idempotent) and leave the marker intact.
+        ensure_managed_log_root(tmp_path)
+        second_payload = _read_marker(tmp_path)
+        assert first_payload == second_payload
+        assert second_payload["application"] == MANAGED_ROOT_APPLICATION
+        assert second_payload["layout_version"] == MANAGED_ROOT_LAYOUT_VERSION
+
+    def test_ensure_rejects_wrong_application_marker(self, tmp_path: Path) -> None:
+        """8. ``ensure_managed_log_root`` must NOT blindly trust an existing
+        marker with a wrong application. It must raise so the tampered marker
+        is surfaced, not silently passed as authorized.
+        """
         tmp_path.mkdir(parents=True, exist_ok=True)
         # Pre-write a marker with a different application.
         _write_marker(tmp_path, application="PreExisting")
-
-        ensure_managed_log_root(tmp_path)
-
-        # The marker must be untouched.
+        with pytest.raises(LogRootAuthorizationError, match="application mismatch"):
+            ensure_managed_log_root(tmp_path)
+        # The marker must be untouched (ensure does not overwrite on rejection).
         payload = _read_marker(tmp_path)
         assert payload["application"] == "PreExisting"
+
+    def test_ensure_rejects_corrupt_marker(self, tmp_path: Path) -> None:
+        """9. ``ensure_managed_log_root`` must reject a corrupt marker."""
+        tmp_path.mkdir(parents=True, exist_ok=True)
+        marker = tmp_path / MANAGED_ROOT_MARKER
+        marker.write_text("{not valid json", encoding="utf-8")
+        with pytest.raises(LogRootAuthorizationError, match=r"unreadable|corrupt"):
+            ensure_managed_log_root(tmp_path)
+
+    def test_ensure_rejects_wrong_version_marker(self, tmp_path: Path) -> None:
+        """10. ``ensure_managed_log_root`` must reject an unsupported version."""
+        tmp_path.mkdir(parents=True, exist_ok=True)
+        _write_marker(tmp_path, layout_version=999)
+        with pytest.raises(LogRootAuthorizationError, match="unsupported"):
+            ensure_managed_log_root(tmp_path)
 
 
 # ---------------------------------------------------------------------------
@@ -643,3 +678,320 @@ class TestP08OrchestratorEnvPropagation:
         env = captured["env"]
         assert env is not None
         assert run_update_daily.QDC_ACTIVE_RUN_ID_ENV not in env
+
+
+# ---------------------------------------------------------------------------
+# P0-3: --initialize-managed-root CLI flag
+# ---------------------------------------------------------------------------
+
+
+class TestInitializeManagedRootCli:
+    """The ``--initialize-managed-root`` flag creates the marker and exits
+    without running cleanup. It is the remediation path referenced by the
+    error message in ``validate_managed_log_root``.
+    """
+
+    def test_initialize_creates_marker_and_exits_without_cleanup(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """--initialize-managed-root creates the marker and does NOT run
+        cleanup (no files are deleted). The CLI exits 0.
+        """
+        from click.testing import CliRunner
+
+        log_root = tmp_path / "logs"
+        log_root.mkdir(parents=True, exist_ok=True)
+        # Place a stale log file that cleanup WOULD delete — confirm it survives.
+        stale_log = log_root / "stale.log"
+        stale_log.write_bytes(b"old")
+
+        runner = CliRunner()
+        result = runner.invoke(
+            log_cleanup.main,
+            ["--initialize-managed-root", "--log-dir", str(log_root)],
+        )
+        assert result.exit_code == 0, result.output
+        # Marker was created.
+        assert (log_root / MANAGED_ROOT_MARKER).exists()
+        # Cleanup did NOT run — the stale log is still there.
+        assert stale_log.exists()
+        # Output mentions authorization.
+        assert "authorized" in result.output.lower()
+
+    def test_initialize_idempotent_for_valid_marker(self, tmp_path: Path) -> None:
+        """--initialize-managed-root on a directory with a valid marker
+        succeeds (idempotent) and does NOT overwrite the marker.
+        """
+        from click.testing import CliRunner
+
+        log_root = tmp_path / "logs"
+        log_root.mkdir(parents=True, exist_ok=True)
+        _authorize(log_root)
+        first_payload = _read_marker(log_root)
+
+        runner = CliRunner()
+        result = runner.invoke(
+            log_cleanup.main,
+            ["--initialize-managed-root", "--log-dir", str(log_root)],
+        )
+        assert result.exit_code == 0, result.output
+        second_payload = _read_marker(log_root)
+        assert first_payload == second_payload
+
+    def test_initialize_rejects_corrupt_marker(self, tmp_path: Path) -> None:
+        """--initialize-managed-root must NOT overwrite a corrupt marker.
+        It must exit non-zero so the user knows the marker is tampered.
+        """
+        from click.testing import CliRunner
+
+        log_root = tmp_path / "logs"
+        log_root.mkdir(parents=True, exist_ok=True)
+        marker = log_root / MANAGED_ROOT_MARKER
+        marker.write_text("{corrupt", encoding="utf-8")
+
+        runner = CliRunner()
+        result = runner.invoke(
+            log_cleanup.main,
+            ["--initialize-managed-root", "--log-dir", str(log_root)],
+        )
+        assert result.exit_code != 0
+        # The corrupt marker is untouched.
+        assert marker.read_text(encoding="utf-8") == "{corrupt"
+
+    def test_initialize_rejects_wrong_application_marker(self, tmp_path: Path) -> None:
+        """--initialize-managed-root must NOT overwrite a marker with the
+        wrong application. It must exit non-zero.
+        """
+        from click.testing import CliRunner
+
+        log_root = tmp_path / "logs"
+        log_root.mkdir(parents=True, exist_ok=True)
+        _write_marker(log_root, application="OtherApp")
+
+        runner = CliRunner()
+        result = runner.invoke(
+            log_cleanup.main,
+            ["--initialize-managed-root", "--log-dir", str(log_root)],
+        )
+        assert result.exit_code != 0
+        # The marker is untouched.
+        assert _read_marker(log_root)["application"] == "OtherApp"
+
+    def test_initialize_rejects_repo_internal_path(self) -> None:
+        """--initialize-managed-root must reject a repo-internal path."""
+        from click.testing import CliRunner
+
+        runner = CliRunner()
+        result = runner.invoke(
+            log_cleanup.main,
+            ["--initialize-managed-root", "--log-dir", str(paths.ROOT / "logs")],
+        )
+        assert result.exit_code != 0
+
+    def test_initialize_rejects_home(self) -> None:
+        """--initialize-managed-root must reject the user home directory."""
+        import pathlib
+
+        from click.testing import CliRunner
+
+        runner = CliRunner()
+        result = runner.invoke(
+            log_cleanup.main,
+            ["--initialize-managed-root", "--log-dir", str(pathlib.Path.home())],
+        )
+        assert result.exit_code != 0
+
+
+# ---------------------------------------------------------------------------
+# P0-3: adopt_run_log_context marker contract
+# ---------------------------------------------------------------------------
+
+
+class TestAdoptRunLogContextMarker:
+    """``adopt_run_log_context`` must authorize the managed root via
+    ``ensure_managed_log_root`` so cleanup can later clean the directory.
+    """
+
+    def test_adopt_creates_marker_for_default_logs_dir(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """When the adopted log lives inside ``logs_dir``, the marker is
+        created on ``logs_dir`` (NOT on the ``runs/`` subdirectory).
+        """
+        log_root = tmp_path / "logs"
+        runtime_paths = paths.resolve_runtime_paths(explicit_log_dir=log_root)
+        run_log_path = runtime_paths.run_logs_dir / "adopted.log"
+
+        ctx = run_logging.adopt_run_log_context(
+            path=run_log_path,
+            runtime_paths=runtime_paths,
+        )
+        assert ctx.path.exists()
+        # Marker is on logs_dir, NOT on run_logs_dir.
+        assert (log_root / MANAGED_ROOT_MARKER).exists()
+        assert not (runtime_paths.run_logs_dir / MANAGED_ROOT_MARKER).exists()
+
+    def test_adopt_creates_marker_for_external_path(self, tmp_path: Path) -> None:
+        """When the adopted log lives outside ``logs_dir``, the marker is
+        created on the parent of the log file.
+        """
+        external_root = tmp_path / "external-logs"
+        external_root.mkdir(parents=True, exist_ok=True)
+        run_log_path = external_root / "adopted.log"
+        runtime_paths = paths.resolve_runtime_paths(explicit_log_dir=tmp_path / "default-logs")
+
+        run_logging.adopt_run_log_context(
+            path=run_log_path,
+            runtime_paths=runtime_paths,
+        )
+        # Marker is on the external root (parent of the log file).
+        assert (external_root / MANAGED_ROOT_MARKER).exists()
+
+    def test_adopt_rejects_repo_internal_path(self) -> None:
+        """Adopting a log path inside the repo must fail fast."""
+        runtime_paths = paths.resolve_runtime_paths()
+        bad_path = paths.ROOT / "logs" / "run.log"
+        with pytest.raises(run_logging.RunLogContextError, match="repositor"):
+            run_logging.adopt_run_log_context(path=bad_path, runtime_paths=runtime_paths)
+
+    def test_adopt_rejects_home_path(self) -> None:
+        """Adopting a log path in the user home must fail fast."""
+        import pathlib
+
+        runtime_paths = paths.resolve_runtime_paths()
+        bad_path = pathlib.Path.home() / "run.log"
+        with pytest.raises(run_logging.RunLogContextError, match="home"):
+            run_logging.adopt_run_log_context(path=bad_path, runtime_paths=runtime_paths)
+
+
+# ---------------------------------------------------------------------------
+# P0-3: create_run_log_context explicit path safety
+# ---------------------------------------------------------------------------
+
+
+class TestCreateRunLogContextExplicitPath:
+    """``create_run_log_context`` with an explicit path must validate the
+    path's safety. Paths inside the repo, home, filesystem root, a symlink
+    root, or a junction root must be rejected fail-fast.
+    """
+
+    def test_explicit_path_inside_logs_dir_uses_logs_dir_marker(self, tmp_path: Path) -> None:
+        """When the explicit path lives inside ``logs_dir``, the marker is
+        created on ``logs_dir``.
+        """
+        log_root = tmp_path / "logs"
+        runtime_paths = paths.resolve_runtime_paths(explicit_log_dir=log_root)
+        explicit_path = runtime_paths.run_logs_dir / "explicit.log"
+
+        ctx = run_logging.create_run_log_context(
+            runtime_paths=runtime_paths,
+            explicit_path=explicit_path,
+        )
+        assert ctx.path.exists()
+        # Marker is on logs_dir.
+        assert (log_root / MANAGED_ROOT_MARKER).exists()
+        assert not (runtime_paths.run_logs_dir / MANAGED_ROOT_MARKER).exists()
+
+    def test_explicit_path_outside_logs_dir_uses_parent_marker(self, tmp_path: Path) -> None:
+        """When the explicit path lives outside ``logs_dir``, the marker is
+        created on the parent of the log file.
+        """
+        external_root = tmp_path / "external"
+        external_root.mkdir(parents=True, exist_ok=True)
+        explicit_path = external_root / "explicit.log"
+        runtime_paths = paths.resolve_runtime_paths(explicit_log_dir=tmp_path / "default")
+
+        run_logging.create_run_log_context(
+            runtime_paths=runtime_paths,
+            explicit_path=explicit_path,
+        )
+        # Marker is on the external root.
+        assert (external_root / MANAGED_ROOT_MARKER).exists()
+
+    def test_explicit_path_in_repo_rejected(self) -> None:
+        """An explicit path inside the repo must be rejected."""
+        runtime_paths = paths.resolve_runtime_paths()
+        bad_path = paths.ROOT / "logs" / "run.log"
+        with pytest.raises(run_logging.RunLogContextError, match="repositor"):
+            run_logging.create_run_log_context(
+                runtime_paths=runtime_paths,
+                explicit_path=bad_path,
+            )
+
+    def test_explicit_path_in_home_rejected(self) -> None:
+        """An explicit path in the user home must be rejected."""
+        import pathlib
+
+        runtime_paths = paths.resolve_runtime_paths()
+        bad_path = pathlib.Path.home() / "run.log"
+        with pytest.raises(run_logging.RunLogContextError, match="home"):
+            run_logging.create_run_log_context(
+                runtime_paths=runtime_paths,
+                explicit_path=bad_path,
+            )
+
+
+# ---------------------------------------------------------------------------
+# P0-3: Root symlink rejection (ALL symlinks, not just escape-parent)
+# ---------------------------------------------------------------------------
+
+
+class TestRootSymlinkRejection:
+    """P0-3 contract: ALL root symlinks are rejected, not just those that
+    escape the parent. The marker binds to a directory identity; a symlink
+    target can be swapped after authorization.
+    """
+
+    def test_symlink_root_that_stays_inside_parent_is_rejected(self, tmp_path: Path) -> None:
+        """A symlink root whose target is INSIDE the parent directory must
+        STILL be rejected. The old behavior only rejected symlinks that
+        escaped; the new behavior rejects all symlink roots.
+        """
+        real_dir = tmp_path / "real-logs"
+        real_dir.mkdir(parents=True, exist_ok=True)
+        link = tmp_path / "link-logs"
+        try:
+            link.symlink_to(real_dir)
+        except OSError:
+            pytest.skip("symlink not supported on this platform")
+        # The symlink target is inside tmp_path (the parent), so the old
+        # "escape-parent" check would have allowed it. The new "reject all"
+        # check must reject it.
+        with pytest.raises(LogRootAuthorizationError, match="symlink"):
+            paths._reject_unsafe_log_root(link)
+
+    def test_symlink_root_that_escapes_parent_is_rejected(self, tmp_path: Path) -> None:
+        """A symlink root whose target escapes the parent is rejected."""
+        outside = tmp_path / "outside"
+        outside.mkdir(parents=True, exist_ok=True)
+        parent = tmp_path / "parent"
+        parent.mkdir(parents=True, exist_ok=True)
+        link = parent / "link-logs"
+        try:
+            link.symlink_to(outside)
+        except OSError:
+            pytest.skip("symlink not supported on this platform")
+        with pytest.raises(LogRootAuthorizationError, match="symlink"):
+            paths._reject_unsafe_log_root(link)
+
+    def test_ensure_rejects_symlink_root(self, tmp_path: Path) -> None:
+        """``ensure_managed_log_root`` must reject a symlink root."""
+        real_dir = tmp_path / "real-logs"
+        real_dir.mkdir(parents=True, exist_ok=True)
+        link = tmp_path / "link-logs"
+        try:
+            link.symlink_to(real_dir)
+        except OSError:
+            pytest.skip("symlink not supported on this platform")
+        with pytest.raises(LogRootAuthorizationError, match="symlink"):
+            ensure_managed_log_root(link)
+
+    def test_validate_rejects_symlink_root(self, tmp_path: Path) -> None:
+        """``validate_managed_log_root`` must reject a symlink root."""
+        real_dir = tmp_path / "real-logs"
+        real_dir.mkdir(parents=True, exist_ok=True)
+        link = tmp_path / "link-logs"
+        try:
+            link.symlink_to(real_dir)
+        except OSError:
+            pytest.skip("symlink not supported on this platform")
+        with pytest.raises(LogRootAuthorizationError, match="symlink"):
+            validate_managed_log_root(link)

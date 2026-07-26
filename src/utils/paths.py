@@ -44,8 +44,13 @@ def ensure_managed_log_root(log_root: Path) -> None:
     root) and by :func:`src.tools.run_logging.create_run_log_context` (when
     creating the per-run log). The directory is created if missing, and the
     marker is written atomically. Unsafe roots (repo-internal, home, drive
-    root, symlink that escapes) are rejected with
+    root, any symlink, junction) are rejected with
     :class:`LogRootAuthorizationError`.
+
+    When a marker already exists, it is VALIDATED (not blindly trusted) so a
+    corrupt or wrong-application marker cannot silently pass as authorized.
+    This also makes ``ensure_managed_log_root`` idempotent for legitimate
+    markers and fail-closed for tampered ones.
 
     This is the ONLY function that creates the marker. ``cleanup_logs`` must
     NOT create it — cleanup must only validate an existing marker.
@@ -57,9 +62,11 @@ def ensure_managed_log_root(log_root: Path) -> None:
     resolved.mkdir(parents=True, exist_ok=True)
     marker = resolved / MANAGED_ROOT_MARKER
     if marker.exists():
-        # Marker already present; leave it as-is so we never overwrite a
-        # pre-existing authorization record. ``validate_managed_log_root``
-        # will check its contents when cleanup runs.
+        # Marker already present — validate it so a corrupt or wrong-application
+        # marker cannot silently pass as authorized. This is the P0-3 contract:
+        # ``ensure`` must not blindly trust an existing marker, and
+        # ``--initialize-managed-root`` must not overwrite a tampered one.
+        validate_managed_log_root(root)
         return
     payload = {
         "application": MANAGED_ROOT_APPLICATION,
@@ -142,15 +149,20 @@ def _reject_unsafe_log_root(root: Path) -> None:
     and ``validate_managed_log_root``. It mirrors the checks previously
     scattered in ``log_cleanup._reject_dangerous_root`` but lives here so the
     marker authority and the cleanup authority agree on what is "safe".
+
+    P0-3 contract: ALL root symlinks are rejected (not just those that escape
+    the parent). Rationale: the marker binds to a directory identity; a
+    symlink target can be swapped after authorization, so the deletion
+    boundary must never depend on link resolution. Windows junctions/reparse
+    points are rejected for the same reason.
     """
 
-    # Symlink whose target escapes its parent — reject.
+    # ANY symlink at the root — reject unconditionally. The marker binds to a
+    # directory identity; a symlink target can be swapped after authorization,
+    # so the deletion boundary must not depend on link resolution.
     if root.is_symlink():
         target = root.resolve()
-        if not is_path_inside(target, root.parent):
-            raise LogRootAuthorizationError(
-                f"Refusing to authorize symlink log root that escapes its parent: {root} -> {target}"
-            )
+        raise LogRootAuthorizationError(f"Refusing to authorize symlink log root: {root} -> {target}")
 
     # Windows junction/reparse point — reject.
     is_junction = getattr(root, "is_junction", lambda: False)()
