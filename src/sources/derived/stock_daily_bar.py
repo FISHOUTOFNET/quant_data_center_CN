@@ -70,7 +70,9 @@ from src.sources.derived.progress import (
     STAGE_FAILED,
     STAGE_PLANNING,
     STAGE_REPAIRING_MANIFEST,
+    ProgressIdentity,
     ProgressReporter,
+    make_progress_contract_id,
 )
 from src.sources.derived.run_context import make_build_run_context
 from src.sources.derived.security_master import build_security_master
@@ -252,7 +254,18 @@ def build_cn_stock_daily_bar(
         cancel_event=cancel_event,
         progress_path_override=progress_path_override,
     )
-    progress = ProgressReporter(state_path=context.progress_path)
+    # Build the immutable progress identity. ``progress_contract_id`` comes
+    # from the orchestrator (env) or, for the manual CLI, is generated
+    # locally. ``journal_run_id`` is the real journal run id — stable across
+    # resume — so the orchestrator can backfill it from the snapshot into the
+    # daily state. The identity is frozen; the reporter never mutates it.
+    progress_identity = ProgressIdentity(
+        progress_contract_id=_progress_contract_id_from_env_or_local("daily_bar"),
+        target=context.target,
+        dataset_id=context.dataset_id,
+        journal_run_id=context.run_id,
+    )
+    progress = ProgressReporter(state_path=context.progress_path, identity=progress_identity)
     progress.set_stage(STAGE_REPAIRING_MANIFEST, total=plan.total)
     progress.set_stage(STAGE_BUILDING_PARTITIONS, total=plan.total)
 
@@ -465,6 +478,37 @@ def _progress_path_override_from_env() -> Path | None:
     if not raw:
         return None
     return Path(raw).expanduser().resolve()
+
+
+def _progress_contract_id_from_env_or_local(step_id: str) -> str:
+    """Resolve the progress contract id for this derived step.
+
+    Priority:
+
+    1. ``QDC_DERIVED_PROGRESS_CONTRACT_ID`` — set by the daily orchestrator
+       before spawn. The stall detector verifies every snapshot against this
+       id, so the child MUST echo it back unchanged.
+    2. ``QDC_DERIVED_RUN_ID`` (deprecated) — still read so an in-flight
+       subprocess from an older orchestrator build does not crash. A
+       deprecation warning is emitted. The new name always wins when both
+       are present; there is never more than one authoritative value.
+    3. A locally-generated ``make_progress_contract_id(step_id)`` — used by
+       the manual CLI (``qdc build-derived``) when no orchestrator env var is
+       present. The id is still unique (uuid-based) so concurrent manual
+       builds cannot collide.
+    """
+
+    raw = os.environ.get("QDC_DERIVED_PROGRESS_CONTRACT_ID")
+    if raw:
+        return raw
+    legacy = os.environ.get("QDC_DERIVED_RUN_ID")
+    if legacy:
+        logger.warning(
+            "QDC_DERIVED_RUN_ID is deprecated; use QDC_DERIVED_PROGRESS_CONTRACT_ID. "
+            "The value will still be honored for this run."
+        )
+        return legacy
+    return make_progress_contract_id(step_id)
 
 
 def _install_cancel_signal_handler() -> tuple[Event, Callable[[], None]]:

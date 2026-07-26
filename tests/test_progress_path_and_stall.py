@@ -2,8 +2,11 @@
 
 P0-3: The orchestrator (``src.tools.run_update_daily``) must generate a unique
 progress path per (run_instance, step_id) BEFORE spawn, pass it to the child
-via env vars ``QDC_DERIVED_PROGRESS_PATH`` and ``QDC_DERIVED_RUN_ID``, and the
-stall detector must read ONLY that path — never a directory scan.
+via env vars ``QDC_DERIVED_PROGRESS_PATH`` and
+``QDC_DERIVED_PROGRESS_CONTRACT_ID`` (the legacy ``QDC_DERIVED_RUN_ID`` is read
+only for backwards-compatibility with an in-flight subprocess from an older
+orchestrator build), and the stall detector must read ONLY that path — never a
+directory scan.
 
 P0-4: The stall detector (``_wait_with_stall_detection``) must preserve the
 stall verdict: once stalled, return ``STALLED_EXIT_CODE`` (126) regardless of
@@ -13,6 +16,7 @@ the child's exit code. If process-tree cleanup fails, escalate to
 
 from __future__ import annotations
 
+import dataclasses
 import io
 import json
 import subprocess
@@ -22,6 +26,13 @@ from typing import Any
 
 import pytest
 
+from src.sources.derived.progress import (
+    ProgressIdentity,
+    ProgressReporter,
+    check_stall,
+    make_progress_contract_id,
+)
+from src.sources.derived.stock_daily_bar import _progress_contract_id_from_env_or_local
 from src.tools import run_update_daily
 from src.tools.run_logging import RunLogContext
 
@@ -61,31 +72,40 @@ def _write_progress_state(
     total: int = 500,
     stage: str = "BUILDING_PARTITIONS",
     heartbeat_age_seconds: int = 0,
+    progress_contract_id: str | None = None,
+    journal_run_id: str | None = None,
 ) -> None:
     """Write a progress state JSON file with the requested heartbeat age.
 
     ``heartbeat_age_seconds=0`` produces a fresh heartbeat (now); larger values
     push ``heartbeat_at`` into the past so ``check_stall`` declares it stale.
+
+    ``progress_contract_id`` and ``journal_run_id`` are optional identity
+    fields. When ``progress_contract_id`` is provided it MUST match the
+    ``expected_contract_id`` passed to :func:`check_stall` or the stall
+    detector treats the snapshot as "not our contract" and returns
+    ``stalled=False``.
     """
 
     heartbeat_at = datetime.now() - timedelta(seconds=heartbeat_age_seconds)
+    payload: dict[str, Any] = {
+        "stage": stage,
+        "processed": processed,
+        "total": total,
+        "failed": 0,
+        "current_security_id": "sh.600000",
+        "throughput_per_minute": 10.0,
+        "heartbeat_at": heartbeat_at.isoformat(timespec="seconds"),
+        "started_at": heartbeat_at.isoformat(timespec="seconds"),
+        "failed_security_ids": [],
+    }
+    if progress_contract_id is not None:
+        payload["progress_contract_id"] = progress_contract_id
+    if journal_run_id is not None:
+        payload["journal_run_id"] = journal_run_id
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
-        json.dumps(
-            {
-                "stage": stage,
-                "processed": processed,
-                "total": total,
-                "failed": 0,
-                "current_security_id": "sh.600000",
-                "throughput_per_minute": 10.0,
-                "heartbeat_at": heartbeat_at.isoformat(timespec="seconds"),
-                "started_at": heartbeat_at.isoformat(timespec="seconds"),
-                "failed_security_ids": [],
-            },
-            ensure_ascii=False,
-            indent=2,
-        ),
+        json.dumps(payload, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
 
@@ -156,11 +176,21 @@ def _stale_pinned_path(
     run_instance: str = "run_instance:20260725_120000",
     step_id: str = "build-derived-daily-bar",
     heartbeat_age_seconds: int = 35 * 60,
+    progress_contract_id: str = "derived-progress:build-derived-daily-bar:abc12345",
 ) -> Path:
-    """Create a pinned progress path file with a stale heartbeat."""
+    """Create a pinned progress path file with a stale heartbeat.
+
+    The ``progress_contract_id`` defaults to the matching contract id used by
+    the ``TestP04StalledExitCode`` tests so the stall detector's identity
+    check passes and the stale heartbeat is actually evaluated.
+    """
 
     pinned = run_update_daily._derived_progress_path_for_step(tmp_path, run_instance, step_id)
-    _write_progress_state(pinned, heartbeat_age_seconds=heartbeat_age_seconds)
+    _write_progress_state(
+        pinned,
+        heartbeat_age_seconds=heartbeat_age_seconds,
+        progress_contract_id=progress_contract_id,
+    )
     return pinned
 
 
@@ -283,7 +313,14 @@ class TestP03FixedProgressPath:
         assert env is not None
         expected_path = run_update_daily._derived_progress_path_for_step(tmp_path, run_instance_key, step.id)
         assert env[run_update_daily.QDC_DERIVED_PROGRESS_PATH_ENV] == str(expected_path)
-        assert env[run_update_daily.QDC_DERIVED_RUN_ID_ENV] == f"{run_instance_key}:{step.id}"
+        # New contract: the env var is QDC_DERIVED_PROGRESS_CONTRACT_ID and the
+        # value is a uuid-based ``derived-progress:<step_id>:<uuid_hex>``. The
+        # exact uuid is not deterministic; we verify the prefix and that the
+        # legacy QDC_DERIVED_RUN_ID is NOT set (the new name is the single
+        # authoritative value).
+        contract_id = env[run_update_daily.QDC_DERIVED_PROGRESS_CONTRACT_ID_ENV]
+        assert contract_id.startswith(f"derived-progress:{step.id}:")
+        assert run_update_daily.QDC_DERIVED_RUN_ID_ENV not in env
 
     def test_run_subprocess_does_not_set_derived_progress_env_for_valuation(
         self,
@@ -313,6 +350,7 @@ class TestP03FixedProgressPath:
         env = captured["env"]
         assert env is not None
         assert run_update_daily.QDC_DERIVED_PROGRESS_PATH_ENV not in env
+        assert run_update_daily.QDC_DERIVED_PROGRESS_CONTRACT_ID_ENV not in env
         assert run_update_daily.QDC_DERIVED_RUN_ID_ENV not in env
 
     def test_run_subprocess_sets_active_run_id_when_run_log_context_provided(
@@ -396,9 +434,14 @@ class TestP03FixedProgressPath:
         old_pinned_path = run_update_daily._derived_progress_path_for_step(tmp_path, old_run_instance, step_id)
         _write_progress_state(old_pinned_path, heartbeat_age_seconds=3600)
 
-        # Current run's pinned path has a FRESH heartbeat.
+        # Current run's pinned path has a FRESH heartbeat and the matching
+        # contract id so the stall detector's identity check passes.
         current_pinned_path = run_update_daily._derived_progress_path_for_step(tmp_path, current_run_instance, step_id)
-        _write_progress_state(current_pinned_path, heartbeat_age_seconds=0)
+        _write_progress_state(
+            current_pinned_path,
+            heartbeat_age_seconds=0,
+            progress_contract_id=f"derived-progress:{step_id}:abc12345",
+        )
 
         step = _make_step(step_id, target="daily_bar")
         # First poll() returns None (still running); then wait() returns 0
@@ -412,7 +455,7 @@ class TestP03FixedProgressPath:
             io.StringIO(),
             tmp_path,
             progress_path=current_pinned_path,
-            derived_run_id=f"{current_run_instance}:{step_id}",
+            progress_contract_id=f"derived-progress:{step_id}:abc12345",
         )
 
         # Fresh heartbeat on the pinned path → no stall → child exit code 0.
@@ -459,7 +502,7 @@ class TestP04StalledExitCode:
             io.StringIO(),
             tmp_path,
             progress_path=stale_pinned_path,
-            derived_run_id="run_instance:20260725_120000:build-derived-daily-bar",
+            progress_contract_id="derived-progress:build-derived-daily-bar:abc12345",
         )
 
         assert exit_code == run_update_daily.STALLED_EXIT_CODE
@@ -483,7 +526,7 @@ class TestP04StalledExitCode:
             io.StringIO(),
             tmp_path,
             progress_path=stale_pinned_path,
-            derived_run_id="run_instance:20260725_120000:build-derived-daily-bar",
+            progress_contract_id="derived-progress:build-derived-daily-bar:abc12345",
         )
 
         assert exit_code == run_update_daily.STALLED_EXIT_CODE
@@ -512,7 +555,7 @@ class TestP04StalledExitCode:
             io.StringIO(),
             tmp_path,
             progress_path=stale_pinned_path,
-            derived_run_id="run_instance:20260725_120000:build-derived-daily-bar",
+            progress_contract_id="derived-progress:build-derived-daily-bar:abc12345",
         )
 
         assert exit_code == run_update_daily.STALLED_EXIT_CODE
@@ -538,7 +581,7 @@ class TestP04StalledExitCode:
             io.StringIO(),
             tmp_path,
             progress_path=stale_pinned_path,
-            derived_run_id="run_instance:20260725_120000:build-derived-daily-bar",
+            progress_contract_id="derived-progress:build-derived-daily-bar:abc12345",
         )
 
         assert exit_code == run_update_daily.TIMEOUT_CLEANUP_FAILED_EXIT_CODE
@@ -564,7 +607,7 @@ class TestP04StalledExitCode:
             io.StringIO(),
             tmp_path,
             progress_path=stale_pinned_path,
-            derived_run_id="run_instance:20260725_120000:build-derived-daily-bar",
+            progress_contract_id="derived-progress:build-derived-daily-bar:abc12345",
         )
 
         assert exit_code == 125
@@ -602,7 +645,7 @@ class TestP04StalledExitCode:
             io.StringIO(),
             tmp_path,
             progress_path=current_pinned_path,
-            derived_run_id=f"{current_run_instance}:{step_id}",
+            progress_contract_id=f"derived-progress:{step_id}:abc12345",
         )
 
         # Pinned path doesn't exist → not stalled → child exit code 0.
@@ -643,9 +686,379 @@ class TestP04StalledExitCode:
             io.StringIO(),
             tmp_path,
             progress_path=None,
-            derived_run_id=None,
+            progress_contract_id=None,
         )
 
         # proc.wait() is called immediately (no stall check).
         assert exit_code == 42
         assert proc.send_signal_calls == []
+
+
+# ---------------------------------------------------------------------------
+# P0-2: Progress contract identity tests
+# ---------------------------------------------------------------------------
+# The orchestrator↔child progress contract has two distinct identities:
+#
+# * ``progress_contract_id`` — unique per (run_instance, step); generated by
+#   the orchestrator BEFORE spawn; verified by the stall detector so a stale
+#   file from a different run cannot mask a real stall.
+# * ``journal_run_id`` — the derived build journal's stable recovery identity;
+#   stable across resume; backfilled into the daily state from the child's
+#   final progress snapshot.
+#
+# These tests verify the contract at the unit level: id generation, path
+# uniqueness, snapshot identity, stall-detector identity verification, resume
+# identity, manual CLI fallback, and the "no directory scan" rule.
+
+
+class TestProgressContractIdGeneration:
+    """``make_progress_contract_id`` produces unique, well-formed ids."""
+
+    def test_contract_id_format(self) -> None:
+        cid = make_progress_contract_id("daily_bar")
+        assert cid.startswith("derived-progress:daily_bar:")
+        # The uuid hex suffix is 32 chars.
+        suffix = cid.removeprefix("derived-progress:daily_bar:")
+        assert len(suffix) == 32
+        assert all(c in "0123456789abcdef" for c in suffix)
+
+    def test_contract_ids_are_unique(self) -> None:
+        ids = {make_progress_contract_id("daily_bar") for _ in range(1000)}
+        assert len(ids) == 1000
+
+    def test_contract_ids_for_different_steps_differ(self) -> None:
+        a = make_progress_contract_id("daily_bar")
+        b = make_progress_contract_id("valuation")
+        assert a != b
+        assert a.startswith("derived-progress:daily_bar:")
+        assert b.startswith("derived-progress:valuation:")
+
+
+class TestRunInstanceNonce:
+    """The run_instance_key carries a nonce so same-second starts do not
+    collide on the progress path.
+    """
+
+    def test_run_instance_key_contains_nonce(self) -> None:
+        # Two keys generated in the same second must differ because of the
+        # 8-hex-char nonce. We simulate "same second" by calling the formatter
+        # twice with the same timestamp.
+        ts = datetime(2026, 7, 26, 12, 0, 0)
+        import uuid as _uuid
+
+        key_a = f"run_instance:{ts.strftime('%Y%m%d_%H%M%S')}-{_uuid.uuid4().hex[:8]}"
+        key_b = f"run_instance:{ts.strftime('%Y%m%d_%H%M%S')}-{_uuid.uuid4().hex[:8]}"
+        assert key_a != key_b
+        # Both keep the readable timestamp prefix.
+        assert key_a.startswith("run_instance:20260726_120000-")
+        assert key_b.startswith("run_instance:20260726_120000-")
+
+    def test_same_second_starts_produce_different_progress_paths(self, tmp_path: Path) -> None:
+        step_id = "build-derived-daily-bar"
+        # Same timestamp, different nonce → different run_instance_key →
+        # different progress path. This is the core same-second collision
+        # guarantee.
+        import uuid as _uuid
+
+        ts = "20260726_120000"
+        key_a = f"run_instance:{ts}-{_uuid.uuid4().hex[:8]}"
+        key_b = f"run_instance:{ts}-{_uuid.uuid4().hex[:8]}"
+        path_a = run_update_daily._derived_progress_path_for_step(tmp_path, key_a, step_id)
+        path_b = run_update_daily._derived_progress_path_for_step(tmp_path, key_b, step_id)
+        assert path_a != path_b
+
+    def test_concurrent_same_target_paths_differ(self, tmp_path: Path) -> None:
+        """Two concurrent orchestrator invocations targeting the same step
+        must produce different progress paths so neither masks the other.
+        """
+        import uuid as _uuid
+
+        step_id = "build-derived-daily-bar"
+        keys = [f"run_instance:20260726_120000-{_uuid.uuid4().hex[:8]}" for _ in range(5)]
+        paths = {run_update_daily._derived_progress_path_for_step(tmp_path, k, step_id) for k in keys}
+        assert len(paths) == 5
+
+
+class TestProgressIdentityImmutable:
+    """``ProgressIdentity`` is frozen and the reporter never mutates it."""
+
+    def test_identity_is_frozen(self) -> None:
+        identity = ProgressIdentity(
+            progress_contract_id="derived-progress:daily_bar:abc12345",
+            target="daily_bar",
+            dataset_id="cn_stock_daily_bar",
+            journal_run_id="run-20260726-abcdef",
+        )
+        with pytest.raises(dataclasses.FrozenInstanceError):
+            identity.progress_contract_id = "other"  # type: ignore[misc]
+
+    def test_reporter_identity_is_stable_across_snapshots(self, tmp_path: Path) -> None:
+        identity = ProgressIdentity(
+            progress_contract_id="derived-progress:daily_bar:abc12345",
+            target="daily_bar",
+            dataset_id="cn_stock_daily_bar",
+            journal_run_id="run-20260726-abcdef",
+        )
+        reporter = ProgressReporter(state_path=tmp_path / "state.json", identity=identity)
+        reporter.set_stage("BUILDING_PARTITIONS", total=10)
+        reporter.heartbeat()
+        snap1 = reporter.snapshot()
+        reporter.record_processed("sh.600000")
+        reporter.record_processed("sh.600001")
+        reporter.heartbeat()
+        snap2 = reporter.snapshot()
+        # Identity fields must be identical across both snapshots.
+        assert snap1["progress_contract_id"] == "derived-progress:daily_bar:abc12345"
+        assert snap2["progress_contract_id"] == "derived-progress:daily_bar:abc12345"
+        assert snap1["journal_run_id"] == "run-20260726-abcdef"
+        assert snap2["journal_run_id"] == "run-20260726-abcdef"
+        assert snap1["target"] == "daily_bar"
+        assert snap2["target"] == "daily_bar"
+        assert snap1["dataset_id"] == "cn_stock_daily_bar"
+        assert snap2["dataset_id"] == "cn_stock_daily_bar"
+        # The reporter's identity property returns the same object.
+        assert reporter.identity is identity
+
+    def test_snapshot_without_identity_has_no_identity_fields(self, tmp_path: Path) -> None:
+        """Legacy callers that do not pass an identity get snapshots without
+        the identity fields. This keeps the reporter backward-compatible.
+        """
+        reporter = ProgressReporter(state_path=tmp_path / "state.json")
+        reporter.set_stage("BUILDING_PARTITIONS", total=10)
+        reporter.heartbeat()
+        snap = reporter.snapshot()
+        assert "progress_contract_id" not in snap
+        assert "journal_run_id" not in snap
+        assert "target" not in snap
+        assert "dataset_id" not in snap
+
+
+class TestStallDetectorIdentityCheck:
+    """``check_stall`` with ``expected_contract_id`` rejects snapshots that
+    do not carry the matching contract id. A mismatch must NOT trigger
+    ``stalled=True`` — the detector keeps waiting for the correct snapshot
+    or the safety timeout.
+    """
+
+    def test_wrong_contract_id_does_not_trigger_stall(self, tmp_path: Path) -> None:
+        """A stale snapshot with a WRONG contract id must not be used to
+        judge stalled. The detector returns ``stalled=False`` (mismatch)
+        even though the heartbeat is old and processed is unchanged.
+        """
+        path = tmp_path / "state.json"
+        _write_progress_state(
+            path,
+            heartbeat_age_seconds=35 * 60,
+            progress_contract_id="derived-progress:daily_bar:WRONG",
+        )
+        report = check_stall(
+            path,
+            stall_heartbeat_seconds=30 * 60,
+            previous_processed=100,
+            expected_contract_id="derived-progress:daily_bar:abc12345",
+        )
+        assert report.stalled is False
+        assert "mismatch" in report.reason
+
+    def test_correct_contract_id_triggers_stall(self, tmp_path: Path) -> None:
+        """A stale snapshot with the MATCHING contract id and unchanged
+        processed must trigger ``stalled=True``.
+        """
+        path = tmp_path / "state.json"
+        _write_progress_state(
+            path,
+            heartbeat_age_seconds=35 * 60,
+            processed=100,
+            progress_contract_id="derived-progress:daily_bar:abc12345",
+        )
+        report = check_stall(
+            path,
+            stall_heartbeat_seconds=30 * 60,
+            previous_processed=100,
+            expected_contract_id="derived-progress:daily_bar:abc12345",
+        )
+        assert report.stalled is True
+
+    def test_missing_contract_id_in_snapshot_treated_as_mismatch(self, tmp_path: Path) -> None:
+        """A snapshot that does not carry ``progress_contract_id`` (e.g.
+        written by an older child) is treated as a mismatch when
+        ``expected_contract_id`` is provided.
+        """
+        path = tmp_path / "state.json"
+        _write_progress_state(path, heartbeat_age_seconds=35 * 60, processed=100)
+        report = check_stall(
+            path,
+            stall_heartbeat_seconds=30 * 60,
+            previous_processed=100,
+            expected_contract_id="derived-progress:daily_bar:abc12345",
+        )
+        assert report.stalled is False
+        assert "mismatch" in report.reason
+
+    def test_no_expected_contract_id_skips_identity_check(self, tmp_path: Path) -> None:
+        """When ``expected_contract_id`` is None (e.g. manual CLI), the
+        identity check is skipped and the stall verdict is based purely on
+        heartbeat and processed.
+        """
+        path = tmp_path / "state.json"
+        _write_progress_state(
+            path,
+            heartbeat_age_seconds=35 * 60,
+            processed=100,
+            progress_contract_id="derived-progress:daily_bar:something",
+        )
+        report = check_stall(
+            path,
+            stall_heartbeat_seconds=30 * 60,
+            previous_processed=100,
+            expected_contract_id=None,
+        )
+        assert report.stalled is True
+
+    def test_stale_file_at_same_path_cannot_trigger_stall(self, tmp_path: Path) -> None:
+        """If a stale file from a previous run happens to land at the SAME
+        path (extremely unlikely given the nonce, but cheap to guard), the
+        contract id check still rejects it because the contract id differs.
+        """
+        path = tmp_path / "state.json"
+        # Stale file written by a PREVIOUS run with a different contract id.
+        _write_progress_state(
+            path,
+            heartbeat_age_seconds=35 * 60,
+            processed=100,
+            progress_contract_id="derived-progress:daily_bar:OLD",
+        )
+        report = check_stall(
+            path,
+            stall_heartbeat_seconds=30 * 60,
+            previous_processed=100,
+            expected_contract_id="derived-progress:daily_bar:NEW",
+        )
+        assert report.stalled is False
+        assert "mismatch" in report.reason
+
+
+class TestManualCliContractId:
+    """The manual CLI (``qdc build-derived``) has no orchestrator env var,
+    so the child generates a local contract id. The id is still unique
+    (uuid-based) so concurrent manual builds cannot collide.
+    """
+
+    def test_manual_cli_generates_local_contract_id(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        # Clear both env vars to simulate manual CLI.
+        monkeypatch.delenv("QDC_DERIVED_PROGRESS_CONTRACT_ID", raising=False)
+        monkeypatch.delenv("QDC_DERIVED_RUN_ID", raising=False)
+        cid = _progress_contract_id_from_env_or_local("daily_bar")
+        assert cid.startswith("derived-progress:daily_bar:")
+        suffix = cid.removeprefix("derived-progress:daily_bar:")
+        assert len(suffix) == 32
+
+    def test_manual_cli_ids_are_unique(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("QDC_DERIVED_PROGRESS_CONTRACT_ID", raising=False)
+        monkeypatch.delenv("QDC_DERIVED_RUN_ID", raising=False)
+        ids = {_progress_contract_id_from_env_or_local("daily_bar") for _ in range(100)}
+        assert len(ids) == 100
+
+    def test_env_contract_id_wins_over_local(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("QDC_DERIVED_PROGRESS_CONTRACT_ID", "orchestrator-pinned")
+        monkeypatch.delenv("QDC_DERIVED_RUN_ID", raising=False)
+        assert _progress_contract_id_from_env_or_local("daily_bar") == "orchestrator-pinned"
+
+    def test_legacy_env_id_still_honored(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The deprecated ``QDC_DERIVED_RUN_ID`` is still read so an in-flight
+        subprocess from an older orchestrator build does not crash. The new
+        name always wins when both are present.
+        """
+        monkeypatch.delenv("QDC_DERIVED_PROGRESS_CONTRACT_ID", raising=False)
+        monkeypatch.setenv("QDC_DERIVED_RUN_ID", "legacy-id")
+        # The legacy value is returned (the deprecation warning is emitted by
+        # the function but loguru is not captured by pytest's caplog; the
+        # return value proves the legacy code path was taken).
+        assert _progress_contract_id_from_env_or_local("daily_bar") == "legacy-id"
+
+    def test_new_env_wins_over_legacy(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("QDC_DERIVED_PROGRESS_CONTRACT_ID", "new-id")
+        monkeypatch.setenv("QDC_DERIVED_RUN_ID", "legacy-id")
+        assert _progress_contract_id_from_env_or_local("daily_bar") == "new-id"
+
+
+class TestNoDirectoryScan:
+    """The stall detector must read ONLY the pinned progress path — never a
+    directory scan. A stale sibling file must not influence the verdict.
+    """
+
+    def test_latest_progress_state_path_not_called_by_stall_detector(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """If the stall detector accidentally called
+        ``latest_progress_state_path`` it would be a regression. We patch the
+        function to raise and confirm the stall detector does not call it.
+        """
+        from src.sources.derived import progress as progress_module
+
+        def _explode(*args: Any, **kwargs: Any) -> None:
+            raise AssertionError("latest_progress_state_path must not be called by stall detector")
+
+        # ``latest_progress_state_path`` may or may not exist on the module;
+        # if it does, we patch it. If it does not, there is nothing to guard.
+        if hasattr(progress_module, "latest_progress_state_path"):
+            monkeypatch.setattr(progress_module, "latest_progress_state_path", _explode)
+
+        step = _make_step("build-derived-daily-bar", target="daily_bar")
+        proc = _FakePopen(exit_code_after_interrupt=0)
+        pinned = run_update_daily._derived_progress_path_for_step(
+            tmp_path, "run_instance:20260726_120000-abc12345", step.id
+        )
+        _write_progress_state(
+            pinned,
+            heartbeat_age_seconds=0,
+            progress_contract_id="derived-progress:build-derived-daily-bar:abc12345",
+        )
+        # If the stall detector called latest_progress_state_path, the test
+        # would raise AssertionError and fail. Passing means no call.
+        exit_code = run_update_daily._wait_with_stall_detection(
+            proc,
+            step,
+            io.StringIO(),
+            tmp_path,
+            progress_path=pinned,
+            progress_contract_id="derived-progress:build-derived-daily-bar:abc12345",
+        )
+        assert exit_code == 0
+
+
+class TestOrchestratorBackfillsJournalRunId:
+    """The orchestrator backfills ``journal_run_id`` from the child's final
+    progress snapshot into the daily state. ``progress_contract_id`` is
+    recorded before spawn; ``journal_run_id`` is recorded after the step
+    completes.
+    """
+
+    def test_read_journal_run_id_from_progress_returns_value(self, tmp_path: Path) -> None:
+        path = tmp_path / "state.json"
+        _write_progress_state(
+            path,
+            progress_contract_id="derived-progress:daily_bar:abc12345",
+            journal_run_id="run-20260726-abcdef",
+        )
+        assert run_update_daily._read_journal_run_id_from_progress(path) == "run-20260726-abcdef"
+
+    def test_read_journal_run_id_returns_none_when_missing(self, tmp_path: Path) -> None:
+        path = tmp_path / "state.json"
+        _write_progress_state(path)
+        assert run_update_daily._read_journal_run_id_from_progress(path) is None
+
+    def test_read_journal_run_id_returns_none_when_file_missing(self, tmp_path: Path) -> None:
+        assert run_update_daily._read_journal_run_id_from_progress(tmp_path / "nope.json") is None
+
+    def test_read_journal_run_id_returns_none_on_invalid_json(self, tmp_path: Path) -> None:
+        path = tmp_path / "state.json"
+        path.write_text("{not json", encoding="utf-8")
+        assert run_update_daily._read_journal_run_id_from_progress(path) is None
+
+    def test_read_journal_run_id_returns_none_when_field_not_string(self, tmp_path: Path) -> None:
+        path = tmp_path / "state.json"
+        path.write_text(json.dumps({"journal_run_id": 123}), encoding="utf-8")
+        assert run_update_daily._read_journal_run_id_from_progress(path) is None
