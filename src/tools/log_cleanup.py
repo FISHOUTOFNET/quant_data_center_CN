@@ -30,7 +30,8 @@ from pathlib import Path
 
 import click
 
-from src.utils import paths
+from src.utils import filesystem_safety, paths
+from src.utils.logging import logger
 from src.utils.paths import (
     LogRootAuthorizationError,
     validate_managed_log_root,
@@ -47,6 +48,7 @@ KEEP_REASON_ACTIVE_RUN = "active_run"
 KEEP_REASON_NOT_A_LOG = "not_a_log_file"
 KEEP_REASON_SYMLINK_ESCAPE = "symlink_escapes_root"
 KEEP_REASON_OUTSIDE_ROOT = "outside_root"
+KEEP_REASON_LINK_LIKE = "link_like_or_reparse"
 
 
 class LogCleanupError(RuntimeError):
@@ -181,8 +183,23 @@ def cleanup_logs(
     deleted_paths: set[Path] = set()
 
     def _delete(item: _LogFile) -> bool:
-        """Attempt to delete ``item``. Return True on success."""
+        """Attempt to delete ``item``. Return True on success.
+
+        Pre-delete boundary verification (P0): re-verify the candidate is safe
+        to delete right before unlinking. This catches TOCTOU where a file was
+        swapped for a symlink/junction/reparse point between discovery and
+        deletion, and where a file was moved outside the canonical managed
+        root. Unsafe candidates are skipped (not deleted, not counted as
+        failure) and recorded under ``KEEP_REASON_LINK_LIKE``.
+        """
         nonlocal deleted_count, deleted_bytes
+        if not _is_safe_delete_candidate(item.path, root):
+            kept_reasons[KEEP_REASON_LINK_LIKE] = kept_reasons.get(KEEP_REASON_LINK_LIKE, 0) + 1
+            logger.debug(
+                "Skipping delete of unsafe candidate: path={} reason=link_like_or_outside_root",
+                item.path,
+            )
+            return False
         if dry_run:
             deleted_count += 1
             deleted_bytes += item.size
@@ -268,36 +285,82 @@ class _LogFile:
     active_run_id: str | None
 
 
+def _is_safe_delete_candidate(path: Path, root_resolved: Path) -> bool:
+    """Re-verify a file is safe to delete right before unlinking.
+
+    Pre-delete boundary verification (P0). Catches TOCTOU where a file was
+    swapped for a symlink/junction/reparse point, or moved outside the
+    canonical managed root, between discovery and deletion.
+
+    Checks:
+    1. The candidate is NOT a symlink/junction/reparse point.
+    2. The candidate still lives inside the canonical managed root.
+    3. The candidate is still a regular log file (not a dir, not a non-log).
+    """
+
+    if filesystem_safety.is_link_like_or_reparse(path):
+        return False
+    try:
+        resolved = path.resolve()
+    except (OSError, RuntimeError):
+        return False
+    if not (paths.is_path_inside(resolved, root_resolved) or resolved == root_resolved):
+        return False
+    if path.suffix.lower() not in LOG_SUFFIXES:
+        return False
+    return path.is_file() and not path.is_dir()
+
+
 def _discover_log_files(root: Path) -> list[_LogFile]:
-    """Walk ``root`` without following symlinks that escape it."""
+    """Walk ``root`` pruning link-like/reparse nodes (symlinks, junctions, etc.).
+
+    ``os.walk(followlinks=False)`` already avoids following symlink dirs on
+    POSIX, but on Windows it does NOT skip junctions or other reparse points.
+    We conservatively prune ALL link-like dirs (symlinks, junctions, mount
+    points, other reparse tags) from ``dirnames[:]`` IN PLACE — not just
+    those that escape the root. The marker binds to a directory identity;
+    recursing into a link-like dir would reach the link target's tree, which
+    may live outside the managed root.
+
+    Log file candidates that are link-like/reparse are also rejected. The
+    deletion boundary must never touch a link target's content.
+    """
 
     discovered: list[_LogFile] = []
-    root_resolved = root.resolve()
     for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
         current_dir = Path(dirpath)
-        # Filter subdirectories: skip symlinked dirs that point outside root.
+        # Prune link-like/reparse directories from dirnames[:] IN PLACE.
+        # This is the primary defense; followlinks=False is a backstop on
+        # POSIX but does not catch junctions on Windows.
         kept_dirnames: list[str] = []
         for entry in dirnames:
             candidate = current_dir / entry
-            if candidate.is_symlink():
-                target = candidate.resolve()
-                if not paths.is_path_inside(target, root_resolved):
-                    # Skip this directory entirely; do not recurse into it.
-                    continue
+            if filesystem_safety.is_link_like_or_reparse(candidate):
+                logger.debug(
+                    "Pruning link-like directory from cleanup traversal: path={} kind={}",
+                    candidate,
+                    filesystem_safety.describe_link_like(candidate),
+                )
+                continue
             kept_dirnames.append(entry)
         dirnames[:] = kept_dirnames
 
         for name in filenames:
             file_path = current_dir / name
+            # Reject link-like/reparse file candidates (symlinks, junctions,
+            # other reparse points). The deletion boundary must never touch a
+            # link target's content, even if the link points inside the root.
+            if filesystem_safety.is_link_like_or_reparse(file_path):
+                logger.debug(
+                    "Skipping link-like file in cleanup discovery: path={} kind={}",
+                    file_path,
+                    filesystem_safety.describe_link_like(file_path),
+                )
+                continue
             try:
                 stat = file_path.stat()
             except OSError:
                 continue
-            # Skip symlinks pointing outside root.
-            if file_path.is_symlink():
-                target = file_path.resolve()
-                if not paths.is_path_inside(target, root_resolved):
-                    continue
             is_log = file_path.suffix.lower() in LOG_SUFFIXES and file_path.is_file() and not file_path.is_dir()
             is_run_log = is_log and current_dir.name == RUNS_SUBDIR
             run_id = _extract_run_id(file_path.name) if is_run_log else None

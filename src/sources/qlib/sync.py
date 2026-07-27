@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 import math
 import shutil
-import sys
 import tarfile
 import tempfile
 import threading
@@ -79,9 +78,9 @@ class UnsafeArchiveError(RuntimeError):
 
     Covers path traversal (``../``, absolute paths, Windows drive/UNC paths),
     symlinks/hardlinks that escape the extraction root, and special files
-    (devices, FIFOs). The check is version-independent: both Python 3.10
-    (which lacks the ``filter`` kwarg) and Python 3.11+ run the same
-    validation pass before any member is extracted.
+    (devices, FIFOs). The check is capability-independent: the same
+    validation pass runs before any member is extracted regardless of
+    whether the stdlib ``data_filter`` is available.
     """
 
 
@@ -97,12 +96,14 @@ def _safe_extract_tar(
     partial-extraction window where an early malicious member is already on
     disk by the time a later member is rejected.
 
-    On Python 3.11+ the default strategy uses ``extractall(filter="data")`` so
-    the standard-library "data" filter also runs as defense-in-depth. On
-    Python 3.10 the strategy is a plain ``extractall``. Both branches rely on
-    the up-front validation in :func:`_validate_tar_members` for the security
-    contract; the ``filter="data"`` kwarg on 3.11+ is a backstop, not the
-    primary gate.
+    The default strategy uses :func:`_default_extraction_strategy` which
+    detects the stdlib ``data_filter`` via capability detection
+    (``getattr(tarfile, "data_filter", None)``) — NOT ``sys.version_info``.
+    When ``data_filter`` is available it is passed as ``filter=data_filter``
+    so the standard-library filter also runs as defense-in-depth. When it is
+    not available, a plain ``extractall`` runs. Both branches rely on the
+    up-front validation in :func:`_validate_tar_members` for the security
+    contract; the stdlib filter is a backstop, not the primary gate.
 
     ``extraction_strategy`` is exposed for tests so they can monkeypatch the
     actual extraction without patching ``sys.version_info``.
@@ -115,10 +116,18 @@ def _safe_extract_tar(
 
 
 def _default_extraction_strategy(archive: tarfile.TarFile, destination: Path) -> None:
-    """Pick the strongest available stdlib extraction path."""
+    """Pick the strongest available stdlib extraction path.
 
-    if sys.version_info >= (3, 11):
-        archive.extractall(destination, filter="data")
+    Uses capability detection (``getattr(tarfile, "data_filter", None)``)
+    rather than a Python-version check so the decision is based on the actual
+    stdlib API surface, not the interpreter version. This correctly handles
+    backports and pre-release builds where the interpreter version and the
+    capability do not align.
+    """
+
+    data_filter = getattr(tarfile, "data_filter", None)
+    if data_filter is not None:
+        archive.extractall(destination, filter=data_filter)
     else:
         archive.extractall(destination)
 
@@ -551,13 +560,14 @@ def download_and_extract_qlib_asset(
             extract_started = time.perf_counter()
             _check_deadline(deadline, stage)
             with tarfile.open(archive_path, "r:gz") as tar:
-                # Version-independent safety gate: every member is validated
+                # Capability-independent safety gate: every member is validated
                 # BEFORE any extraction begins, so a malicious or corrupted
                 # archive is rejected atomically and the existing ``source_dir``
-                # is left untouched. On Python 3.11+ the stdlib "data" filter
-                # runs as defense-in-depth on top of our own validation; on
-                # Python 3.10 our validation is the sole gate. See
-                # :func:`_safe_extract_tar` and :class:`UnsafeArchiveError`.
+                # is left untouched. When the stdlib ``data_filter`` is available
+                # (detected via ``getattr``, not version check) it runs as
+                # defense-in-depth on top of our own validation; otherwise our
+                # validation is the sole gate. See :func:`_safe_extract_tar`
+                # and :class:`UnsafeArchiveError`.
                 _safe_extract_tar(tar, temp_root)
             extracted = _find_extracted_qlib_dir(temp_root)
             logger.info("Qlib asset extracted elapsed={:.3f}s", time.perf_counter() - extract_started)

@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import json
 import os
-import stat
-import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+from src.utils import filesystem_safety
+from src.utils.filesystem_safety import SourceName
 
 LOG_DIR_ENV = "QDC_LOG_DIR"
 DEFAULT_LOG_APP_NAME = "QuantDataCenter"
@@ -159,33 +160,17 @@ def _reject_unsafe_log_root(root: Path) -> None:
     points are rejected for the same reason.
     """
 
-    # ANY symlink at the root — reject unconditionally. The marker binds to a
-    # directory identity; a symlink target can be swapped after authorization,
-    # so the deletion boundary must not depend on link resolution.
-    if root.is_symlink():
-        target = root.resolve()
-        raise LogRootAuthorizationError(f"Refusing to authorize symlink log root: {root} -> {target}")
-
-    # Windows junction/reparse point — reject. ``Path.is_junction()`` is only
-    # available on Python 3.12+; on Python 3.10/3.11, fall back to checking
-    # ``FILE_ATTRIBUTE_REPARSE_POINT`` via ``os.stat(follow_symlinks=False)``,
-    # which detects all reparse points (junctions, mount points, etc.) that
-    # ``is_symlink()`` does not catch. See PR-2 acceptance plan section 6.5.
-    is_junction = False
-    is_junction_method = getattr(root, "is_junction", None)
-    if callable(is_junction_method):
-        try:
-            is_junction = is_junction_method()
-        except OSError:
-            is_junction = False
-    elif sys.platform == "win32":
-        try:
-            st = os.stat(root, follow_symlinks=False)
-            is_junction = bool(st.st_file_attributes & stat.FILE_ATTRIBUTE_REPARSE_POINT)
-        except (OSError, AttributeError):
-            is_junction = False
-    if is_junction:
-        raise LogRootAuthorizationError(f"Refusing to authorize Windows junction/reparse log root: {root}")
+    # ANY symlink/junction/reparse point at the root — reject unconditionally.
+    # The marker binds to a directory identity; a link target can be swapped
+    # after authorization, so the deletion boundary must not depend on link
+    # resolution. Uses the shared ``is_link_like_or_reparse`` helper so
+    # RuntimePaths raw-root authorization and cleanup traversal agree on what
+    # is "link-like" (symlinks on POSIX; symlinks, junctions, mount points,
+    # and other reparse points on Windows). Python 3.10/3.11 compatible —
+    # does not depend on ``Path.is_junction()`` (Python 3.12+ only).
+    if filesystem_safety.is_link_like_or_reparse(root):
+        kind = filesystem_safety.describe_link_like(root)
+        raise LogRootAuthorizationError(f"Refusing to authorize {kind} log root: {root}")
 
     resolved = root.resolve()
     resolved_parent = resolved.parent
@@ -272,30 +257,50 @@ def baostock_cn_trading_calendar_file(root: Path | None = None) -> Path:
     return parquet_dataset_dir("baostock_cn_trading_calendar", root) / "data.parquet"
 
 
-def default_app_data_log_root() -> Path:
-    """Return the OS default log root for the project.
+def _default_log_dir_candidate() -> Path:
+    """Return the OS default log root candidate (expanduser-only, NOT resolved).
 
-    Defaults to ``%LOCALAPPDATA%\\QuantDataCenter\\logs`` on Windows, which is
-    outside the Git workspace and survives ``git clean`` / IDE cleanups. Falls
-    back to ``~/.local/share/QuantDataCenter/logs`` on POSIX when
-    ``LOCALAPPDATA`` is not set.
+    This is the raw candidate fed into :func:`validate_managed_root_candidate`
+    so the link-like check runs on the UNRESOLVED path. Defaults to
+    ``%LOCALAPPDATA%\\QuantDataCenter\\logs`` on Windows, which is outside the
+    Git workspace and survives ``git clean`` / IDE cleanups. Falls back to
+    ``~/.local/share/QuantDataCenter/logs`` on POSIX when ``LOCALAPPDATA`` is
+    not set.
     """
 
     local_app_data = os.getenv("LOCALAPPDATA")
     if local_app_data:
-        return Path(local_app_data).expanduser().resolve() / DEFAULT_LOG_APP_NAME / "logs"
+        return Path(local_app_data).expanduser() / DEFAULT_LOG_APP_NAME / "logs"
     xdg_data_home = os.getenv("XDG_DATA_HOME")
     if xdg_data_home:
-        return Path(xdg_data_home).expanduser().resolve() / DEFAULT_LOG_APP_NAME / "logs"
-    return Path.home().resolve() / ".local" / "share" / DEFAULT_LOG_APP_NAME / "logs"
+        return Path(xdg_data_home).expanduser() / DEFAULT_LOG_APP_NAME / "logs"
+    return Path.home() / ".local" / "share" / DEFAULT_LOG_APP_NAME / "logs"
+
+
+def default_app_data_log_root() -> Path:
+    """Return the OS default log root for the project (resolved).
+
+    Wraps :func:`_default_log_dir_candidate` and resolves the result. Kept for
+    backwards compatibility with callers that expect a resolved path. New
+    internal callers should use :func:`_default_log_dir_candidate` via
+    :func:`resolve_runtime_paths` so the raw-identity check runs before
+    resolution.
+    """
+
+    return _default_log_dir_candidate().resolve()
 
 
 def _config_log_dir(root: Path | None) -> Path | None:
-    """Return the logs_dir setting from settings.yaml, or ``None`` if missing.
+    """Return the logs_dir RAW candidate from settings.yaml, or ``None``.
 
-    Imported lazily so ``paths`` stays free of YAML dependencies at import time.
-    A configured path that resolves inside the Git workspace is rejected
-    (returns ``None``) so that logs always land outside the repo by default.
+    Returns the expanduser-only (NOT resolved) candidate so
+    :func:`resolve_runtime_paths` can run the raw-identity check via
+    :func:`validate_managed_root_candidate` BEFORE resolution. A configured
+    path that resolves inside the Git workspace is rejected (returns
+    ``None``) so that logs always land outside the repo by default.
+
+    Imported lazily so ``paths`` stays free of YAML dependencies at import
+    time.
     """
 
     try:
@@ -311,21 +316,22 @@ def _config_log_dir(root: Path | None) -> Path | None:
                 configured_path = Path(str(configured)).expanduser()
                 # Treat logging.file as the application log path; the parent
                 # directory is the log root.
-                resolved_candidate = configured_path.parent if configured_path.parent else None
-                if resolved_candidate is not None:
-                    resolved_absolute = (
-                        resolved_candidate if resolved_candidate.is_absolute() else (manager.root / resolved_candidate)
-                    ).resolve()
-                    if not is_path_inside(resolved_absolute, manager.root):
-                        return resolved_absolute
+                raw_parent = configured_path.parent if configured_path.parent else None
+                if raw_parent is not None:
+                    raw_absolute = raw_parent if raw_parent.is_absolute() else (manager.root / raw_parent)
+                    # Resolve ONLY for the in-repo check; return the RAW form
+                    # so the raw-identity check sees the original symlink.
+                    if not is_path_inside(raw_absolute.resolve(), manager.root):
+                        return raw_absolute
                 return None
         if configured:
-            resolved = resolve_path(str(configured), manager.root)
-            # Refuse to put logs back inside the Git workspace: that defeats
-            # the whole purpose of the migration.
-            if is_path_inside(resolved, manager.root):
+            configured_path = Path(str(configured)).expanduser()
+            raw_absolute = configured_path if configured_path.is_absolute() else (manager.root / configured_path)
+            # Resolve ONLY for the in-repo check; return the RAW form so the
+            # raw-identity check sees the original symlink/junction.
+            if is_path_inside(raw_absolute.resolve(), manager.root):
                 return None
-            return resolved
+            return raw_absolute
     except (ConfigError, OSError, ValueError):
         return None
     return None
@@ -359,6 +365,27 @@ class RuntimePaths:
         return self.application_log_path.parent
 
 
+def _authorize_raw_log_root(raw_path: str | Path, *, source: SourceName) -> Path:
+    """Authorize a raw log-root candidate and return its resolved form.
+
+    Single raw-root authorization entry used by :func:`resolve_runtime_paths`
+    for all four sources (explicit, environment, settings, default). Delegates
+    to :func:`filesystem_safety.validate_managed_root_candidate` which checks
+    the RAW (unresolved) candidate for symlink/junction/reparse identity
+    BEFORE resolving — the P0 fix that prevents ``.resolve()`` from washing
+    away a symlink managed root.
+
+    :class:`filesystem_safety.LinkLikeError` is re-raised as
+    :class:`LogRootAuthorizationError` so callers (CLI, create/adopt run log
+    context) only need to catch the single paths-level exception type.
+    """
+
+    try:
+        return filesystem_safety.validate_managed_root_candidate(raw_path, source=source)
+    except filesystem_safety.LinkLikeError as exc:
+        raise LogRootAuthorizationError(str(exc)) from exc
+
+
 def resolve_runtime_paths(
     *,
     explicit_log_dir: str | Path | None = None,
@@ -376,22 +403,31 @@ def resolve_runtime_paths(
     The directory is *not* created here; callers (``configure_logging`` and
     ``RunLogContext``) create it lazily so that read-only commands do not
     produce side effects.
+
+    P0: all four sources (explicit, environment, settings, default) flow
+    through :func:`_authorize_raw_log_root` so the raw-identity (symlink /
+    junction / reparse) check runs BEFORE ``.resolve()``. A symlink or
+    junction managed root is rejected with
+    :class:`LogRootAuthorizationError` regardless of which source supplied
+    it. The repo/home/filesystem-root checks are NOT performed here — they
+    run later at marker creation / cleanup time via
+    :func:`_reject_unsafe_log_root`.
     """
 
     base_root = (root or ROOT).resolve()
     resolved: Path | None = None
     if explicit_log_dir:
-        resolved = Path(explicit_log_dir).expanduser().resolve()
+        resolved = _authorize_raw_log_root(explicit_log_dir, source="explicit")
     if resolved is None:
         env_dir = os.getenv(LOG_DIR_ENV)
         if env_dir:
-            resolved = Path(env_dir).expanduser().resolve()
+            resolved = _authorize_raw_log_root(env_dir, source="environment")
     if resolved is None:
         config_dir = _config_log_dir(base_root)
         if config_dir is not None:
-            resolved = config_dir.resolve()
+            resolved = _authorize_raw_log_root(config_dir, source="settings")
     if resolved is None:
-        resolved = default_app_data_log_root()
+        resolved = _authorize_raw_log_root(_default_log_dir_candidate(), source="default")
 
     app_data_dir = resolved
     application_log_path = resolved / "application" / "qdc.log"

@@ -263,14 +263,101 @@ class TestSafeExtractTarContract:
 
 
 # ---------------------------------------------------------------------------
-# _default_extraction_strategy: both Python branches run the same validation
+# _default_extraction_strategy: capability detection (NOT sys.version_info)
 # ---------------------------------------------------------------------------
 
 
-class TestDefaultExtractionStrategyBothVersions:
-    """Python 3.10 fallback and Python 3.11+ ``filter="data"`` both rely on
-    the same up-front validation. We confirm both paths extract a safe archive
-    without re-implementing the validation in the test.
+class TestExtractionFilterCapabilityDetection:
+    """The default strategy uses ``getattr(tarfile, "data_filter", None)``
+    capability detection — NOT ``sys.version_info``. These tests mock
+    ``tarfile.data_filter`` to prove the right ``extractall`` signature is
+    used regardless of which Python interpreter runs the test.
+    """
+
+    def test_uses_data_filter_when_available(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """When ``tarfile.data_filter`` exists, ``extractall`` is called with
+        ``filter=data_filter`` (the function, not the string).
+        """
+
+        calls: list[tuple[Path, object]] = []
+
+        def fake_data_filter(member: object, path: object) -> object:
+            return member
+
+        monkeypatch.setattr(tarfile, "data_filter", fake_data_filter, raising=False)
+
+        class FakeArchive:
+            def extractall(self, destination: Path, *, filter: object = None) -> None:
+                calls.append((destination, filter))
+
+        dest = Path("/tmp/dest")
+        qlib_sync_module._default_extraction_strategy(FakeArchive(), dest)
+
+        assert len(calls) == 1
+        assert calls[0][0] == dest
+        assert calls[0][1] is fake_data_filter
+
+    def test_omits_filter_when_data_filter_unavailable(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """When ``tarfile.data_filter`` is ``None``, ``extractall`` is called
+        WITHOUT the ``filter`` kwarg (prod code does not pass ``filter=None``).
+        """
+
+        calls: list[tuple[Path, object]] = []
+        monkeypatch.setattr(tarfile, "data_filter", None, raising=False)
+
+        class FakeArchive:
+            def extractall(self, destination: Path, *, filter: object = None) -> None:
+                calls.append((destination, filter))
+
+        dest = Path("/tmp/dest")
+        qlib_sync_module._default_extraction_strategy(FakeArchive(), dest)
+
+        assert len(calls) == 1
+        assert calls[0][0] == dest
+        # filter is None — prod code went through the else branch and did NOT
+        # pass filter=data_filter. The fake accepts filter=None for assertion
+        # purposes; the next test proves prod code truly omits the kwarg.
+        assert calls[0][1] is None
+
+    def test_fallback_extractall_does_not_accept_filter(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """When ``data_filter`` is unavailable, prod code must NOT pass
+        ``filter=`` at all. The fake ``extractall`` here intentionally does
+        NOT accept a ``filter`` kwarg — if prod code wrongly passes it, this
+        test raises ``TypeError`` (NOT caught by any ``except TypeError``),
+        proving the regression.
+        """
+
+        monkeypatch.setattr(tarfile, "data_filter", None, raising=False)
+
+        class FakeArchive:
+            def extractall(self, destination: Path) -> None:
+                # Intentionally no ``filter`` kwarg — proves prod code omits it.
+                pass
+
+        dest = Path("/tmp/dest")
+        # Must not raise TypeError.
+        qlib_sync_module._default_extraction_strategy(FakeArchive(), dest)
+
+    def test_no_sys_version_info_check(self) -> None:
+        """The production source must NOT use ``sys.version_info`` to decide
+        filter capability. We grep the source file to prove the version
+        judgment was removed.
+        """
+
+        import inspect
+
+        source = inspect.getsource(qlib_sync_module._default_extraction_strategy)
+        assert "version_info" not in source, (
+            "_default_extraction_strategy must not use sys.version_info; "
+            "use getattr(tarfile, 'data_filter', None) capability detection instead."
+        )
+
+
+class TestDefaultStrategyRealTarIntegration:
+    """Real tar integration: the default strategy extracts a safe archive and
+    a malicious archive is rejected by the up-front validation before the
+    strategy runs. These tests use a REAL ``tarfile.open`` archive (not a
+    mock) so the member validation path is exercised end-to-end.
     """
 
     def test_default_strategy_extracts_safe_archive(self, tmp_path: Path) -> None:
@@ -284,52 +371,23 @@ class TestDefaultExtractionStrategyBothVersions:
 
         assert (dest / "cn_data" / "calendars" / "day.txt").exists()
 
-    def test_py310_fallback_path_runs_unified_validation(self, tmp_path: Path) -> None:
-        """Simulate the Python 3.10 fallback (plain extractall) and confirm
-        a malicious archive is still rejected by the up-front validation.
+    def test_default_strategy_rejects_malicious_archive(self, tmp_path: Path) -> None:
+        """A malicious archive is rejected by the up-front validation BEFORE
+        the default strategy runs. Nothing is extracted.
         """
 
         archive_path = tmp_path / "bad.tar.gz"
         malicious = _make_member("../escape.txt", content=b"evil")
         _write_archive(archive_path, [(malicious, b"evil")])
 
-        def _py310_strategy(archive: tarfile.TarFile, destination: Path) -> None:
-            # Mirrors the Python 3.10 branch of _default_extraction_strategy.
-            archive.extractall(destination)
-
         dest = tmp_path / "dest"
         dest.mkdir()
         with tarfile.open(archive_path, "r:gz") as tar, pytest.raises(UnsafeArchiveError):
-            _safe_extract_tar(tar, dest, extraction_strategy=_py310_strategy)
+            _safe_extract_tar(tar, dest, extraction_strategy=qlib_sync_module._default_extraction_strategy)
 
         # Nothing extracted.
         assert not (dest / "escape.txt").exists()
         assert not (tmp_path / "escape.txt").exists()
-
-    def test_py311_filter_data_path_runs_unified_validation(self, tmp_path: Path) -> None:
-        """Simulate the Python 3.11+ path (extractall with filter="data")
-        and confirm a malicious archive is rejected by the up-front
-        validation before the stdlib filter even sees it.
-        """
-
-        archive_path = tmp_path / "bad.tar.gz"
-        malicious = _make_member("../escape.txt", content=b"evil")
-        _write_archive(archive_path, [(malicious, b"evil")])
-
-        def _py311_strategy(archive: tarfile.TarFile, destination: Path) -> None:
-            # Mirrors the Python 3.11+ branch. On 3.10 the kwarg is rejected
-            # by tarfile, so we fall back to plain extractall for the test
-            # body — the point is that the strategy is only reached AFTER
-            # validation, which is what we assert.
-            try:
-                archive.extractall(destination, filter="data")
-            except TypeError:
-                archive.extractall(destination)
-
-        dest = tmp_path / "dest"
-        dest.mkdir()
-        with tarfile.open(archive_path, "r:gz") as tar, pytest.raises(UnsafeArchiveError):
-            _safe_extract_tar(tar, dest, extraction_strategy=_py311_strategy)
 
 
 # ---------------------------------------------------------------------------

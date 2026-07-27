@@ -67,12 +67,6 @@ skip_covered = false
 [tool.ruff]
 line-length = 120
 target-version = "py310"
-# Exclude docs/ from ruff format/lint: the Python code blocks in markdown plan
-# files are illustrative snippets, not module source. Formatting them would
-# create unrelated diffs (e.g. adding blank lines between functions) that
-# obscure the actual PR diff. Module source under src/ and tests/ remains
-# fully checked.
-extend-exclude = ["docs"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "B", "UP", "SIM", "C4", "PT", "RUF"]

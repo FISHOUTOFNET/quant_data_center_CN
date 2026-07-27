@@ -8,6 +8,7 @@ import pytest
 from click.testing import CliRunner
 
 from src.tools import log_cleanup
+from src.utils import filesystem_safety
 from src.utils.paths import ensure_managed_log_root
 
 
@@ -306,3 +307,272 @@ def test_git_clean_does_not_remove_logs_outside_repo(tmp_path: Path, monkeypatch
     shutil.rmtree(repo)
 
     assert run_log.exists()
+
+
+# ---------------------------------------------------------------------------
+# P0: Cleanup traversal prunes link-like/reparse directories and files
+#
+# ``_discover_log_files`` must prune symlink/junction/reparse directories from
+# ``dirnames[:]`` IN PLACE (not just rely on ``followlinks=False``) and must
+# reject link-like file candidates. These tests use real symlinks where
+# possible and mock ``is_link_like_or_reparse`` for Windows reparse points.
+# ---------------------------------------------------------------------------
+
+
+def _make_symlink_or_skip(parent: Path, name: str, target: Path) -> Path:
+    """Create a symlink or skip the test if symlinks are unsupported."""
+
+    link = parent / name
+    try:
+        link.symlink_to(target)
+    except OSError:
+        pytest.skip("symlink not supported on this platform")
+    return link
+
+
+class TestCleanupPrunesLinkLikeDirectories:
+    """Symlink/junction/reparse directories are pruned from traversal."""
+
+    def test_symlink_directory_not_recursed(self, tmp_path: Path) -> None:
+        """A symlink directory inside the log root is NOT recursed into.
+
+        Files under the symlink target must NOT appear in the discovered set,
+        even if they match the log suffix.
+        """
+
+        now = datetime(2026, 7, 25, 12, 0, tzinfo=timezone.utc)
+        # Create an external directory with an old .log file.
+        external = tmp_path / "external"
+        external.mkdir()
+        external_log = _touch(external / "secret.log", now - timedelta(days=365))
+
+        # Create the managed log root and a symlink dir inside it.
+        log_root = tmp_path / "managed-logs"
+        log_root.mkdir()
+        _make_symlink_or_skip(log_root, "link-dir", external)
+
+        _authorize(log_root)
+        discovered = log_cleanup._discover_log_files(log_root)
+
+        # The symlink dir itself is not a file, so it won't be in discovered.
+        # The key assertion: the external .log file is NOT discovered.
+        discovered_paths = {item.path for item in discovered}
+        assert external_log not in discovered_paths
+        # The symlink directory was pruned — its target content was not reached.
+        assert not any(item.path == external_log for item in discovered)
+
+    def test_reparse_directory_not_recursed_via_mock(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A directory flagged as reparse point (mocked) is NOT recursed into.
+
+        This simulates Windows junction/mount-point behavior on any OS by
+        mocking ``is_link_like_or_reparse`` to return True for a specific
+        directory. ``followlinks=False`` alone does NOT catch junctions on
+        Windows, so the explicit pruning is the primary defense.
+        """
+
+        now = datetime(2026, 7, 25, 12, 0, tzinfo=timezone.utc)
+        log_root = tmp_path / "managed-logs"
+        log_root.mkdir()
+        # Create a real subdirectory with an old .log file.
+        sub = log_root / "subdir"
+        sub.mkdir()
+        sub_log = _touch(sub / "old.log", now - timedelta(days=365))
+
+        # Mock: treat ``sub`` as a reparse point.
+        real_check = filesystem_safety.is_link_like_or_reparse
+
+        def mock_check(path: Path) -> bool:
+            if Path(path) == sub:
+                return True
+            return real_check(path)
+
+        monkeypatch.setattr(filesystem_safety, "is_link_like_or_reparse", mock_check)
+        # Also patch the reference in log_cleanup since it imported the name.
+        monkeypatch.setattr(log_cleanup.filesystem_safety, "is_link_like_or_reparse", mock_check)
+
+        _authorize(log_root)
+        discovered = log_cleanup._discover_log_files(log_root)
+
+        # The sub_log must NOT be discovered because its parent was pruned.
+        discovered_paths = {item.path for item in discovered}
+        assert sub_log not in discovered_paths
+
+    def test_normal_subdirectory_is_recursed(self, tmp_path: Path) -> None:
+        """A normal (non-link) subdirectory IS recursed into."""
+
+        now = datetime(2026, 7, 25, 12, 0, tzinfo=timezone.utc)
+        log_root = tmp_path / "managed-logs"
+        log_root.mkdir()
+        sub = log_root / "subdir"
+        sub.mkdir()
+        sub_log = _touch(sub / "old.log", now - timedelta(days=365))
+
+        _authorize(log_root)
+        discovered = log_cleanup._discover_log_files(log_root)
+
+        discovered_paths = {item.path for item in discovered}
+        assert sub_log in discovered_paths
+
+
+class TestCleanupRejectsLinkLikeFiles:
+    """Link-like/reparse file candidates are not discovered or deleted."""
+
+    def test_symlink_log_file_not_discovered(self, tmp_path: Path) -> None:
+        """A symlink .log file is NOT added to the discovered set."""
+
+        now = datetime(2026, 7, 25, 12, 0, tzinfo=timezone.utc)
+        log_root = tmp_path / "managed-logs"
+        log_root.mkdir()
+        target = _touch(log_root / "target.log", now - timedelta(days=1))
+        link = _make_symlink_or_skip(log_root, "link.log", target)
+
+        _authorize(log_root)
+        discovered = log_cleanup._discover_log_files(log_root)
+
+        discovered_paths = {item.path for item in discovered}
+        # The real target IS discovered; the symlink is NOT.
+        assert target in discovered_paths
+        assert link not in discovered_paths
+
+    def test_reparse_log_file_not_discovered_via_mock(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A file flagged as reparse point (mocked) is NOT discovered."""
+
+        now = datetime(2026, 7, 25, 12, 0, tzinfo=timezone.utc)
+        log_root = tmp_path / "managed-logs"
+        log_root.mkdir()
+        old_log = _touch(log_root / "old.log", now - timedelta(days=365))
+
+        real_check = filesystem_safety.is_link_like_or_reparse
+
+        def mock_check(path: Path) -> bool:
+            if Path(path) == old_log:
+                return True
+            return real_check(path)
+
+        monkeypatch.setattr(filesystem_safety, "is_link_like_or_reparse", mock_check)
+        monkeypatch.setattr(log_cleanup.filesystem_safety, "is_link_like_or_reparse", mock_check)
+
+        _authorize(log_root)
+        discovered = log_cleanup._discover_log_files(log_root)
+
+        discovered_paths = {item.path for item in discovered}
+        assert old_log not in discovered_paths
+
+
+class TestCleanupPreDeleteVerification:
+    """Pre-delete boundary verification catches TOCTOU swaps."""
+
+    def test_symlink_swapped_before_delete_is_not_deleted(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A file that becomes a symlink between discovery and deletion is
+        NOT deleted. This is the TOCTOU defense in ``_is_safe_delete_candidate``.
+        """
+
+        now = datetime(2026, 7, 25, 12, 0, tzinfo=timezone.utc)
+        log_root = tmp_path / "managed-logs"
+        log_root.mkdir()
+        old_log = _touch(log_root / "old.log", now - timedelta(days=365))
+
+        _authorize(log_root)
+
+        # Discover first (old_log is a regular file at this point).
+        discovered = log_cleanup._discover_log_files(log_root)
+        assert any(item.path == old_log for item in discovered)
+
+        # Now simulate TOCTOU: replace the file with a symlink.
+        external = tmp_path / "external-target"
+        external.mkdir()
+        external_target = _touch(external / "secret.log", now - timedelta(days=1))
+        old_log.unlink()
+        try:
+            old_log.symlink_to(external_target)
+        except OSError:
+            pytest.skip("symlink not supported on this platform")
+
+        # Run cleanup — the symlink must NOT be deleted.
+        result = log_cleanup.cleanup_logs(log_root, retention_days=30, now=now)
+        assert result.deleted_count == 0
+        assert external_target.exists()
+        assert old_log.exists()  # the symlink itself still exists
+
+    def test_file_moved_outside_root_before_delete_is_not_deleted(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A file that is moved outside the managed root between discovery
+        and deletion is NOT deleted (the resolved path check catches this).
+        """
+
+        now = datetime(2026, 7, 25, 12, 0, tzinfo=timezone.utc)
+        log_root = tmp_path / "managed-logs"
+        log_root.mkdir()
+        old_log = _touch(log_root / "old.log", now - timedelta(days=365))
+
+        _authorize(log_root)
+
+        # Mock _is_safe_delete_candidate to simulate the file being outside root.
+        # This tests the boundary check without needing to actually move the file
+        # (which would be racy). We patch path.resolve() for the candidate.
+        original_resolve = Path.resolve
+
+        def mock_resolve(self: Path) -> Path:
+            if self == old_log:
+                # Simulate the file resolving to a path outside the root.
+                return tmp_path / "escaped.log"
+            return original_resolve(self)
+
+        monkeypatch.setattr(Path, "resolve", mock_resolve)
+
+        result = log_cleanup.cleanup_logs(log_root, retention_days=30, now=now)
+        assert result.deleted_count == 0
+        assert old_log.exists()
+
+
+class TestCleanupRetentionCapacityConsistency:
+    """Retention and capacity share the same safe discovery set."""
+
+    def test_retention_and_capacity_use_same_discovered_set(self, tmp_path: Path) -> None:
+        """Both retention and capacity passes operate on the same ``discovered``
+        list, so a symlink file rejected by discovery is invisible to BOTH
+        passes. There is no second traversal with a different policy.
+        """
+
+        now = datetime(2026, 7, 25, 12, 0, tzinfo=timezone.utc)
+        log_root = tmp_path / "managed-logs"
+        log_root.mkdir()
+        runs_dir = log_root / "runs"
+        runs_dir.mkdir()
+
+        # A real old run log that WILL be deleted by retention.
+        old_run = _touch_run_log(
+            runs_dir / "20250101_000000_run-20250101-000000-abc.log",
+            now - timedelta(days=365),
+            "run-20250101-000000-abc",
+            content=b"x" * 2048,
+        )
+
+        # A symlink "run log" pointing at an external file — must NOT be
+        # discovered by either retention or capacity.
+        external = tmp_path / "external"
+        external.mkdir()
+        external_target = _touch(external / "external.log", now - timedelta(days=365), b"external")
+        link_log = _make_symlink_or_skip(runs_dir, "20250102_000000_run-20250102-000000-link.log", external_target)
+
+        _authorize(log_root)
+        # Retention=30 days, cap=1KB. The real run log is 2KB and 365 days old.
+        # Both passes should only see the real run log; the symlink is invisible.
+        result = log_cleanup.cleanup_logs(
+            log_root,
+            retention_days=30,
+            now=now,
+            keep_recent_runs=0,
+            max_bytes=1024,
+        )
+
+        # The real run log was deleted.
+        assert not old_run.exists()
+        # The external target and the symlink are untouched.
+        assert external_target.exists()
+        assert link_log.exists()
+        # Only 1 file was deleted (the real run log), not 2.
+        assert result.deleted_count == 1

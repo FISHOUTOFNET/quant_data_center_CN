@@ -28,7 +28,7 @@ import pytest
 
 from src.tools import log_cleanup, run_logging, run_update_daily
 from src.tools.run_logging import RunLogContext
-from src.utils import paths
+from src.utils import filesystem_safety, paths
 from src.utils.paths import (
     MANAGED_ROOT_APPLICATION,
     MANAGED_ROOT_LAYOUT_VERSION,
@@ -390,21 +390,27 @@ class TestP07UnsafeRootRejection:
         junction_dir = tmp_path / "junction-logs"
         junction_dir.mkdir(parents=True, exist_ok=True)
 
-        # Simulate a junction by patching is_junction. The production code
-        # calls root.is_junction() when available (Python 3.12+) or falls
-        # back to os.stat FILE_ATTRIBUTE_REPARSE_POINT on Python 3.10/3.11,
-        # so patching the class attribute is sufficient regardless of Python
-        # version.
-        original = getattr(Path, "is_junction", None)
+        # Simulate a junction by patching the shared filesystem-safety
+        # primitive. The production code (``_reject_unsafe_log_root``) calls
+        # ``filesystem_safety.is_link_like_or_reparse`` which uses ``os.lstat``
+        # and ``st_file_attributes & FILE_ATTRIBUTE_REPARSE_POINT`` — NOT
+        # ``Path.is_junction()`` (Python 3.12+ only). Patching the shared
+        # primitive is sufficient regardless of Python version.
+        original_is_link_like = filesystem_safety.is_link_like_or_reparse
+        original_describe = filesystem_safety.describe_link_like
 
-        def fake_is_junction(self: Path) -> bool:
-            if self == junction_dir:
+        def fake_is_link_like(path: Path) -> bool:
+            if path == junction_dir:
                 return True
-            if original is not None:
-                return original(self)
-            return False
+            return original_is_link_like(path)
 
-        monkeypatch.setattr(Path, "is_junction", fake_is_junction, raising=False)
+        def fake_describe(path: Path) -> str:
+            if path == junction_dir:
+                return "junction"
+            return original_describe(path)
+
+        monkeypatch.setattr(filesystem_safety, "is_link_like_or_reparse", fake_is_link_like)
+        monkeypatch.setattr(filesystem_safety, "describe_link_like", fake_describe)
 
         with pytest.raises(LogRootAuthorizationError, match="junction"):
             paths._reject_unsafe_log_root(junction_dir)
@@ -1176,11 +1182,17 @@ class TestEntryRawPathValidationPatched:
     def test_create_run_log_context_rejects_patched_symlink_root(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Patch ``Path.is_symlink`` to return True for the managed root.
-        If ``create_run_log_context`` called ``.resolve()`` before the safety
-        check, the patched ``is_symlink`` would no longer see the symlink
-        (because the resolved path is the real directory) and the entry would
-        NOT raise — which is the regression we must catch.
+        """Patch ``filesystem_safety.is_link_like_or_reparse`` to return True
+        for the managed root. If ``create_run_log_context`` called
+        ``.resolve()`` before the safety check, the patched
+        ``is_link_like_or_reparse`` would no longer see the symlink (because
+        the resolved path is the real directory) and the entry would NOT
+        raise — which is the regression we must catch.
+
+        The production code uses ``filesystem_safety.is_link_like_or_reparse``
+        (via ``os.lstat``) rather than ``Path.is_symlink`` so that Windows
+        junctions and other reparse points are also caught on Python 3.10/3.11
+        where ``Path.is_junction()`` is unavailable.
         """
 
         log_root = tmp_path / "logs"
@@ -1188,34 +1200,25 @@ class TestEntryRawPathValidationPatched:
         runtime_paths = paths.resolve_runtime_paths(explicit_log_dir=log_root)
         explicit_path = runtime_paths.run_logs_dir / "run.log"
 
-        # Track whether the entry ever resolves the path before checking.
-        resolve_calls: list[Path] = []
-        real_resolve = Path.resolve
+        # Patch the shared filesystem-safety primitive to simulate a symlink
+        # at the managed root. ``ensure_managed_log_root`` calls
+        # ``_reject_unsafe_log_root`` which calls
+        # ``is_link_like_or_reparse`` on the raw path BEFORE resolving.
+        original_is_link_like = filesystem_safety.is_link_like_or_reparse
+        original_describe = filesystem_safety.describe_link_like
 
-        def _tracking_resolve(self: Path) -> Path:
-            # Only track resolves of paths inside log_root (the managed root
-            # candidate). Other resolves (e.g. runtime_paths internals) are
-            # noise.
-            try:
-                self.relative_to(log_root)
-                resolve_calls.append(self)
-            except ValueError:
-                pass
-            return real_resolve(self)
-
-        # Patch is_symlink to True for log_root so the safety check must
-        # reject it. If the entry resolves log_root first, is_symlink would
-        # be called on the resolved real path (which is not a symlink) and
-        # would return False — defeating the check.
-        original_is_symlink = Path.is_symlink
-
-        def _patched_is_symlink(self: Path) -> bool:
-            if self == log_root:
+        def _patched_is_link_like(path: Path) -> bool:
+            if path == runtime_paths.logs_dir:
                 return True
-            return original_is_symlink(self)
+            return original_is_link_like(path)
 
-        monkeypatch.setattr(Path, "resolve", _tracking_resolve)
-        monkeypatch.setattr(Path, "is_symlink", _patched_is_symlink)
+        def _patched_describe(path: Path) -> str:
+            if path == runtime_paths.logs_dir:
+                return "symlink"
+            return original_describe(path)
+
+        monkeypatch.setattr(filesystem_safety, "is_link_like_or_reparse", _patched_is_link_like)
+        monkeypatch.setattr(filesystem_safety, "describe_link_like", _patched_describe)
 
         with pytest.raises(run_logging.RunLogContextError, match="symlink"):
             run_logging.create_run_log_context(

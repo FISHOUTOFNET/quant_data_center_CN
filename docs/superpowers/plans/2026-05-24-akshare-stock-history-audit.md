@@ -116,6 +116,7 @@ def test_earliest_observed_time_reads_columns_and_index() -> None:
     indexed = pd.DataFrame({"value": [1]}, index=pd.to_datetime(["1998-01-05"]))
     assert earliest_observed_time(indexed) == "1998-01-05"
 
+
 def test_write_markdown_report_overwrites_latest_state(tmp_path: Path) -> None:
     output = tmp_path / "report.md"
     candidate = ApiCandidate("stock_a", "A", "ak.stock_a()", {}, "历史")
