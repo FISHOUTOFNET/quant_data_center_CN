@@ -12,12 +12,12 @@ import time
 import urllib.error
 import urllib.request
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass
 from datetime import date, datetime
-from pathlib import Path
-from typing import Any
+from pathlib import Path, PurePosixPath, PureWindowsPath
+from typing import Any, cast
 
 import numpy as np
 import pandas as pd
@@ -71,6 +71,171 @@ Deadline = float | None
 
 class QlibSyncTimeoutError(TimeoutError):
     """Raised when a Qlib sync exceeds its configured runtime budget."""
+
+
+class UnsafeArchiveError(RuntimeError):
+    """Raised when a Qlib tar archive contains an unsafe member.
+
+    Covers path traversal (``../``, absolute paths, Windows drive/UNC paths),
+    symlinks/hardlinks that escape the extraction root, and special files
+    (devices, FIFOs). The check is capability-independent: the same
+    validation pass runs before any member is extracted regardless of
+    whether the stdlib ``data_filter`` is available.
+    """
+
+
+def _safe_extract_tar(
+    archive: tarfile.TarFile,
+    destination: Path,
+    *,
+    extraction_strategy: Callable[[tarfile.TarFile, Path], None] | None = None,
+) -> None:
+    """Validate every archive member, then extract to ``destination``.
+
+    Validation runs to completion BEFORE extraction begins. This avoids the
+    partial-extraction window where an early malicious member is already on
+    disk by the time a later member is rejected.
+
+    The default strategy uses :func:`_default_extraction_strategy` which
+    detects the stdlib ``data_filter`` via capability detection
+    (``getattr(tarfile, "data_filter", None)``) — NOT ``sys.version_info``.
+    When ``data_filter`` is available it is passed as ``filter=data_filter``
+    so the standard-library filter also runs as defense-in-depth. When it is
+    not available, a plain ``extractall`` runs. Both branches rely on the
+    up-front validation in :func:`_validate_tar_members` for the security
+    contract; the stdlib filter is a backstop, not the primary gate.
+
+    ``extraction_strategy`` is exposed for tests so they can monkeypatch the
+    actual extraction without patching ``sys.version_info``.
+    """
+
+    members = archive.getmembers()
+    _validate_tar_members(members, destination)
+    strategy = extraction_strategy or _default_extraction_strategy
+    strategy(archive, destination)
+
+
+def _default_extraction_strategy(archive: tarfile.TarFile, destination: Path) -> None:
+    """Pick the strongest available stdlib extraction path.
+
+    Uses capability detection (``getattr(tarfile, "data_filter", None)``)
+    rather than a Python-version check so the decision is based on the actual
+    stdlib API surface, not the interpreter version. This correctly handles
+    backports and pre-release builds where the interpreter version and the
+    capability do not align.
+    """
+
+    data_filter = getattr(tarfile, "data_filter", None)
+    if data_filter is not None:
+        archive.extractall(destination, filter=data_filter)
+    else:
+        archive.extractall(destination)
+
+
+def _validate_tar_members(
+    members: Iterable[tarfile.TarInfo],
+    destination: Path,
+) -> None:
+    """Validate every member before any extraction happens."""
+
+    destination_resolved = destination.resolve()
+    for member in members:
+        _validate_tar_member(member, destination_resolved)
+
+
+def _validate_tar_member(member: tarfile.TarInfo, destination: Path) -> None:
+    """Reject members that escape ``destination`` or carry dangerous types.
+
+    Path validation handles both POSIX and Windows-style names so a Linux
+    runner cannot be tricked by a Windows drive path that ``Path.is_absolute``
+    would treat as relative. Link validation refuses any link whose target
+    cannot be proven to stay inside ``destination``; given that Qlib archives
+    only carry plain files and directories, symlinks and hardlinks are refused
+    outright to minimize the attack surface. Special files (devices, FIFOs)
+    are rejected.
+    """
+
+    # Special files: devices, FIFOs, sockets. Only regular files and
+    # directories are permitted.
+    if member.isdev() or member.isfifo() or member.ischr() or member.isblk():
+        raise UnsafeArchiveError(f"Refusing to extract special file member: name={member.name!r} type={member.type!r}")
+    if not (member.isfile() or member.isdir() or member.issym() or member.islnk()):
+        # Catch any other tar member type (e.g. socket) not covered above.
+        raise UnsafeArchiveError(
+            f"Refusing to extract unsupported member type: name={member.name!r} type={member.type!r}"
+        )
+
+    name = member.name or ""
+    if not name:
+        raise UnsafeArchiveError("Refusing to extract archive member with empty name")
+
+    # Reject all symlink/hardlink members. Qlib archives only contain plain
+    # files and directories; refusing links outright removes an entire class
+    # of "link target escapes root" attacks.
+    if member.issym() or member.islnk():
+        link_kind = "symlink" if member.issym() else "hardlink"
+        raise UnsafeArchiveError(f"Refusing to extract {link_kind} member: name={name!r} linkname={member.linkname!r}")
+
+    _ensure_path_inside_destination(name, destination)
+
+
+def _ensure_path_inside_destination(member_name: str, destination: Path) -> None:
+    """Reject names that resolve outside ``destination``.
+
+    Handles POSIX (``..``, leading ``/``) and Windows (``C:\\``, ``C:/``,
+    ``\\\\server\\share``) traversal styles. Normalizes backslashes to forward
+    slashes before checking so a Windows-style attacker payload cannot slip
+    past a POSIX-only check on a Linux runner.
+    """
+
+    normalized = member_name.replace("\\", "/")
+    if not normalized:
+        raise UnsafeArchiveError(f"Refusing to extract member with empty normalized name: {member_name!r}")
+
+    posix_path = PurePosixPath(normalized)
+    # Any ".." component (anywhere in the path) is rejected — even if the
+    # final resolved path would still be inside the root, an intermediate
+    # ".." is a well-known traversal trick and Qlib archives never need it.
+    if any(part == ".." for part in posix_path.parts):
+        raise UnsafeArchiveError(f"Refusing to extract member with '..' component: {member_name!r}")
+    if posix_path.is_absolute():
+        raise UnsafeArchiveError(f"Refusing to extract absolute path member: {member_name!r}")
+
+    # Windows-style absolute paths (``C:/...``) and UNC paths (``//server/...``)
+    # are caught by PureWindowsPath even when the runner is POSIX. The leading
+    # ``/`` from the backslash normalization makes a UNC ``\\server\share``
+    # look like ``//server/share`` to PurePosixPath (which only sees it as
+    # absolute); PureWindowsPath correctly identifies the drive and the UNC
+    # root, so we use it as the authoritative check.
+    win_path = PureWindowsPath(normalized)
+    if win_path.drive:
+        raise UnsafeArchiveError(
+            f"Refusing to extract Windows drive path member: {member_name!r} (drive={win_path.drive!r})"
+        )
+    # PureWindowsPath.is_absolute() returns True for ``\\server\\share\\...``
+    # and for ``C:\\...`` (with backslashes). After our backslash→slash
+    # normalization, ``C:/...`` is reported as absolute by PurePosixPath
+    # (already covered above) but ``//server/share/...`` is also caught here.
+    if win_path.is_absolute():
+        raise UnsafeArchiveError(f"Refusing to extract absolute Windows path member: {member_name!r}")
+
+    # Final belt-and-suspenders check: resolve the joined path and confirm it
+    # is still inside ``destination``. This catches any traversal trick that
+    # survived the structural checks above (e.g. via mixed separators).
+    joined = destination / member_name
+    try:
+        resolved = joined.resolve()
+    except (OSError, RuntimeError) as exc:
+        raise UnsafeArchiveError(
+            f"Refusing to extract member whose path cannot be resolved: {member_name!r}: {exc}"
+        ) from exc
+    try:
+        resolved.relative_to(destination)
+    except ValueError as exc:
+        raise UnsafeArchiveError(
+            f"Refusing to extract member that escapes destination: name={member_name!r} "
+            f"resolved={resolved!r} destination={destination!r}"
+        ) from exc
 
 
 def sync_qlib_data(
@@ -284,7 +449,7 @@ def load_qlib_symbol_features(symbol_dir: Path, calendar: list[date]) -> pd.Data
         offset = field_start - min_index
         column[offset : offset + len(values)] = values
         column = np.round(column, 6)
-        result[field] = pd.Series(column, dtype=object).where(~np.isnan(column), None)
+        result[field] = pd.Series(column, dtype=object).where(~np.isnan(column), cast(Any, None))
     return result[["date", "qlib_symbol", "exchange", "code", *QLIB_FEATURE_FIELDS]]
 
 
@@ -395,7 +560,15 @@ def download_and_extract_qlib_asset(
             extract_started = time.perf_counter()
             _check_deadline(deadline, stage)
             with tarfile.open(archive_path, "r:gz") as tar:
-                tar.extractall(temp_root, filter="data")
+                # Capability-independent safety gate: every member is validated
+                # BEFORE any extraction begins, so a malicious or corrupted
+                # archive is rejected atomically and the existing ``source_dir``
+                # is left untouched. When the stdlib ``data_filter`` is available
+                # (detected via ``getattr``, not version check) it runs as
+                # defense-in-depth on top of our own validation; otherwise our
+                # validation is the sole gate. See :func:`_safe_extract_tar`
+                # and :class:`UnsafeArchiveError`.
+                _safe_extract_tar(tar, temp_root)
             extracted = _find_extracted_qlib_dir(temp_root)
             logger.info("Qlib asset extracted elapsed={:.3f}s", time.perf_counter() - extract_started)
 

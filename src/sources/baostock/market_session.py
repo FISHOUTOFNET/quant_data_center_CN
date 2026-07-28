@@ -13,8 +13,4 @@ def should_run_adjusted_market_session(
 ) -> bool:
     """Return whether the daily market-session should include adjusted bars."""
 
-    return (
-        natural_date.weekday() in {4, 5, 6}
-        or candidate_date != market_date
-        or market_date_overridden
-    )
+    return natural_date.weekday() in {4, 5, 6} or candidate_date != market_date or market_date_overridden

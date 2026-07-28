@@ -10,11 +10,41 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
+from src.pipeline.step_health import StepHealthSummary, write_step_health_summary
 from src.storage.parquet_store import ParquetStore
 from src.tools import run_update_daily
 from src.utils.process_lock import acquire_process_lock
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+
+
+def _write_summary_for_current_step(status: str, *, reason: str = "", failed_records: int = 0) -> None:
+    """Write a StepHealthSummary to the path pointed to by QDC_STEP_RESULT_PATH.
+
+    Test command runners call this to simulate a CLI command that wrote its
+    own health summary (e.g. baostock-market-session with a tolerant policy).
+    """
+
+    path_str = os.environ.get(run_update_daily.STEP_RESULT_PATH_ENV)
+    if not path_str:
+        return
+    summary = StepHealthSummary(
+        status=status,
+        reason=reason or f"test summary status={status}",
+        total_records=200,
+        success_records=200 - failed_records,
+        failed_records=failed_records,
+        skipped_records=0,
+        failed_record_ratio=failed_records / 200.0 if failed_records else 0.0,
+        failed_codes=("sh.699999",) if failed_records else (),
+        failed_code_ratio=1 / 200.0 if failed_records else 0.0,
+        failed_datasets=("baostock_cn_stock_basic",) if failed_records else (),
+        fatal_datasets=(),
+        fatal_statuses=(),
+        examples=(),
+        policy={},
+    )
+    write_step_health_summary(Path(path_str), summary)
 
 
 def _state(path: Path) -> dict:
@@ -708,15 +738,20 @@ def test_repo_workflow_maps_legacy_build_derived_start_at(tmp_path: Path) -> Non
             root=tmp_path,
             state_file=state_file,
             run_log=log_file,
-            today=date(2026, 6, 8),
+            today=date(2026, 6, 6),
             start_at="build-derived",
             command_runner=lambda step, log_path: calls.append(step.id) or 0,
         )
         == 0
     )
 
-    assert calls == ["build-derived-security-master", "build-derived-daily-bar", "build-derived-valuation", "build-duckdb-views"]
-    states = _steps(state_file, "natural_date:2026-06-08")
+    assert calls == [
+        "build-derived-security-master",
+        "build-derived-daily-bar",
+        "build-derived-valuation",
+        "build-duckdb-views",
+    ]
+    states = _steps(state_file, "natural_date:2026-06-06")
     assert states["build-derived-security-master"]["status"] == "success"
     assert "Mapped legacy start-at build-derived to build-derived-security-master" in log_file.read_text(
         encoding="utf-8"
@@ -993,40 +1028,27 @@ def test_orchestrator_market_window_schedules_heavy_steps_only_in_window() -> No
     assert "baostock-market-session" in friday
     assert "akshare-valuation-full" in friday
     assert "akshare-yjyg-em" in friday
-    assert "baostock-market-session" in monday
-    assert "baostock-valuation-percentile" in monday
+    assert monday == ["cleanup", "akshare-spot-quote"]
     assert "baostock-qfq" not in friday
     assert "baostock-qfq" not in monday
     assert "akshare-valuation-full" not in monday
-    assert "akshare-yjyg-em" in monday
-    assert "financial-report" in monday
+    assert "akshare-yjyg-em" not in monday
+    assert "financial-report" not in monday
 
 
-def test_daily_steps_include_yjyg_em_before_build_views_on_weekday() -> None:
+def test_daily_steps_include_only_spot_quote_on_weekday() -> None:
     steps = run_update_daily.daily_steps(date(2026, 6, 8), root=REPO_ROOT)
     by_id = {step.id: step for step in steps}
 
+    assert list(by_id) == ["cleanup", "akshare-spot-quote"]
     assert by_id["akshare-spot-quote"].optional is True
     assert by_id["akshare-spot-quote"].timeout_seconds is None
-    assert "akshare-yjyg-em" in by_id
-    assert steps.index(by_id["akshare-yjyg-em"]) < steps.index(by_id["build-duckdb-views"])
-    assert by_id["akshare-yjyg-em"].command[1:] == (
-        "-m",
-        "src.cli",
-        "akshare",
-        "update",
-        "--target",
-        "yjyg_em",
-        "--mode",
-        "incremental",
-        "--no-build-duckdb-views",
-    )
-    assert by_id["akshare-yjyg-em"].optional is True
-    assert by_id["akshare-yjyg-em"].timeout_seconds == 900
+    assert by_id["akshare-spot-quote"].schedule_policy == "daily"
+    assert by_id["akshare-spot-quote"].state_key_policy == "market_date"
 
 
-@pytest.mark.parametrize("today", [date(2026, 6, 8), date(2026, 6, 6)])
-def test_daily_steps_build_derived_stages_before_views(today: date) -> None:
+def test_daily_steps_build_derived_stages_before_views_on_market_window() -> None:
+    today = date(2026, 6, 6)
     steps = run_update_daily.daily_steps(today, root=REPO_ROOT)
     by_id = {step.id: step for step in steps}
 
@@ -1039,28 +1061,23 @@ def test_daily_steps_build_derived_stages_before_views(today: date) -> None:
     assert steps.index(by_id["build-derived-security-master"]) < steps.index(by_id["build-derived-valuation"])
     assert steps.index(by_id["build-derived-daily-bar"]) < steps.index(by_id["build-duckdb-views"])
     assert steps.index(by_id["build-derived-valuation"]) < steps.index(by_id["build-duckdb-views"])
-    assert _dependency_ids(by_id["build-derived-security-master"]) == (
-        ("baostock-basic", "akshare-delist") if today.weekday() in {4, 5, 6} else ("baostock-basic",)
-    )
+    assert _dependency_ids(by_id["build-derived-security-master"]) == ("baostock-basic", "akshare-delist")
     assert _dependency_ids(by_id["build-derived-daily-bar"]) == (
-        ("build-derived-security-master", "akshare-spot-quote", "baostock-market-session", "akshare-daily-bar")
-        if today.weekday() in {4, 5, 6}
-        else ("build-derived-security-master", "akshare-spot-quote", "baostock-market-session")
+        "build-derived-security-master",
+        "akshare-spot-quote",
+        "baostock-market-session",
+        "akshare-daily-bar",
     )
     assert _dependency_ids(by_id["build-derived-valuation"]) == (
-        ("build-derived-security-master", "baostock-valuation-percentile", "akshare-valuation-full")
-        if today.weekday() in {4, 5, 6}
-        else ("build-derived-security-master", "baostock-valuation-percentile")
+        "build-derived-security-master",
+        "baostock-valuation-percentile",
+        "akshare-valuation-full",
     )
     assert _dependency_ids(by_id["build-duckdb-views"]) == (
-        (
-            "build-derived-security-master",
-            "build-derived-daily-bar",
-            "build-derived-valuation",
-            "sync-qlib",
-        )
-        if today.weekday() in {4, 5, 6}
-        else ("build-derived-security-master", "build-derived-daily-bar", "build-derived-valuation")
+        "build-derived-security-master",
+        "build-derived-daily-bar",
+        "build-derived-valuation",
+        "sync-qlib",
     )
     assert by_id["build-derived-security-master"].command[1:] == (
         "-m",
@@ -1080,22 +1097,11 @@ def test_daily_steps_load_weekday_steps_from_config() -> None:
     steps = run_update_daily.daily_steps(date(2026, 6, 8), root=REPO_ROOT)
     by_id = {step.id: step for step in steps}
 
-    assert by_id["baostock-market-session"].schedule_policy == "daily"
-    assert by_id["baostock-market-session"].state_key_policy == "market_date"
-    assert by_id["baostock-market-session"].resume_policy == "always_run"
-    assert _dependency_ids(by_id["baostock-market-session"]) == ("baostock-basic",)
-    assert steps.index(by_id["baostock-basic"]) < steps.index(by_id["baostock-market-session"])
+    assert list(by_id) == ["cleanup", "akshare-spot-quote"]
+    assert by_id["cleanup"].schedule_policy == "daily"
+    assert by_id["akshare-spot-quote"].schedule_policy == "daily"
     assert "baostock-qfq" not in by_id
-    assert by_id["build-derived-security-master"].command[1:] == (
-        "-m",
-        "src.cli",
-        "build-derived",
-        "--target",
-        "security_master",
-        "--mode",
-        "incremental",
-        "--no-build-duckdb-views",
-    )
+    assert "build-derived-security-master" not in by_id
 
 
 def test_daily_steps_load_weekend_steps_from_config() -> None:
@@ -1136,7 +1142,7 @@ def test_daily_workflow_config_missing_required_field_is_clear(tmp_path: Path) -
         run_update_daily.daily_steps(date(2026, 6, 8), root=tmp_path)
 
 
-def test_run_daily_update_records_yjyg_em_step_on_weekday(tmp_path: Path) -> None:
+def test_run_daily_update_records_only_spot_quote_on_weekday(tmp_path: Path) -> None:
     _write_repo_workflow(tmp_path)
     state_file = tmp_path / "state.json"
     log_file = tmp_path / "run.log"
@@ -1153,9 +1159,10 @@ def test_run_daily_update_records_yjyg_em_step_on_weekday(tmp_path: Path) -> Non
         == 0
     )
 
-    assert "akshare-yjyg-em" in calls
-    states = _steps(state_file, "natural_date:2026-06-08")
-    assert states["akshare-yjyg-em"]["status"] == "success"
+    assert calls == ["cleanup", "akshare-spot-quote"]
+    market_states = _steps(state_file, "market_date:2026-06-08")
+    assert market_states["akshare-spot-quote"]["status"] == "success"
+    assert "natural_date:2026-06-08" not in _state(state_file)["runs"]
 
 
 @pytest.mark.parametrize("failed_step", ["baostock-market-session", "baostock-valuation-percentile"])
@@ -1170,7 +1177,7 @@ def test_core_baostock_failure_blocks_build_derived(tmp_path: Path, failed_step:
             root=tmp_path,
             state_file=state_file,
             run_log=log_file,
-            today=date(2026, 6, 8),
+            today=date(2026, 6, 6),
             command_runner=lambda step, log_path: calls.append(step.id) or (7 if step.id == failed_step else 0),
         )
         == 7
@@ -1178,7 +1185,7 @@ def test_core_baostock_failure_blocks_build_derived(tmp_path: Path, failed_step:
 
     blocked_step = "build-derived-daily-bar" if failed_step == "baostock-market-session" else "build-derived-valuation"
     assert blocked_step not in calls
-    states = _steps(state_file, "natural_date:2026-06-08")
+    states = _steps(state_file, "natural_date:2026-06-06")
     assert states[blocked_step]["status"] == "blocked"
     assert failed_step in states[blocked_step]["blocked_by"]
 
@@ -1219,9 +1226,7 @@ def test_weekend_daily_bar_failure_blocks_only_daily_bar_stage(tmp_path: Path) -
     assert "status pending" not in log_text
     assert states["build-derived-security-master"]["status"] == "success"
     assert states["build-derived-daily-bar"]["status"] == "blocked"
-    assert states["build-derived-daily-bar"]["reason"].startswith(
-        "degraded: cannot build target=daily_bar"
-    )
+    assert states["build-derived-daily-bar"]["reason"].startswith("degraded: cannot build target=daily_bar")
     assert states["build-derived-valuation"]["status"] == "success"
     assert states["build-duckdb-views"]["status"] == "blocked"
 
@@ -1323,7 +1328,7 @@ def test_optional_plain_skipped_does_not_block_build_derived(tmp_path: Path) -> 
             root=tmp_path,
             state_file=state_file,
             run_log=log_file,
-            today=date(2026, 6, 8),
+            today=date(2026, 6, 6),
             command_runner=lambda step, log_path: (
                 calls.append(step.id) or (7 if step.id == "akshare-spot-quote" else 0)
             ),
@@ -1334,8 +1339,8 @@ def test_optional_plain_skipped_does_not_block_build_derived(tmp_path: Path) -> 
     assert "build-derived-security-master" in calls
     assert "build-derived-daily-bar" in calls
     assert "build-derived-valuation" in calls
-    market_states = _steps(state_file, "market_date:2026-06-08")
-    natural_states = _steps(state_file, "natural_date:2026-06-08")
+    market_states = _steps(state_file, "market_date:2026-06-06")
+    natural_states = _steps(state_file, "natural_date:2026-06-06")
     assert market_states["akshare-spot-quote"]["status"] == "skipped"
     assert natural_states["build-derived-security-master"]["status"] == "success"
     assert natural_states["build-derived-daily-bar"]["status"] == "success"
@@ -1349,7 +1354,9 @@ def test_failed_optional_hard_status_blocks_followup(status: str) -> None:
     assert run_update_daily._blocked_dependencies(step, step_state) == ("optional-source",)
 
 
-@pytest.mark.parametrize("status", ["failed", "failed_resource_locked", "failed_timeout_cleanup", "blocked", "abandoned"])
+@pytest.mark.parametrize(
+    "status", ["failed", "failed_resource_locked", "failed_timeout_cleanup", "blocked", "abandoned"]
+)
 def test_soft_dependency_failure_does_not_block(status: str) -> None:
     soft_dep = run_update_daily.DailyDependency("soft-source", soft=True)
     hard_dep = run_update_daily.DailyDependency("hard-source")
@@ -2023,3 +2030,456 @@ def test_orchestrator_optional_timeout_cleanup_failure_stops(tmp_path: Path, mon
     states = _steps(state_file, "natural_date:2026-06-08")
     assert states["optional-timeout"]["status"] == "failed_timeout_cleanup"
     assert "after-timeout" not in states
+
+
+# ---------------------------------------------------------------------------
+# Step Health integration tests
+# ---------------------------------------------------------------------------
+
+
+def test_step_result_path_layout() -> None:
+    base = Path("/tmp/fake")
+    step = run_update_daily.DailyStep("my-step", "my step", ("cmd",))
+    path = run_update_daily._step_result_path(base, "run_instance:20260606_180000", step)
+    assert path == Path("/tmp/fake/data/metadata/step_results/20260606_180000/my-step.json")
+
+
+def test_critical_derived_parquet_available_returns_false_when_missing(tmp_path: Path) -> None:
+    assert run_update_daily._critical_derived_parquet_available(tmp_path) is False
+
+
+def test_critical_derived_parquet_available_returns_false_when_partial(tmp_path: Path) -> None:
+    parquet_root = tmp_path / "data" / "parquet"
+    (parquet_root / "cn_security_master" / "code=sh.600000").mkdir(parents=True)
+    (parquet_root / "cn_security_master" / "code=sh.600000" / "data.parquet").write_bytes(b"")
+    # cn_stock_daily_bar and cn_stock_valuation missing
+    assert run_update_daily._critical_derived_parquet_available(tmp_path) is False
+
+
+def test_critical_derived_parquet_available_returns_true_when_all_present(tmp_path: Path) -> None:
+    parquet_root = tmp_path / "data" / "parquet"
+    for dataset_id in run_update_daily.CRITICAL_DERIVED_DATASETS_FOR_VIEWS:
+        dataset_dir = parquet_root / dataset_id / "partition=1"
+        dataset_dir.mkdir(parents=True)
+        (dataset_dir / "data.parquet").write_bytes(b"")
+    assert run_update_daily._critical_derived_parquet_available(tmp_path) is True
+
+
+def test_critical_derived_parquet_ignores_tmp_files(tmp_path: Path) -> None:
+    parquet_root = tmp_path / "data" / "parquet"
+    for dataset_id in run_update_daily.CRITICAL_DERIVED_DATASETS_FOR_VIEWS:
+        dataset_dir = parquet_root / dataset_id
+        dataset_dir.mkdir(parents=True)
+        # Only tmp parquet files should not count
+        (dataset_dir / "data.tmp.parquet").write_bytes(b"")
+    assert run_update_daily._critical_derived_parquet_available(tmp_path) is False
+
+
+def _write_critical_derived_parquet(root: Path) -> None:
+    """Create minimal parquet files for all critical derived datasets."""
+    parquet_root = root / "data" / "parquet"
+    for dataset_id in run_update_daily.CRITICAL_DERIVED_DATASETS_FOR_VIEWS:
+        dataset_dir = parquet_root / dataset_id / "partition=1"
+        dataset_dir.mkdir(parents=True, exist_ok=True)
+        (dataset_dir / "data.parquet").write_bytes(b"PAR1")
+
+
+def test_baostock_market_session_degraded_summary_lets_build_derived_continue(tmp_path: Path) -> None:
+    _write_repo_workflow(tmp_path)
+    state_file = tmp_path / "state.json"
+    log_file = tmp_path / "run.log"
+    calls: list[str] = []
+
+    def runner(step: run_update_daily.DailyStep, log_path: Path) -> int:
+        calls.append(step.id)
+        if step.id == "baostock-market-session":
+            _write_summary_for_current_step(
+                "success_degraded",
+                reason="degraded: 1 of 200 records failed",
+                failed_records=1,
+            )
+        return 0
+
+    assert (
+        run_update_daily.run_daily_update(
+            root=tmp_path,
+            state_file=state_file,
+            run_log=log_file,
+            today=date(2026, 6, 6),
+            now=lambda: datetime(2026, 6, 6, 1, 0),
+            command_runner=runner,
+        )
+        == 0
+    )
+
+    assert "baostock-market-session" in calls
+    assert "build-derived-daily-bar" in calls
+    assert "build-derived-valuation" in calls
+    assert "build-duckdb-views" in calls
+    market_states = _steps(state_file, "market_date:2026-06-06")
+    natural_states = _steps(state_file, "natural_date:2026-06-06")
+    assert market_states["baostock-market-session"]["status"] == "success_degraded"
+    assert market_states["baostock-market-session"]["failed_count"] == 1
+    assert market_states["baostock-market-session"]["record_count"] == 200
+    assert "health_summary_path" in market_states["baostock-market-session"]
+    # Downstream should inherit degraded reason
+    assert natural_states["build-derived-daily-bar"]["status"] == "success_degraded"
+    assert "upstream dependency baostock-market-session" in natural_states["build-derived-daily-bar"]["reason"]
+
+
+def test_baostock_market_session_failed_summary_blocks_downstream(tmp_path: Path) -> None:
+    _write_repo_workflow(tmp_path)
+    state_file = tmp_path / "state.json"
+    log_file = tmp_path / "run.log"
+    calls: list[str] = []
+
+    def runner(step: run_update_daily.DailyStep, log_path: Path) -> int:
+        calls.append(step.id)
+        if step.id == "baostock-market-session":
+            _write_summary_for_current_step("failed", reason="fatal: metadata failure")
+        return 0
+
+    # Even though exit_code is 0, the failed summary should make final exit non-zero
+    assert (
+        run_update_daily.run_daily_update(
+            root=tmp_path,
+            state_file=state_file,
+            run_log=log_file,
+            today=date(2026, 6, 6),
+            now=lambda: datetime(2026, 6, 6, 1, 0),
+            command_runner=runner,
+        )
+        != 0
+    )
+
+    assert "baostock-market-session" in calls
+    assert "build-derived-daily-bar" not in calls
+    market_states = _steps(state_file, "market_date:2026-06-06")
+    natural_states = _steps(state_file, "natural_date:2026-06-06")
+    assert market_states["baostock-market-session"]["status"] == "failed"
+    assert natural_states["build-derived-daily-bar"]["status"] == "blocked"
+
+
+def test_akshare_valuation_full_degraded_summary_lets_build_derived_continue(tmp_path: Path) -> None:
+    _write_repo_workflow(tmp_path)
+    state_file = tmp_path / "state.json"
+    log_file = tmp_path / "run.log"
+    calls: list[str] = []
+
+    def runner(step: run_update_daily.DailyStep, log_path: Path) -> int:
+        calls.append(step.id)
+        if step.id == "akshare-valuation-full":
+            _write_summary_for_current_step(
+                "success_degraded",
+                reason="degraded: 2 of 500 codes timed out",
+                failed_records=2,
+            )
+        return 0
+
+    assert (
+        run_update_daily.run_daily_update(
+            root=tmp_path,
+            state_file=state_file,
+            run_log=log_file,
+            today=date(2026, 6, 6),
+            now=lambda: datetime(2026, 6, 6, 1, 0),
+            command_runner=runner,
+        )
+        == 0
+    )
+
+    assert "akshare-valuation-full" in calls
+    assert "build-derived-valuation" in calls
+    market_states = _steps(state_file, "market_date:2026-06-06")
+    natural_states = _steps(state_file, "natural_date:2026-06-06")
+    assert market_states["akshare-valuation-full"]["status"] == "success_degraded"
+    assert natural_states["build-derived-valuation"]["status"] == "success_degraded"
+    assert "upstream dependency akshare-valuation-full" in natural_states["build-derived-valuation"]["reason"]
+
+
+def test_akshare_daily_bar_degraded_summary_lets_build_derived_continue(tmp_path: Path) -> None:
+    _write_repo_workflow(tmp_path)
+    state_file = tmp_path / "state.json"
+    log_file = tmp_path / "run.log"
+    calls: list[str] = []
+
+    def runner(step: run_update_daily.DailyStep, log_path: Path) -> int:
+        calls.append(step.id)
+        if step.id == "akshare-daily-bar":
+            _write_summary_for_current_step(
+                "success_degraded",
+                reason="degraded: 1 of 300 adjustment tasks failed",
+                failed_records=1,
+            )
+        return 0
+
+    assert (
+        run_update_daily.run_daily_update(
+            root=tmp_path,
+            state_file=state_file,
+            run_log=log_file,
+            today=date(2026, 6, 6),
+            now=lambda: datetime(2026, 6, 6, 1, 0),
+            command_runner=runner,
+        )
+        == 0
+    )
+
+    assert "akshare-daily-bar" in calls
+    assert "build-derived-daily-bar" in calls
+    market_states = _steps(state_file, "market_date:2026-06-06")
+    assert market_states["akshare-daily-bar"]["status"] == "success_degraded"
+
+
+def test_build_duckdb_views_continues_when_upstream_success_degraded(tmp_path: Path) -> None:
+    _write_repo_workflow(tmp_path)
+    state_file = tmp_path / "state.json"
+    log_file = tmp_path / "run.log"
+    calls: list[str] = []
+
+    def runner(step: run_update_daily.DailyStep, log_path: Path) -> int:
+        calls.append(step.id)
+        if step.id == "build-derived-daily-bar":
+            _write_summary_for_current_step("success_degraded", reason="degraded: upstream baostock")
+        return 0
+
+    assert (
+        run_update_daily.run_daily_update(
+            root=tmp_path,
+            state_file=state_file,
+            run_log=log_file,
+            today=date(2026, 6, 6),
+            now=lambda: datetime(2026, 6, 6, 1, 0),
+            command_runner=runner,
+        )
+        == 0
+    )
+
+    assert "build-duckdb-views" in calls
+    natural_states = _steps(state_file, "natural_date:2026-06-06")
+    assert natural_states["build-derived-daily-bar"]["status"] == "success_degraded"
+    assert natural_states["build-duckdb-views"]["status"] == "success_degraded"
+    assert "upstream dependency build-derived-daily-bar" in natural_states["build-duckdb-views"]["reason"]
+
+
+def test_build_duckdb_views_stale_rebuild_when_upstream_failed_but_parquet_exists(tmp_path: Path) -> None:
+    _write_repo_workflow(tmp_path)
+    _write_critical_derived_parquet(tmp_path)
+    state_file = tmp_path / "state.json"
+    log_file = tmp_path / "run.log"
+    calls: list[str] = []
+
+    def runner(step: run_update_daily.DailyStep, log_path: Path) -> int:
+        calls.append(step.id)
+        # build-derived-daily-bar fails (exit code 7), but critical parquet exists
+        if step.id == "build-derived-daily-bar":
+            return 7
+        return 0
+
+    # Final exit code should be non-zero because build-derived-daily-bar failed
+    result = run_update_daily.run_daily_update(
+        root=tmp_path,
+        state_file=state_file,
+        run_log=log_file,
+        today=date(2026, 6, 6),
+        now=lambda: datetime(2026, 6, 6, 1, 0),
+        command_runner=runner,
+    )
+    assert result != 0
+
+    assert "build-derived-daily-bar" in calls
+    assert "build-duckdb-views" in calls
+    natural_states = _steps(state_file, "natural_date:2026-06-06")
+    assert natural_states["build-derived-daily-bar"]["status"] == "failed"
+    # build-duckdb-views should run with stale-aware reason
+    assert natural_states["build-duckdb-views"]["status"] == "success_degraded"
+    assert "critical derived parquet exists" in natural_states["build-duckdb-views"]["reason"]
+    assert "stale parquet" in natural_states["build-duckdb-views"]["reason"]
+
+
+def test_build_duckdb_views_blocked_when_upstream_failed_and_parquet_missing(tmp_path: Path) -> None:
+    _write_repo_workflow(tmp_path)
+    # Do NOT create critical derived parquet files
+    state_file = tmp_path / "state.json"
+    log_file = tmp_path / "run.log"
+    calls: list[str] = []
+
+    def runner(step: run_update_daily.DailyStep, log_path: Path) -> int:
+        calls.append(step.id)
+        if step.id == "build-derived-daily-bar":
+            return 7
+        return 0
+
+    result = run_update_daily.run_daily_update(
+        root=tmp_path,
+        state_file=state_file,
+        run_log=log_file,
+        today=date(2026, 6, 6),
+        now=lambda: datetime(2026, 6, 6, 1, 0),
+        command_runner=runner,
+    )
+    assert result != 0
+
+    assert "build-derived-daily-bar" in calls
+    assert "build-duckdb-views" not in calls
+    natural_states = _steps(state_file, "natural_date:2026-06-06")
+    assert natural_states["build-derived-daily-bar"]["status"] == "failed"
+    assert natural_states["build-duckdb-views"]["status"] == "blocked"
+    assert "build-derived-daily-bar" in natural_states["build-duckdb-views"]["blocked_by"]
+
+
+def test_build_duckdb_views_stale_rebuild_uses_stale_reason_when_valuation_failed(tmp_path: Path) -> None:
+    _write_repo_workflow(tmp_path)
+    _write_critical_derived_parquet(tmp_path)
+    state_file = tmp_path / "state.json"
+    log_file = tmp_path / "run.log"
+    calls: list[str] = []
+
+    def runner(step: run_update_daily.DailyStep, log_path: Path) -> int:
+        calls.append(step.id)
+        if step.id == "build-derived-valuation":
+            return 7
+        return 0
+
+    result = run_update_daily.run_daily_update(
+        root=tmp_path,
+        state_file=state_file,
+        run_log=log_file,
+        today=date(2026, 6, 6),
+        now=lambda: datetime(2026, 6, 6, 1, 0),
+        command_runner=runner,
+    )
+    assert result != 0
+
+    assert "build-duckdb-views" in calls
+    natural_states = _steps(state_file, "natural_date:2026-06-06")
+    assert natural_states["build-derived-valuation"]["status"] == "failed"
+    assert natural_states["build-duckdb-views"]["status"] == "success_degraded"
+    assert "stale parquet" in natural_states["build-duckdb-views"]["reason"]
+
+
+def test_strict_build_derived_failure_still_blocks_without_summary(tmp_path: Path) -> None:
+    """build-derived is strict by default; a failed record must still fail it."""
+    _write_repo_workflow(tmp_path)
+    state_file = tmp_path / "state.json"
+    log_file = tmp_path / "run.log"
+    calls: list[str] = []
+
+    def runner(step: run_update_daily.DailyStep, log_path: Path) -> int:
+        calls.append(step.id)
+        # build-derived-security-master returns failure exit code
+        if step.id == "build-derived-security-master":
+            return 7
+        return 0
+
+    result = run_update_daily.run_daily_update(
+        root=tmp_path,
+        state_file=state_file,
+        run_log=log_file,
+        today=date(2026, 6, 6),
+        now=lambda: datetime(2026, 6, 6, 1, 0),
+        command_runner=runner,
+    )
+    assert result != 0
+    assert "build-derived-daily-bar" not in calls
+    natural_states = _steps(state_file, "natural_date:2026-06-06")
+    assert natural_states["build-derived-security-master"]["status"] == "failed"
+    assert natural_states["build-derived-daily-bar"]["status"] == "blocked"
+
+
+def test_orchestrator_restores_env_var_after_step_run(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """QDC_STEP_RESULT_PATH should be unset after the orchestrator runs a step."""
+    _write_repo_workflow(tmp_path)
+    state_file = tmp_path / "state.json"
+    log_file = tmp_path / "run.log"
+    monkeypatch.delenv(run_update_daily.STEP_RESULT_PATH_ENV, raising=False)
+
+    run_update_daily.run_daily_update(
+        root=tmp_path,
+        state_file=state_file,
+        run_log=log_file,
+        today=date(2026, 6, 6),
+        now=lambda: datetime(2026, 6, 6, 1, 0),
+        command_runner=lambda step, log_path: 0,
+    )
+    # Env var should not leak outside the orchestrator
+    assert run_update_daily.STEP_RESULT_PATH_ENV not in os.environ
+
+
+def test_orchestrator_preserves_existing_env_var_after_step_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """If QDC_STEP_RESULT_PATH was already set, it should be restored."""
+    _write_repo_workflow(tmp_path)
+    state_file = tmp_path / "state.json"
+    log_file = tmp_path / "run.log"
+    existing_path = str(tmp_path / "preexisting.json")
+    monkeypatch.setenv(run_update_daily.STEP_RESULT_PATH_ENV, existing_path)
+
+    run_update_daily.run_daily_update(
+        root=tmp_path,
+        state_file=state_file,
+        run_log=log_file,
+        today=date(2026, 6, 6),
+        now=lambda: datetime(2026, 6, 6, 1, 0),
+        command_runner=lambda step, log_path: 0,
+    )
+    assert os.environ.get(run_update_daily.STEP_RESULT_PATH_ENV) == existing_path
+
+
+def test_orchestrator_records_health_summary_fields_in_state(tmp_path: Path) -> None:
+    _write_repo_workflow(tmp_path)
+    state_file = tmp_path / "state.json"
+    log_file = tmp_path / "run.log"
+
+    def runner(step: run_update_daily.DailyStep, log_path: Path) -> int:
+        if step.id == "baostock-market-session":
+            _write_summary_for_current_step(
+                "success_degraded",
+                reason="degraded: 3 codes failed",
+                failed_records=3,
+            )
+        return 0
+
+    run_update_daily.run_daily_update(
+        root=tmp_path,
+        state_file=state_file,
+        run_log=log_file,
+        today=date(2026, 6, 6),
+        now=lambda: datetime(2026, 6, 6, 1, 0),
+        command_runner=runner,
+    )
+    market_states = _steps(state_file, "market_date:2026-06-06")
+    row = market_states["baostock-market-session"]
+    assert row["status"] == "success_degraded"
+    assert row["record_count"] == 200
+    assert row["success_count"] == 197
+    assert row["failed_count"] == 3
+    assert row["failed_ratio"] == 3 / 200.0
+    assert "sh.699999" in row["failed_codes_sample"]
+    assert "health_summary_path" in row
+
+
+def test_success_degraded_does_not_cause_nonzero_final_exit(tmp_path: Path) -> None:
+    _write_repo_workflow(tmp_path)
+    state_file = tmp_path / "state.json"
+    log_file = tmp_path / "run.log"
+
+    def runner(step: run_update_daily.DailyStep, log_path: Path) -> int:
+        if step.id == "baostock-market-session":
+            _write_summary_for_current_step("success_degraded", reason="degraded")
+        if step.id == "akshare-valuation-full":
+            _write_summary_for_current_step("success_degraded", reason="degraded")
+        return 0
+
+    assert (
+        run_update_daily.run_daily_update(
+            root=tmp_path,
+            state_file=state_file,
+            run_log=log_file,
+            today=date(2026, 6, 6),
+            now=lambda: datetime(2026, 6, 6, 1, 0),
+            command_runner=runner,
+        )
+        == 0
+    )

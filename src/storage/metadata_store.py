@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import time
-from collections.abc import Iterator
+from collections.abc import Collection, Iterator
 from contextlib import contextmanager, suppress
 from pathlib import Path
 from threading import RLock
+from typing import Any, cast
 from weakref import WeakValueDictionary
 
 import duckdb
@@ -245,6 +246,28 @@ class DuckDBMetadataStore:
                 ).df()
             return _clean_dataframe_for_schema(df, DATASET_PARTITION_MANIFEST_SCHEMA)
 
+    def read_dataset_partition_manifest_batch(
+        self,
+        dataset_ids: Collection[str],
+    ) -> pd.DataFrame:
+        """Load manifests for multiple datasets in a single DuckDB query.
+
+        This eliminates the N+1 query pattern where the derived build planner
+        previously called ``read_dataset_partition_manifest`` once per source
+        dataset and then once per security via ``_manifest_row``.
+        """
+
+        ids = [str(value) for value in dataset_ids if value]
+        if not ids:
+            return _clean_dataframe_for_schema(pd.DataFrame(), DATASET_PARTITION_MANIFEST_SCHEMA)
+        with self._connection() as conn:
+            placeholders = ", ".join("?" * len(ids))
+            df = conn.execute(
+                f"SELECT * FROM dataset_partition_manifest WHERE dataset IN ({placeholders})",
+                ids,
+            ).df()
+            return _clean_dataframe_for_schema(df, DATASET_PARTITION_MANIFEST_SCHEMA)
+
     def delete_dataset_partition_manifest(self, dataset: str, partition_column: str, partition_value: str) -> None:
         with self._connection() as conn:
             conn.execute(
@@ -257,16 +280,66 @@ class DuckDBMetadataStore:
                 [dataset, partition_column, partition_value],
             )
 
+    @contextmanager
+    def manifest_write_session(self) -> Iterator[ManifestWriteSession]:
+        """Open a single-writer metadata session for an entire derived build.
+
+        One DuckDB connection is opened at entry and closed at exit. Each
+        ``upsert_partition`` / ``delete_partition`` call runs in its own short
+        transaction so a failure never leaves the connection in a half-commit
+        state. This replaces the previous pattern of opening a new connection
+        per partition (or one giant batch upsert with a large failure window).
+
+        The lock is held ONLY during connect + initialize so worker threads
+        (which create their own short-lived ``ParquetStore`` / ``DuckDBMetadataStore``
+        instances that share the same per-file lock via :func:`_lock_for`) can
+        finalize those instances without deadlocking against this session. The
+        returned session owns its own connection and is accessed only by the
+        coordinator thread — DuckDB connections are not thread-safe, but the
+        coordinator is the sole writer.
+        """
+
+        self.duckdb_file.parent.mkdir(parents=True, exist_ok=True)
+        with self._lock:
+            conn = self._connect()
+            try:
+                self._ensure_initialized(conn)
+            except Exception:
+                conn.close()
+                raise
+        try:
+            session = ManifestWriteSession(conn)
+            yield session
+        finally:
+            conn.close()
+
     def initialize(self) -> None:
         with self._connection():
             return
 
     def close(self) -> None:
-        with self._lock:
+        """Close any cached connection owned by THIS instance.
+
+        Uses a non-blocking lock acquire so a ``__del__`` triggered during GC
+        inside a worker thread can never deadlock against another thread that
+        currently holds the shared per-file lock (e.g. the main thread holding
+        a ``manifest_write_session``). If the lock is unavailable, the cached
+        connection is left to the OS/GC; it is read-only safe to skip.
+        """
+
+        acquired = self._lock.acquire(blocking=False)
+        try:
+            if not acquired:
+                # Another thread owns the lock; do not block GC. The owner is
+                # responsible for closing its own connection.
+                return
             if self._conn is not None:
                 self._conn.close()
                 self._conn = None
             self._initialized = False
+        finally:
+            if acquired:
+                self._lock.release()
 
     def __del__(self) -> None:
         with suppress(Exception):
@@ -393,6 +466,88 @@ class DuckDBMetadataStore:
             conn.unregister("incoming")
 
 
+class ManifestWriteSession:
+    """Single-connection metadata writer for one derived build.
+
+    Created via :meth:`DuckDBMetadataStore.manifest_write_session`. The session
+    owns one DuckDB connection for its lifetime; each
+    ``upsert_partition`` / ``delete_partition`` call runs in its own short
+    transaction so a failure on one partition never pollutes the connection
+    state for the next partition.
+
+    Only the coordinator thread should call these methods — DuckDB connections
+    are not thread-safe.
+    """
+
+    def __init__(self, conn: duckdb.DuckDBPyConnection) -> None:
+        self._conn = conn
+        self._upserts = 0
+        self._deletes = 0
+
+    @property
+    def upsert_count(self) -> int:
+        return self._upserts
+
+    @property
+    def delete_count(self) -> int:
+        return self._deletes
+
+    def upsert_partition(self, row: dict[str, object]) -> None:
+        """Upsert one manifest row in a short transaction."""
+
+        incoming = _clean_dataframe_for_schema(pd.DataFrame([row]), DATASET_PARTITION_MANIFEST_SCHEMA)
+        if incoming.empty:
+            return
+        self._register_and_execute(
+            incoming,
+            """
+            DELETE FROM dataset_partition_manifest
+            WHERE EXISTS (
+                SELECT 1
+                FROM incoming
+                WHERE incoming.dataset = dataset_partition_manifest.dataset
+                  AND incoming.partition_column = dataset_partition_manifest.partition_column
+                  AND incoming.partition_value = dataset_partition_manifest.partition_value
+            )
+            """,
+            "INSERT INTO dataset_partition_manifest SELECT * FROM incoming",
+        )
+        self._upserts += 1
+
+    def delete_partition(
+        self,
+        dataset_id: str,
+        partition_column: str,
+        partition_value: str,
+    ) -> None:
+        """Delete one manifest row in a short transaction."""
+
+        self._conn.execute(
+            """
+            DELETE FROM dataset_partition_manifest
+            WHERE dataset = ?
+              AND partition_column = ?
+              AND partition_value = ?
+            """,
+            [dataset_id, partition_column, partition_value],
+        )
+        self._deletes += 1
+
+    def _register_and_execute(self, incoming: pd.DataFrame, *sqls: str) -> None:
+        self._conn.register("incoming", incoming)
+        try:
+            self._conn.execute("BEGIN TRANSACTION")
+            try:
+                for sql in sqls:
+                    self._conn.execute(sql)
+            except Exception:
+                self._conn.execute("ROLLBACK")
+                raise
+            self._conn.execute("COMMIT")
+        finally:
+            self._conn.unregister("incoming")
+
+
 def _clean_dataframe_for_schema(df: pd.DataFrame, schema: pa.Schema) -> pd.DataFrame:
     cleaned = pd.DataFrame(index=df.index)
     for field in schema:
@@ -408,7 +563,7 @@ def _is_empty_frame(df: pd.DataFrame | None) -> bool:
 def _coerce_series(series: pd.Series, arrow_type: pa.DataType) -> pd.Series:
     if pa.types.is_date32(arrow_type) or pa.types.is_date64(arrow_type):
         dates = pd.to_datetime(_replace_null_like(series), errors="coerce")
-        return dates.dt.date.where(dates.notna(), None)
+        return dates.dt.date.where(dates.notna(), cast(Any, None))
     if pa.types.is_timestamp(arrow_type):
         return pd.to_datetime(_replace_null_like(series), errors="coerce").dt.floor("ms")
     if pa.types.is_integer(arrow_type):

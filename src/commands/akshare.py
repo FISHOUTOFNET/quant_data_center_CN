@@ -4,7 +4,13 @@ from __future__ import annotations
 
 import click
 
-from src.commands.records import echo_pipeline_records, raise_for_failed_records
+from src.commands.records import echo_pipeline_records, finalize_pipeline_records
+from src.pipeline.step_health import (
+    StepHealthPolicy,
+    akshare_daily_bar_policy,
+    akshare_valuation_full_policy,
+    strict_policy,
+)
 from src.sources.akshare.client import normalize_akshare_code
 from src.sources.akshare.pipeline import AkShareUpdateRequest
 from src.sources.akshare.pipeline import update_akshare as run_update_akshare
@@ -17,6 +23,25 @@ def _validate_akshare_codes(ctx: click.Context, param: click.Parameter, value: t
         return tuple(normalize_akshare_code(item) for item in value)
     except ValueError as exc:
         raise click.BadParameter(str(exc)) from exc
+
+
+def _akshare_policy_for(request: AkShareUpdateRequest) -> StepHealthPolicy:
+    """Resolve a step health policy for the given AkShare update request.
+
+    Only ``valuation`` (full mode) and ``daily_bar`` opt in to the tolerant
+    degraded-success policy. All other targets (delist, spot_quote,
+    financial_report, yjyg_em, yysj_em, report_disclosure) keep the default
+    strict policy. Optional steps in the workflow continue to use the
+    orchestrator's optional-step semantics; nothing here changes that.
+    """
+
+    target = str(getattr(request, "target", "") or "")
+    mode = str(getattr(request, "mode", "") or "")
+    if target == "valuation" and mode == "full":
+        return akshare_valuation_full_policy()
+    if target == "daily_bar":
+        return akshare_daily_bar_policy()
+    return strict_policy()
 
 
 def register_akshare_commands(root: click.Group) -> None:
@@ -108,4 +133,4 @@ def register_akshare_commands(root: click.Group) -> None:
         except RuntimeError as exc:
             raise click.ClickException(str(exc)) from exc
         echo_pipeline_records(records)
-        raise_for_failed_records(records, label="AkShare update")
+        finalize_pipeline_records(records, label="AkShare update", policy=_akshare_policy_for(request))

@@ -287,7 +287,7 @@ def _as_dataframe(value: object) -> pd.DataFrame:
     if value is None:
         return pd.DataFrame()
     if isinstance(value, pd.DataFrame):
-        return value.copy()
+        return cast(pd.DataFrame, value).copy()
     return pd.DataFrame(cast(Any, value))
 
 

@@ -78,10 +78,9 @@ def test_should_run_adjusted_market_session_matches_orchestrator_market_window_p
         )
 
         assert should_run_adjusted_market_session(natural, candidate, market, overridden) is expected
-        assert (
-            should_run_adjusted_market_session(natural, candidate, market, overridden)
-            == run_update_daily._schedule_policy_matches("market_window", ["all"], effective_dates)
-        )
+        assert should_run_adjusted_market_session(
+            natural, candidate, market, overridden
+        ) == run_update_daily._schedule_policy_matches("market_window", ["all"], effective_dates)
 
 
 def test_update_baostock_market_session_cli_uses_unadjusted_dataset_on_regular_trading_day(monkeypatch) -> None:
@@ -248,7 +247,7 @@ def test_daily_workflow_uses_single_baostock_market_session_step() -> None:
     assert not (OLD_BAOSTOCK_STEP_IDS & set(by_id))
     assert "baostock-market-session" in by_id
     market_session = by_id["baostock-market-session"]
-    assert market_session["schedule_policy"] == "daily"
+    assert market_session["schedule_policy"] == "market_window"
     assert market_session["state_key_policy"] == "market_date"
     assert market_session["resume_policy"] == "always_run"
     assert [item["step"] for item in market_session["depends_on"]] == ["baostock-basic"]
@@ -266,9 +265,9 @@ def test_default_daily_workflow_config_matches_market_session_shape() -> None:
     by_id = {step["id"]: step for step in steps}
 
     assert not (OLD_BAOSTOCK_STEP_IDS & set(by_id))
-    assert json.dumps(run_update_daily.DEFAULT_DAILY_WORKFLOW_CONFIG, ensure_ascii=False).find(
-        "baostock-unadjusted"
-    ) == -1
+    assert (
+        json.dumps(run_update_daily.DEFAULT_DAILY_WORKFLOW_CONFIG, ensure_ascii=False).find("baostock-unadjusted") == -1
+    )
     market_session = by_id["baostock-market-session"]
     assert market_session["schedule_policy"] == "daily"
     assert market_session["resume_policy"] == "always_run"

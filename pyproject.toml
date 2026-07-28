@@ -26,7 +26,13 @@ dev = [
     "coverage[toml]",
     "pandas-stubs",
     "pre-commit",
-    "pyright",
+    # Pinned to the version validated by the latest green CI on this branch
+    # (run 30183222509, Python 3.10 + 3.12 jobs both green). Pinning makes
+    # Pyright results reproducible across local and CI environments and is
+    # required for the baseline-compare script (scripts/check_pyright_baseline.ps1)
+    # to produce a stable main-vs-feature diff. Bump ONLY after re-validating
+    # both Python matrix jobs on CI.
+    "pyright==1.1.411",
     "pytest",
     "pytest-cov",
     "ruff",
@@ -46,6 +52,7 @@ pythonpath = ["."]
 markers = [
     "performance: long-running performance or stress tests, excluded from default pytest runs",
     "slow: long-running integration, performance, or stress tests excluded from default pytest runs",
+    "windows_junction: real Windows junction integration tests, statically skipped on non-Windows via skipif",
 ]
 
 [tool.coverage.run]

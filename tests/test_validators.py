@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import date
+
 import pandas as pd
 import pytest
 
@@ -108,7 +110,7 @@ def _spot_em_sample() -> pd.DataFrame:
     return pd.DataFrame(
         [
             {
-                "trade_date": "2024-01-03",
+                "trade_date": date(2024, 1, 3),
                 "code": "600000",
                 "source_symbol": "600000",
                 "name": "PF Bank",
@@ -138,7 +140,7 @@ def _hist_sample() -> pd.DataFrame:
     return pd.DataFrame(
         [
             {
-                "date": "2024-01-03",
+                "date": date(2024, 1, 3),
                 "code": "600000",
                 "source_symbol": "600000",
                 "open": 8.2,

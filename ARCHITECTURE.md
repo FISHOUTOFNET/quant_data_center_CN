@@ -239,7 +239,7 @@ AkShare pipeline 只保存规范化后的 Parquet 数据和统一运行元数据
 - `optional` / `timeout_seconds` / `enabled`：保持原有 optional、超时和开关语义。
 - `when`：支持 `weekday`、`weekend`、`friday_to_sunday` 和具体英文星期名。
 
-默认 flow 保持现有行为：工作日运行核心源更新、`financial_report` incremental、`build-derived --mode incremental` 和 `build-duckdb-views`；周五至周日额外运行 delist、复权、AkShare valuation full、report disclosure、yysj、AkShare daily bar incremental 与 qlib sync。
+默认 flow 将普通周一至周四交易日收缩为 `cleanup` 与 `akshare-spot-quote`，只采集周末无法还原的收盘快照；周五至周日、非交易日回退或显式 `--market-date` 修复进入 market-window，运行 calendar、delist、Baostock market-session/估值分位、AkShare valuation/report disclosure/yysj/yjyg/financial_report/daily bar、qlib sync，并在最后执行 `build-derived --mode incremental` 与 `build-duckdb-views`。
 
 ## Data Registry
 

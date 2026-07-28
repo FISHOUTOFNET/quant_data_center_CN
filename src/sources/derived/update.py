@@ -57,6 +57,7 @@ def build_derived_datasets(
     build_views: bool = True,
     refresh_registry: bool = True,
     now: Callable[[], datetime] | None = None,
+    max_workers: int | None = None,
 ) -> list[dict[str, object]]:
     if mode not in {"full", "incremental"}:
         raise ValueError(f"Unsupported derived build mode: {mode}")
@@ -91,16 +92,19 @@ def build_derived_datasets(
                 "valuation": build_cn_stock_valuation,
             }[target]
             target_security_ids = _target_security_ids(target, mode, incremental_plan or IncrementalPlan({}, (), {}))
-            results.append(
-                builder(
-                    root=store.root,
-                    security_ids=target_security_ids,
-                    changed_since=changed_since,
-                    build_views=False,
-                    refresh_registry=False,
-                    now=now,
-                )
-            )
+            builder_kwargs: dict[str, object] = {
+                "root": store.root,
+                "security_ids": target_security_ids,
+                "changed_since": changed_since,
+                "build_views": False,
+                "refresh_registry": False,
+                "now": now,
+            }
+            # Only daily_bar (and future BuildPlanner-based targets) consume
+            # max_workers. Pass it through where the builder accepts it.
+            if target in ("daily_bar",):
+                builder_kwargs["max_workers"] = max_workers
+            results.append(builder(**builder_kwargs))
 
         if refresh_registry:
             refresh_derived_registry(store, [str(result["dataset"]) for result in results])
@@ -156,6 +160,18 @@ def _resolve_incremental_plan(
         logger.info("Derived incremental build using explicit security_ids={}", explicit_security_ids)
         return IncrementalPlan(dict.fromkeys(target_ids, explicit_security_ids), (), {})
 
+    # ``daily_bar`` now uses the staged BuildPlanner which loads source manifests
+    # in a single batch query and computes each security's source signature
+    # exactly once. Pre-filtering changed security_ids here would re-introduce
+    # the N+1 manifest query (one ``current_source_signature_for_security`` call
+    # per security) that the BuildPlanner was designed to eliminate. We
+    # therefore pass an empty security_ids list to ``build_cn_stock_daily_bar``
+    # so the BuildPlanner handles change detection against all securities.
+    # ``valuation`` still uses the legacy per-security path until it is
+    # migrated to the BuildPlanner, so it retains the pre-filtering here.
+    daily_bar_uses_planner = "daily_bar" in target_ids
+    remaining_targets = tuple(t for t in target_ids if t != "daily_bar") if daily_bar_uses_planner else target_ids
+
     master = store.read_dataset("cn_security_master")
     if master.empty or "security_id" not in master.columns:
         reasons = dict.fromkeys(target_ids, "cn_security_master is missing or empty")
@@ -165,7 +181,7 @@ def _resolve_incremental_plan(
     full_targets: list[str] = []
     reasons: dict[str, str] = {}
     security_ids_by_target: dict[str, tuple[str, ...]] = {}
-    for target in target_ids:
+    for target in remaining_targets:
         dataset_id = DATASET_BY_TARGET[target]
         if not (store.parquet_dir / dataset_id).exists():
             full_targets.append(target)

@@ -23,6 +23,7 @@ from src.pipeline.common import (
     trading_range_bounds,
 )
 from src.pipeline.lifecycle import LifecycleTaskRef, PipelineMetadataBatch, refresh_dirty_registry, skipped_rows
+from src.pipeline.step_health import is_failure_status
 from src.sources.akshare.pipeline.capital_structure_pending import drain_capital_structure_pending
 from src.sources.baostock.adjustments import BAOSTOCK_CN_STOCK_ADJUSTMENT_FACTOR_DATASET, UNADJUSTED_DAILY_DATASET
 from src.sources.baostock.services import fetch_baostock_cn_stock_adjustment_factor, fetch_daily_bars, log_api_fetch
@@ -127,15 +128,10 @@ def _update_daily_with_direct_network(
 
 
 def _can_drain_capital_structure_pending(records: list[dict[str, object]]) -> bool:
-    if any(_is_failed_status(record.get("status")) for record in records):
+    if any(is_failure_status(record.get("status")) for record in records):
         logger.warning("Skipping AkShare capital structure pending drain because adjustment factor update failed")
         return False
     return True
-
-
-def _is_failed_status(value: object) -> bool:
-    status = str(value or "")
-    return status == "failed" or status.startswith("failed_")
 
 
 def _finish_update_daily(

@@ -191,13 +191,7 @@ def test_research_daily_bar_view_allows_missing_adjusted_and_factor_data(tmp_pat
 
 def test_build_views_removes_tmp_parquet_before_reading(tmp_path: Path) -> None:
     _write_baostock_daily(tmp_path, include_adjusted=False)
-    tmp_file = (
-        tmp_path
-        / "data"
-        / "parquet"
-        / "baostock_cn_stock_daily_bar_unadjusted"
-        / "stale.tmp.parquet"
-    )
+    tmp_file = tmp_path / "data" / "parquet" / "baostock_cn_stock_daily_bar_unadjusted" / "stale.tmp.parquet"
     tmp_file.write_text("not a parquet file", encoding="utf-8")
 
     DuckDBStore(root=tmp_path).build_views()

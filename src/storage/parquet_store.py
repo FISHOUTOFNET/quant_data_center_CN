@@ -6,7 +6,7 @@ import os
 import re
 import time
 import uuid
-from collections.abc import Mapping
+from collections.abc import Collection, Mapping
 from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
@@ -168,7 +168,6 @@ class ParquetStore:
             *akshare_a_stock_dirs,
             self.metadata_dir,
             self.root / "data" / "duckdb",
-            self.root / "logs",
         ]:
             directory.mkdir(parents=True, exist_ok=True)
         (self.root / "data" / "registry").mkdir(parents=True, exist_ok=True)
@@ -277,7 +276,7 @@ class ParquetStore:
         if pa.types.is_date32(arrow_type) or pa.types.is_date64(arrow_type):
             values = self._replace_null_like(series)
             dates = pd.to_datetime(values, errors="coerce")
-            return dates.dt.date.where(dates.notna(), None)
+            return dates.dt.date.where(dates.notna(), cast(Any, None))
         if pa.types.is_timestamp(arrow_type):
             values = self._replace_null_like(series)
             if pd.api.types.is_datetime64_any_dtype(values.dtype):
@@ -724,6 +723,14 @@ class ParquetStore:
 
     def read_dataset_partition_manifest(self, dataset: str | None = None) -> pd.DataFrame:
         return self._metadata_store.read_dataset_partition_manifest(dataset)
+
+    def read_dataset_partition_manifest_batch(self, dataset_ids: Collection[str]) -> pd.DataFrame:
+        """Load manifests for multiple datasets in a single DuckDB query.
+
+        See :meth:`DuckDBMetadataStore.read_dataset_partition_manifest_batch`.
+        """
+
+        return self._metadata_store.read_dataset_partition_manifest_batch(dataset_ids)
 
     def delete_dataset_partition_manifest(self, dataset: str, partition_column: str, partition_value: str) -> None:
         self._metadata_store.delete_dataset_partition_manifest(dataset, partition_column, partition_value)
