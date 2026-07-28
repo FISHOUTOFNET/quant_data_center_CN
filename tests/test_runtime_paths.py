@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 from src.tools import run_logging
-from src.utils import paths
+from src.utils import filesystem_safety, paths
 from src.utils.paths import LogRootAuthorizationError
 
 # ---------------------------------------------------------------------------
@@ -321,6 +321,142 @@ class TestRawIdentityRejectionSettings:
         runtime = paths.resolve_runtime_paths(root=tmp_path)
 
         assert runtime.logs_dir == external.resolve()
+
+    def test_settings_symlink_pointing_inside_repo_is_rejected(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A settings ``logs_dir`` that is a symlink pointing INSIDE the repo
+        is rejected at inspection time — it does NOT fall back to the default.
+        The raw-identity check runs before the repo-internal policy, so even
+        a symlink into the repo is rejected as a link-like node.
+        """
+
+        repo_internal_target = tmp_path / "internal-target"
+        repo_internal_target.mkdir()
+        link = _make_symlink(tmp_path, "link-to-internal", repo_internal_target)
+        if link is None:
+            pytest.skip("symlink not supported on this platform")
+
+        config_dir = tmp_path / "config"
+        config_dir.mkdir()
+        (config_dir / "settings.yaml").write_text(
+            f"project:\n  name: test\npaths:\n  logs_dir: {link.as_posix()}\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("QDC_ROOT", str(tmp_path))
+        monkeypatch.delenv("QDC_LOG_DIR", raising=False)
+
+        with pytest.raises(LogRootAuthorizationError, match="symlink"):
+            paths.resolve_runtime_paths(root=tmp_path)
+
+    def test_settings_inspection_failure_does_not_fallback(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """When ``inspect_filesystem_node`` raises ``OSError`` for the settings
+        ``logs_dir``, the authorization fails closed — it does NOT silently
+        fall back to the default path.
+        """
+
+        external = tmp_path.parent / "external_for_inspection_failure"
+        external.mkdir(parents=True, exist_ok=True)
+        config_dir = tmp_path / "config"
+        config_dir.mkdir()
+        (config_dir / "settings.yaml").write_text(
+            f"project:\n  name: test\npaths:\n  logs_dir: {external.as_posix()}\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("QDC_ROOT", str(tmp_path))
+        monkeypatch.delenv("QDC_LOG_DIR", raising=False)
+
+        original_inspect = filesystem_safety.inspect_filesystem_node
+
+        def fake_inspect(path: Path) -> filesystem_safety.FilesystemNodeInspection:
+            if Path(path) == external:
+                raise PermissionError("denied")
+            return original_inspect(path)
+
+        monkeypatch.setattr(filesystem_safety, "inspect_filesystem_node", fake_inspect)
+
+        with pytest.raises(LogRootAuthorizationError, match="cannot inspect"):
+            paths.resolve_runtime_paths(root=tmp_path)
+
+    def test_settings_resolve_failure_does_not_fallback(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """When ``.resolve()`` raises for the settings ``logs_dir``, the
+        authorization fails closed — it does NOT fall back to the default.
+        """
+
+        external = tmp_path.parent / "external_for_resolve_failure"
+        external.mkdir(parents=True, exist_ok=True)
+        config_dir = tmp_path / "config"
+        config_dir.mkdir()
+        (config_dir / "settings.yaml").write_text(
+            f"project:\n  name: test\npaths:\n  logs_dir: {external.as_posix()}\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("QDC_ROOT", str(tmp_path))
+        monkeypatch.delenv("QDC_LOG_DIR", raising=False)
+
+        original_resolve = Path.resolve
+
+        def fake_resolve(self: Path, *args: object, **kwargs: object) -> Path:
+            if self == external:
+                raise RuntimeError("resolve failed")
+            return original_resolve(self)
+
+        monkeypatch.setattr(Path, "resolve", fake_resolve)
+
+        with pytest.raises(LogRootAuthorizationError, match="cannot resolve"):
+            paths.resolve_runtime_paths(root=tmp_path)
+
+    def test_settings_symlink_loop_does_not_fallback(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A symlink loop in the settings ``logs_dir`` is rejected — it does
+        NOT fall back to the default. ``.resolve()`` raises ``RuntimeError``
+        for a loop, which the authorization wraps as a ``LinkLikeError`` →
+        ``LogRootAuthorizationError``.
+        """
+
+        loop_a = tmp_path.parent / "loop_a_for_settings"
+        loop_b = tmp_path.parent / "loop_b_for_settings"
+        try:
+            loop_a.symlink_to(loop_b)
+            loop_b.symlink_to(loop_a)
+        except OSError:
+            pytest.skip("symlink not supported on this platform")
+
+        config_dir = tmp_path / "config"
+        config_dir.mkdir()
+        (config_dir / "settings.yaml").write_text(
+            f"project:\n  name: test\npaths:\n  logs_dir: {loop_a.as_posix()}\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("QDC_ROOT", str(tmp_path))
+        monkeypatch.delenv("QDC_LOG_DIR", raising=False)
+
+        with pytest.raises(LogRootAuthorizationError, match="cannot resolve"):
+            paths.resolve_runtime_paths(root=tmp_path)
+
+    def test_settings_unconfigured_falls_back_to_default(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """When no ``paths.logs_dir`` is configured, the default source is
+        used (existing behavior preserved).
+        """
+
+        fake_app_data = tmp_path.parent / "fake_app_data_for_unconfigured"
+        fake_app_data.mkdir(parents=True, exist_ok=True)
+        # settings.yaml exists but has no paths.logs_dir.
+        config_dir = tmp_path / "config"
+        config_dir.mkdir()
+        (config_dir / "settings.yaml").write_text(
+            "project:\n  name: test\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("LOCALAPPDATA", str(fake_app_data))
+        monkeypatch.setenv("QDC_ROOT", str(tmp_path))
+        monkeypatch.delenv("QDC_LOG_DIR", raising=False)
+
+        runtime = paths.resolve_runtime_paths(root=tmp_path)
+
+        expected = fake_app_data / "QuantDataCenter" / "logs"
+        assert runtime.logs_dir == expected.resolve()
 
 
 class TestRawIdentityRejectionDefault:

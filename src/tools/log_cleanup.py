@@ -31,6 +31,7 @@ from pathlib import Path
 import click
 
 from src.utils import filesystem_safety, paths
+from src.utils.filesystem_safety import FilesystemNodeKind
 from src.utils.logging import logger
 from src.utils.paths import (
     LogRootAuthorizationError,
@@ -292,23 +293,33 @@ def _is_safe_delete_candidate(path: Path, root_resolved: Path) -> bool:
     swapped for a symlink/junction/reparse point, or moved outside the
     canonical managed root, between discovery and deletion.
 
-    Checks:
-    1. The candidate is NOT a symlink/junction/reparse point.
-    2. The candidate still lives inside the canonical managed root.
-    3. The candidate is still a regular log file (not a dir, not a non-log).
+    This is a NEW safety decision stage — it must re-inspect independently of
+    discovery. The single-lstat-per-stage constraint applies here, not a
+    single lstat across discovery + delete.
+
+    Checks (all must pass):
+    1. ``inspect_filesystem_node`` succeeds (FileNotFoundError / OSError /
+       ValueError → skip).
+    2. The candidate is a :data:`FilesystemNodeKind.REGULAR_FILE` (not a dir,
+       not a symlink/junction/reparse, not other).
+    3. ``.resolve()`` succeeds (symlink loop / OSError / ValueError → skip).
+    4. The resolved path still lives inside the canonical managed root.
+    5. The path still matches the log file naming/extension contract.
     """
 
-    if filesystem_safety.is_link_like_or_reparse(path):
+    try:
+        inspection = filesystem_safety.inspect_filesystem_node(path)
+    except (OSError, ValueError):
+        return False
+    if inspection.kind != FilesystemNodeKind.REGULAR_FILE:
         return False
     try:
         resolved = path.resolve()
-    except (OSError, RuntimeError):
+    except (OSError, RuntimeError, ValueError):
         return False
     if not (paths.is_path_inside(resolved, root_resolved) or resolved == root_resolved):
         return False
-    if path.suffix.lower() not in LOG_SUFFIXES:
-        return False
-    return path.is_file() and not path.is_dir()
+    return path.suffix.lower() in LOG_SUFFIXES
 
 
 def _discover_log_files(root: Path) -> list[_LogFile]:
@@ -324,6 +335,16 @@ def _discover_log_files(root: Path) -> list[_LogFile]:
 
     Log file candidates that are link-like/reparse are also rejected. The
     deletion boundary must never touch a link target's content.
+
+    Inspection failures (``OSError`` / ``ValueError``) are skip-and-log for
+    both directories and files — a node that cannot be inspected is NOT
+    treated as a safe regular node. ``FileNotFoundError`` (race: entry
+    vanished between ``os.scandir`` and ``inspect_filesystem_node``) is also
+    skipped silently.
+
+    Each entry is inspected exactly once (one ``os.lstat`` per safety
+    decision). ``Path.stat()`` for size/mtime is a separate call that does
+    not affect the safety decision.
     """
 
     discovered: list[_LogFile] = []
@@ -335,11 +356,28 @@ def _discover_log_files(root: Path) -> list[_LogFile]:
         kept_dirnames: list[str] = []
         for entry in dirnames:
             candidate = current_dir / entry
-            if filesystem_safety.is_link_like_or_reparse(candidate):
+            try:
+                inspection = filesystem_safety.inspect_filesystem_node(candidate)
+            except (OSError, ValueError) as exc:
+                logger.debug(
+                    "Pruning uninspectable directory from cleanup traversal: path={} error={}: {}",
+                    candidate,
+                    exc.__class__.__name__,
+                    exc,
+                )
+                continue
+            if inspection.is_link_like:
                 logger.debug(
                     "Pruning link-like directory from cleanup traversal: path={} kind={}",
                     candidate,
-                    filesystem_safety.describe_link_like(candidate),
+                    inspection.kind.name,
+                )
+                continue
+            if inspection.kind != FilesystemNodeKind.DIRECTORY:
+                logger.debug(
+                    "Pruning non-directory entry from cleanup traversal: path={} kind={}",
+                    candidate,
+                    inspection.kind.name,
                 )
                 continue
             kept_dirnames.append(entry)
@@ -347,30 +385,44 @@ def _discover_log_files(root: Path) -> list[_LogFile]:
 
         for name in filenames:
             file_path = current_dir / name
-            # Reject link-like/reparse file candidates (symlinks, junctions,
-            # other reparse points). The deletion boundary must never touch a
-            # link target's content, even if the link points inside the root.
-            if filesystem_safety.is_link_like_or_reparse(file_path):
+            try:
+                inspection = filesystem_safety.inspect_filesystem_node(file_path)
+            except (OSError, ValueError) as exc:
+                logger.debug(
+                    "Skipping uninspectable file in cleanup discovery: path={} error={}: {}",
+                    file_path,
+                    exc.__class__.__name__,
+                    exc,
+                )
+                continue
+            if inspection.is_link_like:
                 logger.debug(
                     "Skipping link-like file in cleanup discovery: path={} kind={}",
                     file_path,
-                    filesystem_safety.describe_link_like(file_path),
+                    inspection.kind.name,
+                )
+                continue
+            if inspection.kind != FilesystemNodeKind.REGULAR_FILE:
+                logger.debug(
+                    "Skipping non-regular file in cleanup discovery: path={} kind={}",
+                    file_path,
+                    inspection.kind.name,
                 )
                 continue
             try:
-                stat = file_path.stat()
+                file_stat = file_path.stat()
             except OSError:
                 continue
-            is_log = file_path.suffix.lower() in LOG_SUFFIXES and file_path.is_file() and not file_path.is_dir()
+            is_log = file_path.suffix.lower() in LOG_SUFFIXES
             is_run_log = is_log and current_dir.name == RUNS_SUBDIR
             run_id = _extract_run_id(file_path.name) if is_run_log else None
-            mtime = datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc)
+            mtime = datetime.fromtimestamp(file_stat.st_mtime, tz=timezone.utc)
             discovered.append(
                 _LogFile(
                     path=file_path,
-                    size=int(stat.st_size),
+                    size=int(file_stat.st_size),
                     mtime=mtime,
-                    mtime_timestamp=float(stat.st_mtime),
+                    mtime_timestamp=float(file_stat.st_mtime),
                     is_log_file=is_log,
                     is_run_log=is_run_log,
                     active_run_id=run_id,

@@ -52,6 +52,7 @@ pythonpath = ["."]
 markers = [
     "performance: long-running performance or stress tests, excluded from default pytest runs",
     "slow: long-running integration, performance, or stress tests excluded from default pytest runs",
+    "windows_junction: real Windows junction integration tests, statically skipped on non-Windows via skipif",
 ]
 
 [tool.coverage.run]

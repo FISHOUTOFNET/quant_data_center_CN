@@ -158,19 +158,36 @@ def _reject_unsafe_log_root(root: Path) -> None:
     symlink target can be swapped after authorization, so the deletion
     boundary must never depend on link resolution. Windows junctions/reparse
     points are rejected for the same reason.
+
+    Inspection failures (``OSError`` / ``PermissionError`` / ``ValueError``)
+    are fail-closed: a root that cannot be inspected is NOT treated as safe.
+    Only ``FileNotFoundError`` is allowed (the directory may be created later
+    by ``ensure_managed_log_root``).
     """
 
     # ANY symlink/junction/reparse point at the root — reject unconditionally.
     # The marker binds to a directory identity; a link target can be swapped
     # after authorization, so the deletion boundary must not depend on link
-    # resolution. Uses the shared ``is_link_like_or_reparse`` helper so
+    # resolution. Uses the shared ``inspect_filesystem_node`` helper so
     # RuntimePaths raw-root authorization and cleanup traversal agree on what
     # is "link-like" (symlinks on POSIX; symlinks, junctions, mount points,
     # and other reparse points on Windows). Python 3.10/3.11 compatible —
     # does not depend on ``Path.is_junction()`` (Python 3.12+ only).
-    if filesystem_safety.is_link_like_or_reparse(root):
-        kind = filesystem_safety.describe_link_like(root)
-        raise LogRootAuthorizationError(f"Refusing to authorize {kind} log root: {root}")
+    try:
+        inspection = filesystem_safety.inspect_filesystem_node(root)
+    except FileNotFoundError:
+        # The directory may be created later by ``ensure_managed_log_root``.
+        # No link-like node exists to reject; the resolved-path checks below
+        # guard the eventual directory.
+        pass
+    except (OSError, ValueError) as exc:
+        raise LogRootAuthorizationError(
+            f"Refusing to authorize uninspectable log root: {root}: {exc.__class__.__name__}: {exc}"
+        ) from exc
+    else:
+        if inspection.is_link_like:
+            kind_label = filesystem_safety._describe_inspection_kind(inspection)
+            raise LogRootAuthorizationError(f"Refusing to authorize {kind_label} log root: {root}")
 
     resolved = root.resolve()
     resolved_parent = resolved.parent
@@ -295,9 +312,22 @@ def _config_log_dir(root: Path | None) -> Path | None:
 
     Returns the expanduser-only (NOT resolved) candidate so
     :func:`resolve_runtime_paths` can run the raw-identity check via
-    :func:`validate_managed_root_candidate` BEFORE resolution. A configured
-    path that resolves inside the Git workspace is rejected (returns
-    ``None``) so that logs always land outside the repo by default.
+    :func:`validate_managed_root_candidate` BEFORE resolution.
+
+    This function ONLY reads and constructs the raw candidate. It does NOT:
+    * call ``.resolve()`` (that happens inside ``_authorize_raw_log_root``
+      after inspection);
+    * check whether the path is repo-internal (that happens in
+      :func:`resolve_runtime_paths` after authorization, so the in-repo
+      decision uses a resolved path that has already passed the link-like
+      check);
+    * silently convert an unsafe/uninspectable path to ``None`` (inspection
+      failures are raised by ``_authorize_raw_log_root``).
+
+    A missing config or an empty value returns ``None`` so the caller falls
+    through to the next source. A present config value is returned as-is
+    (raw absolute candidate) regardless of whether it points inside the repo
+    — the in-repo policy is applied post-authorization by the caller.
 
     Imported lazily so ``paths`` stays free of YAML dependencies at import
     time.
@@ -318,20 +348,11 @@ def _config_log_dir(root: Path | None) -> Path | None:
                 # directory is the log root.
                 raw_parent = configured_path.parent if configured_path.parent else None
                 if raw_parent is not None:
-                    raw_absolute = raw_parent if raw_parent.is_absolute() else (manager.root / raw_parent)
-                    # Resolve ONLY for the in-repo check; return the RAW form
-                    # so the raw-identity check sees the original symlink.
-                    if not is_path_inside(raw_absolute.resolve(), manager.root):
-                        return raw_absolute
+                    return raw_parent if raw_parent.is_absolute() else (manager.root / raw_parent)
                 return None
         if configured:
             configured_path = Path(str(configured)).expanduser()
-            raw_absolute = configured_path if configured_path.is_absolute() else (manager.root / configured_path)
-            # Resolve ONLY for the in-repo check; return the RAW form so the
-            # raw-identity check sees the original symlink/junction.
-            if is_path_inside(raw_absolute.resolve(), manager.root):
-                return None
-            return raw_absolute
+            return configured_path if configured_path.is_absolute() else (manager.root / configured_path)
     except (ConfigError, OSError, ValueError):
         return None
     return None
@@ -412,6 +433,13 @@ def resolve_runtime_paths(
     it. The repo/home/filesystem-root checks are NOT performed here — they
     run later at marker creation / cleanup time via
     :func:`_reject_unsafe_log_root`.
+
+    Settings source: after authorization (inspection + resolve), a regular
+    repo-internal path falls back to the default source (existing policy).
+    A symlink that points into the repo is rejected at inspection time —
+    it does NOT fall back silently. This is the only source-specific
+    policy; explicit/environment/default do not apply the in-repo fallback
+    because their callers pass absolute external paths.
     """
 
     base_root = (root or ROOT).resolve()
@@ -425,7 +453,18 @@ def resolve_runtime_paths(
     if resolved is None:
         config_dir = _config_log_dir(base_root)
         if config_dir is not None:
-            resolved = _authorize_raw_log_root(config_dir, source="settings")
+            authorized = _authorize_raw_log_root(config_dir, source="settings")
+            # Settings-specific in-repo policy: a regular repo-internal path
+            # falls back to the default source (existing behavior). A symlink
+            # that resolves into the repo was already rejected at inspection
+            # time above (``_authorize_raw_log_root`` raises before reaching
+            # here). This check uses the RESOLVED path — ``.resolve()`` has
+            # already run inside ``_authorize_raw_log_root`` after the
+            # link-like check passed.
+            if authorized == base_root or is_path_inside(authorized, base_root):
+                pass  # fall through to default
+            else:
+                resolved = authorized
     if resolved is None:
         resolved = _authorize_raw_log_root(_default_log_dir_candidate(), source="default")
 

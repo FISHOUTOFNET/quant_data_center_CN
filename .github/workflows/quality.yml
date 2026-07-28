@@ -33,3 +33,12 @@ jobs:
       - name: Run quality gate
         shell: pwsh
         run: pwsh scripts/check_quality.ps1
+
+      - name: Verify Windows junction tests executed
+        # Explicitly run the junction tests so CI logs prove they were
+        # collected and passed — not just inferred from a green Quality job.
+        # The full suite (in check_quality.ps1) already includes them, but
+        # this targeted run makes the junction test count visible in the
+        # step output. On Windows runners these MUST execute (not skip).
+        shell: pwsh
+        run: python -m pytest -m windows_junction -ra --no-cov

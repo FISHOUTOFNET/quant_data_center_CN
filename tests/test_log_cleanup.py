@@ -315,7 +315,8 @@ def test_git_clean_does_not_remove_logs_outside_repo(tmp_path: Path, monkeypatch
 # ``_discover_log_files`` must prune symlink/junction/reparse directories from
 # ``dirnames[:]`` IN PLACE (not just rely on ``followlinks=False``) and must
 # reject link-like file candidates. These tests use real symlinks where
-# possible and mock ``is_link_like_or_reparse`` for Windows reparse points.
+# possible and mock ``inspect_filesystem_node`` for Windows reparse points and
+# inspection-failure paths.
 # ---------------------------------------------------------------------------
 
 
@@ -365,9 +366,9 @@ class TestCleanupPrunesLinkLikeDirectories:
         """A directory flagged as reparse point (mocked) is NOT recursed into.
 
         This simulates Windows junction/mount-point behavior on any OS by
-        mocking ``is_link_like_or_reparse`` to return True for a specific
-        directory. ``followlinks=False`` alone does NOT catch junctions on
-        Windows, so the explicit pruning is the primary defense.
+        mocking ``inspect_filesystem_node`` to return a JUNCTION inspection
+        for a specific directory. ``followlinks=False`` alone does NOT catch
+        junctions on Windows, so the explicit pruning is the primary defense.
         """
 
         now = datetime(2026, 7, 25, 12, 0, tzinfo=timezone.utc)
@@ -378,17 +379,22 @@ class TestCleanupPrunesLinkLikeDirectories:
         sub.mkdir()
         sub_log = _touch(sub / "old.log", now - timedelta(days=365))
 
-        # Mock: treat ``sub`` as a reparse point.
-        real_check = filesystem_safety.is_link_like_or_reparse
+        # Mock: treat ``sub`` as a junction reparse point.
+        real_inspect = filesystem_safety.inspect_filesystem_node
+        fake_junction = filesystem_safety.FilesystemNodeInspection(
+            path=sub,
+            kind=filesystem_safety.FilesystemNodeKind.JUNCTION,
+            mode=0o040755,
+            file_attributes=0,
+            reparse_tag=filesystem_safety._IO_REPARSE_TAG_MOUNT_POINT,
+        )
 
-        def mock_check(path: Path) -> bool:
+        def mock_inspect(path: Path) -> filesystem_safety.FilesystemNodeInspection:
             if Path(path) == sub:
-                return True
-            return real_check(path)
+                return fake_junction
+            return real_inspect(path)
 
-        monkeypatch.setattr(filesystem_safety, "is_link_like_or_reparse", mock_check)
-        # Also patch the reference in log_cleanup since it imported the name.
-        monkeypatch.setattr(log_cleanup.filesystem_safety, "is_link_like_or_reparse", mock_check)
+        monkeypatch.setattr(filesystem_safety, "inspect_filesystem_node", mock_inspect)
 
         _authorize(log_root)
         discovered = log_cleanup._discover_log_files(log_root)
@@ -412,6 +418,35 @@ class TestCleanupPrunesLinkLikeDirectories:
 
         discovered_paths = {item.path for item in discovered}
         assert sub_log in discovered_paths
+
+    def test_uninspectable_directory_pruned(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A directory whose ``inspect_filesystem_node`` raises ``OSError`` is
+        pruned from traversal (skip-and-log), NOT recursed into. This is the
+        fail-closed discovery policy: an uninspectable node is never treated
+        as a safe regular directory.
+        """
+
+        now = datetime(2026, 7, 25, 12, 0, tzinfo=timezone.utc)
+        log_root = tmp_path / "managed-logs"
+        log_root.mkdir()
+        sub = log_root / "subdir"
+        sub.mkdir()
+        sub_log = _touch(sub / "old.log", now - timedelta(days=365))
+
+        real_inspect = filesystem_safety.inspect_filesystem_node
+
+        def mock_inspect(path: Path) -> filesystem_safety.FilesystemNodeInspection:
+            if Path(path) == sub:
+                raise PermissionError("denied")
+            return real_inspect(path)
+
+        monkeypatch.setattr(filesystem_safety, "inspect_filesystem_node", mock_inspect)
+
+        _authorize(log_root)
+        discovered = log_cleanup._discover_log_files(log_root)
+
+        discovered_paths = {item.path for item in discovered}
+        assert sub_log not in discovered_paths
 
 
 class TestCleanupRejectsLinkLikeFiles:
@@ -442,15 +477,48 @@ class TestCleanupRejectsLinkLikeFiles:
         log_root.mkdir()
         old_log = _touch(log_root / "old.log", now - timedelta(days=365))
 
-        real_check = filesystem_safety.is_link_like_or_reparse
+        real_inspect = filesystem_safety.inspect_filesystem_node
+        fake_junction = filesystem_safety.FilesystemNodeInspection(
+            path=old_log,
+            kind=filesystem_safety.FilesystemNodeKind.JUNCTION,
+            mode=0o040755,
+            file_attributes=0,
+            reparse_tag=filesystem_safety._IO_REPARSE_TAG_MOUNT_POINT,
+        )
 
-        def mock_check(path: Path) -> bool:
+        def mock_inspect(path: Path) -> filesystem_safety.FilesystemNodeInspection:
             if Path(path) == old_log:
-                return True
-            return real_check(path)
+                return fake_junction
+            return real_inspect(path)
 
-        monkeypatch.setattr(filesystem_safety, "is_link_like_or_reparse", mock_check)
-        monkeypatch.setattr(log_cleanup.filesystem_safety, "is_link_like_or_reparse", mock_check)
+        monkeypatch.setattr(filesystem_safety, "inspect_filesystem_node", mock_inspect)
+
+        _authorize(log_root)
+        discovered = log_cleanup._discover_log_files(log_root)
+
+        discovered_paths = {item.path for item in discovered}
+        assert old_log not in discovered_paths
+
+    def test_uninspectable_file_not_discovered(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A file whose ``inspect_filesystem_node`` raises ``OSError`` is NOT
+        added to the discovered set (skip-and-log). This is the fail-closed
+        discovery policy: an uninspectable file is never treated as a safe
+        regular file candidate.
+        """
+
+        now = datetime(2026, 7, 25, 12, 0, tzinfo=timezone.utc)
+        log_root = tmp_path / "managed-logs"
+        log_root.mkdir()
+        old_log = _touch(log_root / "old.log", now - timedelta(days=365))
+
+        real_inspect = filesystem_safety.inspect_filesystem_node
+
+        def mock_inspect(path: Path) -> filesystem_safety.FilesystemNodeInspection:
+            if Path(path) == old_log:
+                raise PermissionError("denied")
+            return real_inspect(path)
+
+        monkeypatch.setattr(filesystem_safety, "inspect_filesystem_node", mock_inspect)
 
         _authorize(log_root)
         discovered = log_cleanup._discover_log_files(log_root)
@@ -522,6 +590,46 @@ class TestCleanupPreDeleteVerification:
             return original_resolve(self)
 
         monkeypatch.setattr(Path, "resolve", mock_resolve)
+
+        result = log_cleanup.cleanup_logs(log_root, retention_days=30, now=now)
+        assert result.deleted_count == 0
+        assert old_log.exists()
+
+    def test_pre_delete_inspection_failure_skips_delete(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """When the pre-delete ``inspect_filesystem_node`` raises ``OSError``
+        (TOCTOU: file became uninspectable between discovery and deletion),
+        the file is NOT deleted. This is the fail-closed pre-delete policy.
+        """
+
+        now = datetime(2026, 7, 25, 12, 0, tzinfo=timezone.utc)
+        log_root = tmp_path / "managed-logs"
+        log_root.mkdir()
+        old_log = _touch(log_root / "old.log", now - timedelta(days=365))
+
+        _authorize(log_root)
+
+        # Discover first (old_log is a regular file at this point).
+        discovered = log_cleanup._discover_log_files(log_root)
+        assert any(item.path == old_log for item in discovered)
+
+        # Now simulate TOCTOU: the pre-delete inspection raises PermissionError.
+        # Discovery already ran with the real inspect; only the pre-delete
+        # boundary check (inside _is_safe_delete_candidate) should see the
+        # failure. We patch inspect_filesystem_node to raise ONLY for the
+        # delete-phase call on old_log.
+        real_inspect = filesystem_safety.inspect_filesystem_node
+        inspect_call_count = 0
+
+        def mock_inspect(path: Path) -> filesystem_safety.FilesystemNodeInspection:
+            nonlocal inspect_call_count
+            if Path(path) == old_log:
+                inspect_call_count += 1
+                if inspect_call_count > 1:
+                    # Second call is the pre-delete verification — fail it.
+                    raise PermissionError("denied at delete time")
+            return real_inspect(path)
+
+        monkeypatch.setattr(filesystem_safety, "inspect_filesystem_node", mock_inspect)
 
         result = log_cleanup.cleanup_logs(log_root, retention_days=30, now=now)
         assert result.deleted_count == 0

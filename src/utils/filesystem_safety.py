@@ -16,7 +16,7 @@ Design notes
   conservatively rejects ALL reparse points, not just known tags.
 * Python 3.10/3.11 compatibility: does NOT depend on ``Path.is_junction()``
   or ``os.path.isjunction()`` (Python 3.12+ only).
-* No third-party dependencies, no enums, no inheritance hierarchy.
+* No third-party dependencies, no inheritance hierarchy.
 """
 
 from __future__ import annotations
@@ -24,12 +24,17 @@ from __future__ import annotations
 import os
 import stat
 import sys
+from dataclasses import dataclass
+from enum import Enum
 from pathlib import Path
 from typing import Literal
 
 __all__ = [
+    "FilesystemNodeInspection",
+    "FilesystemNodeKind",
     "LinkLikeError",
     "describe_link_like",
+    "inspect_filesystem_node",
     "is_link_like_or_reparse",
     "validate_managed_root_candidate",
 ]
@@ -39,6 +44,114 @@ SourceName = Literal["explicit", "environment", "settings", "default"]
 # Windows reparse tags (for diagnostics only — the boundary rejects all tags).
 _IO_REPARSE_TAG_MOUNT_POINT = 0xA0000003  # junctions
 _IO_REPARSE_TAG_SYMLINK = 0xA000000C  # Windows symlinks
+
+
+class FilesystemNodeKind(Enum):
+    """Classification of a filesystem node based on a single ``lstat`` result."""
+
+    REGULAR_FILE = "regular_file"
+    DIRECTORY = "directory"
+    SYMLINK = "symlink"
+    JUNCTION = "junction"
+    OTHER_REPARSE_POINT = "other_reparse_point"
+    OTHER = "other"
+
+
+@dataclass(frozen=True)
+class FilesystemNodeInspection:
+    """Immutable result of inspecting a filesystem node via ``os.lstat``.
+
+    Carries the classification (``kind``) plus the raw attributes needed for
+    diagnostics. Does NOT cache the ``stat_result`` — callers needing size/mtime
+    must call ``Path.stat()`` separately (that is a different safety decision
+    stage and may legitimately require its own system call).
+
+    ``is_link_like`` is the policy predicate shared by managed-root authorization,
+    cleanup discovery, and pre-delete verification: any symlink, junction, or
+    other reparse point.
+    """
+
+    path: Path
+    kind: FilesystemNodeKind
+    mode: int
+    file_attributes: int | None = None
+    reparse_tag: int | None = None
+
+    @property
+    def is_link_like(self) -> bool:
+        """True for symlinks, junctions, and other reparse points."""
+
+        return self.kind in (
+            FilesystemNodeKind.SYMLINK,
+            FilesystemNodeKind.JUNCTION,
+            FilesystemNodeKind.OTHER_REPARSE_POINT,
+        )
+
+
+def inspect_filesystem_node(path: Path) -> FilesystemNodeInspection:
+    """Inspect ``path`` via a single ``os.lstat`` and classify the node.
+
+    Does NOT follow symlinks, does NOT call ``.resolve()``, does NOT catch
+    exceptions, does NOT make policy decisions. ``FileNotFoundError``,
+    ``PermissionError``, ``OSError``, and ``ValueError`` all propagate to the
+    caller so callers can implement fail-closed or skip-and-log policies.
+
+    Args:
+        path: The filesystem path to inspect (raw, unresolved).
+
+    Returns:
+        A :class:`FilesystemNodeInspection` describing the node.
+
+    Raises:
+        FileNotFoundError: The path does not exist.
+        PermissionError: Insufficient permissions to stat the path.
+        OSError: Other OS-level stat failure.
+        ValueError: Embedded null bytes or other path encoding issues.
+    """
+
+    st = os.lstat(path)
+    return _classify_lstat_result(Path(path), st)
+
+
+def _classify_lstat_result(path: Path, st: os.stat_result) -> FilesystemNodeInspection:
+    """Classify a raw ``lstat`` result into a :class:`FilesystemNodeInspection`."""
+
+    mode = st.st_mode
+    file_attributes = getattr(st, "st_file_attributes", None)
+    reparse_tag = getattr(st, "st_reparse_tag", None)
+
+    # POSIX symlinks and Windows symlinks (created via ``mklink`` without /J)
+    # both set S_ISLNK. Check this first so real symlinks are never misclassified.
+    if stat.S_ISLNK(mode):
+        kind = FilesystemNodeKind.SYMLINK
+    elif (
+        sys.platform == "win32"
+        and file_attributes is not None
+        and (file_attributes & stat.FILE_ATTRIBUTE_REPARSE_POINT)
+    ):
+        # Windows reparse point that is NOT a POSIX symlink (S_ISLNK was false).
+        # Junctions have tag MOUNT_POINT; Windows-native symlinks that lack
+        # S_ISLNK have tag SYMLINK; everything else is an unknown reparse tag.
+        if reparse_tag == _IO_REPARSE_TAG_MOUNT_POINT:
+            kind = FilesystemNodeKind.JUNCTION
+        elif reparse_tag == _IO_REPARSE_TAG_SYMLINK:
+            kind = FilesystemNodeKind.SYMLINK
+        else:
+            kind = FilesystemNodeKind.OTHER_REPARSE_POINT
+    elif stat.S_ISREG(mode):
+        kind = FilesystemNodeKind.REGULAR_FILE
+    elif stat.S_ISDIR(mode):
+        kind = FilesystemNodeKind.DIRECTORY
+    else:
+        kind = FilesystemNodeKind.OTHER
+
+    return FilesystemNodeInspection(
+        path=path,
+        kind=kind,
+        mode=mode,
+        file_attributes=file_attributes,
+        reparse_tag=reparse_tag,
+    )
 
 
 class LinkLikeError(RuntimeError):
@@ -53,32 +166,13 @@ class LinkLikeError(RuntimeError):
 def is_link_like_or_reparse(path: Path) -> bool:
     """Return ``True`` if ``path`` is a symlink, junction, or other reparse point.
 
-    Inspects the node itself (via ``os.lstat``) and never follows the link.
-    On Python 3.12+ this agrees with ``Path.is_symlink()`` /
-    ``Path.is_junction()``; on Python 3.10/3.11 it provides the same
-    capability without requiring those APIs.
-
-    If the node cannot be inspected (``OSError`` / ``ValueError``), returns
-    ``False``. Callers that need fail-closed behavior must use
-    :func:`validate_managed_root_candidate` (which raises on inspect failure
-    for managed roots) or implement their own skip-and-log policy (cleanup
-    traversal).
+    Strict wrapper around :func:`inspect_filesystem_node`. Does NOT swallow
+    ``FileNotFoundError``, ``OSError``, ``PermissionError``, or ``ValueError``
+    — callers that need fail-closed or skip-and-log behavior must catch those
+    explicitly or call :func:`inspect_filesystem_node` directly.
     """
 
-    try:
-        st = os.lstat(path)
-    except (OSError, ValueError):
-        return False
-    if stat.S_ISLNK(st.st_mode):
-        return True
-    if sys.platform == "win32":
-        # FILE_ATTRIBUTE_REPARSE_POINT covers symlinks, junctions, mount
-        # points, and other reparse tags. Conservatively reject all of them
-        # rather than maintaining a known-tag allowlist.
-        attrs = getattr(st, "st_file_attributes", 0) or 0
-        if attrs & stat.FILE_ATTRIBUTE_REPARSE_POINT:
-            return True
-    return False
+    return inspect_filesystem_node(path).is_link_like
 
 
 def describe_link_like(path: Path) -> str:
@@ -90,22 +184,24 @@ def describe_link_like(path: Path) -> str:
     """
 
     try:
-        st = os.lstat(path)
-    except OSError as exc:
+        inspection = inspect_filesystem_node(path)
+    except (OSError, ValueError) as exc:
         return f"uninspectable({exc.__class__.__name__})"
-    if stat.S_ISLNK(st.st_mode):
+    return _describe_inspection_kind(inspection)
+
+
+def _describe_inspection_kind(inspection: FilesystemNodeInspection) -> str:
+    """Map an inspection's ``kind`` to a short diagnostic label."""
+
+    if inspection.kind == FilesystemNodeKind.SYMLINK:
         return "symlink"
-    if sys.platform == "win32":
-        attrs = getattr(st, "st_file_attributes", 0) or 0
-        if attrs & stat.FILE_ATTRIBUTE_REPARSE_POINT:
-            tag = getattr(st, "st_reparse_tag", None)
-            if tag == _IO_REPARSE_TAG_MOUNT_POINT:
-                return "junction"
-            if tag == _IO_REPARSE_TAG_SYMLINK:
-                return "windows-symlink"
-            if tag is not None:
-                return f"reparse-tag={tag:#x}"
-            return "reparse-point"
+    if inspection.kind == FilesystemNodeKind.JUNCTION:
+        return "junction"
+    if inspection.kind == FilesystemNodeKind.OTHER_REPARSE_POINT:
+        tag = inspection.reparse_tag
+        if tag is not None:
+            return f"reparse-tag={tag:#x}"
+        return "reparse-point"
     return "not-link-like"
 
 
@@ -125,14 +221,17 @@ def validate_managed_root_candidate(
 
     Steps:
     1. ``expanduser`` (no resolve).
-    2. ``os.lstat`` the raw node — if the node exists and is a
-       symlink/junction/reparse point → fail closed with
+    2. Single ``inspect_filesystem_node`` (one ``os.lstat``) — if the node
+       exists and is a symlink/junction/reparse point -> fail closed with
        :class:`LinkLikeError`. If the node cannot be inspected for reasons
-       other than non-existence (e.g. ``PermissionError``) → fail closed.
-       A non-existent path has no link-like node to reject; the
-       repo/home/root checks in :func:`paths._reject_unsafe_log_root` will
-       guard the resolved path.
-    3. Only after validation passes, ``.resolve()`` and return.
+       other than non-existence (``PermissionError`` / ``OSError`` /
+       ``ValueError``) -> fail closed. A non-existent path
+       (``FileNotFoundError``) has no link-like node to reject; the
+       repo/home/root checks in :func:`paths._reject_unsafe_log_root` guard
+       the resolved path.
+    3. Only after validation passes, ``.resolve()`` and return. Resolve
+       failures (``OSError`` / ``RuntimeError`` / ``ValueError``, including
+       symlink loops) are also fail-closed.
 
     The repo/home/filesystem-root checks are NOT performed here — they live
     in :func:`paths._reject_unsafe_log_root` and run at marker creation /
@@ -148,22 +247,32 @@ def validate_managed_root_candidate(
 
     candidate = Path(raw_path).expanduser()
     try:
-        os.lstat(candidate)
+        inspection = inspect_filesystem_node(candidate)
     except FileNotFoundError:
         # Path doesn't exist yet — no link-like node to reject. Intermediate
         # symlinks are resolved by ``.resolve()``; the repo/home/root checks
         # in ``_reject_unsafe_log_root`` guard the resolved path.
-        return candidate.resolve()
-    except OSError as exc:
+        pass
+    except (OSError, ValueError) as exc:
         raise LinkLikeError(
             f"Refusing to authorize managed root from {source!r}: cannot inspect "
             f"raw path {candidate!r}: {exc.__class__.__name__}: {exc}"
         ) from exc
-    if is_link_like_or_reparse(candidate):
-        kind = describe_link_like(candidate)
+    else:
+        if inspection.is_link_like:
+            kind_label = _describe_inspection_kind(inspection)
+            raise LinkLikeError(
+                f"Refusing to authorize {kind_label} managed root from {source!r}: "
+                f"{candidate!r}. The marker binds to a directory identity; a link "
+                f"target can be swapped after authorization."
+            )
+    # Only after validation passes, resolve. Symlink loops raise RuntimeError;
+    # permission issues raise OSError; encoding issues raise ValueError. All
+    # must fail closed — a managed root that cannot be resolved is not safe.
+    try:
+        return candidate.resolve()
+    except (OSError, RuntimeError, ValueError) as exc:
         raise LinkLikeError(
-            f"Refusing to authorize {kind} managed root from {source!r}: "
-            f"{candidate!r}. The marker binds to a directory identity; a link "
-            f"target can be swapped after authorization."
-        )
-    return candidate.resolve()
+            f"Refusing to authorize managed root from {source!r}: cannot resolve "
+            f"raw path {candidate!r}: {exc.__class__.__name__}: {exc}"
+        ) from exc

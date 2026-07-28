@@ -2,12 +2,15 @@
 
 These tests create REAL Windows junctions (via ``cmd /d /c mklink /J``) and
 verify that ``cleanup_logs`` does NOT recurse into them or delete files
-reachable through them. They run ONLY on Windows (skipped elsewhere).
+reachable through them. They run ONLY on Windows (skipped elsewhere via a
+static ``skipif``).
 
 GitHub Windows runners support junction creation, so these tests MUST execute
-there. If junction creation fails for a genuine OS reason (e.g. insufficient
-privilege), the test skips with the specific OS error — never a blanket
-``except Exception``.
+there. If junction creation fails on Windows, the test FAILS (not skips) with
+the full command output (exit code, stdout, stderr) so the failure is visible
+in CI logs. There is NO blanket ``except OSError: pytest.skip()`` — that
+pattern would mask regressions and make it impossible to prove the junction
+tests actually ran.
 """
 
 from __future__ import annotations
@@ -23,7 +26,10 @@ import pytest
 from src.tools import log_cleanup
 from src.utils.paths import ensure_managed_log_root
 
-pytestmark = pytest.mark.skipif(sys.platform != "win32", reason="Windows junction tests require Windows")
+pytestmark = [
+    pytest.mark.skipif(sys.platform != "win32", reason="Windows junction tests require Windows"),
+    pytest.mark.windows_junction,
+]
 
 
 def _touch(path: Path, mtime: datetime, content: bytes = b"log") -> Path:
@@ -84,11 +90,10 @@ class TestWindowsJunctionCleanupSafety:
         log_root = tmp_path / "managed-logs"
         log_root.mkdir()
         # Create a junction inside the log root pointing at the external dir.
+        # On Windows, junction creation failure is a test FAILURE (not skip)
+        # so CI logs prove the junction tests actually ran.
         junction = log_root / "junction-dir"
-        try:
-            _create_junction(junction, external)
-        except OSError as exc:
-            pytest.skip(f"Cannot create junction on this system: {exc}")
+        _create_junction(junction, external)
 
         # Verify the junction is detected as link-like.
         assert _is_junction(junction), f"junction not detected as reparse point: {junction}"
@@ -126,10 +131,7 @@ class TestWindowsJunctionCleanupSafety:
 
         # Junction inside runs/ pointing at the external directory.
         junction = runs_dir / "junction-link"
-        try:
-            _create_junction(junction, external)
-        except OSError as exc:
-            pytest.skip(f"Cannot create junction on this system: {exc}")
+        _create_junction(junction, external)
 
         assert _is_junction(junction)
 
@@ -172,10 +174,7 @@ class TestWindowsJunctionCleanupSafety:
 
         # Junction inside the log root.
         junction = log_root / "junction-dir"
-        try:
-            _create_junction(junction, external)
-        except OSError as exc:
-            pytest.skip(f"Cannot create junction on this system: {exc}")
+        _create_junction(junction, external)
 
         ensure_managed_log_root(log_root)
 
@@ -205,10 +204,7 @@ class TestWindowsJunctionCleanupSafety:
         log_root = tmp_path / "managed-logs"
         log_root.mkdir()
         junction_log = log_root / "fake.log"
-        try:
-            _create_junction(junction_log, external)
-        except OSError as exc:
-            pytest.skip(f"Cannot create junction on this system: {exc}")
+        _create_junction(junction_log, external)
 
         assert _is_junction(junction_log)
 
@@ -237,10 +233,7 @@ class TestWindowsJunctionCleanupSafety:
         log_root = tmp_path / "managed-logs"
         log_root.mkdir()
         junction = log_root / "junction-dir"
-        try:
-            _create_junction(junction, external)
-        except OSError as exc:
-            pytest.skip(f"Cannot create junction on this system: {exc}")
+        _create_junction(junction, external)
 
         # Remove the junction with rmdir (NOT rmtree).
         os.rmdir(junction)

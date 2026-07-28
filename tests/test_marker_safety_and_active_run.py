@@ -20,6 +20,8 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
+import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -390,30 +392,50 @@ class TestP07UnsafeRootRejection:
         junction_dir = tmp_path / "junction-logs"
         junction_dir.mkdir(parents=True, exist_ok=True)
 
-        # Simulate a junction by patching the shared filesystem-safety
-        # primitive. The production code (``_reject_unsafe_log_root``) calls
-        # ``filesystem_safety.is_link_like_or_reparse`` which uses ``os.lstat``
-        # and ``st_file_attributes & FILE_ATTRIBUTE_REPARSE_POINT`` — NOT
+        # Simulate a junction by patching ``inspect_filesystem_node``. The
+        # production code (``_reject_unsafe_log_root``) calls
+        # ``inspect_filesystem_node`` which uses ``os.lstat`` and
+        # ``st_file_attributes & FILE_ATTRIBUTE_REPARSE_POINT`` — NOT
         # ``Path.is_junction()`` (Python 3.12+ only). Patching the shared
-        # primitive is sufficient regardless of Python version.
-        original_is_link_like = filesystem_safety.is_link_like_or_reparse
-        original_describe = filesystem_safety.describe_link_like
+        # inspection API is sufficient regardless of Python version.
+        original_inspect = filesystem_safety.inspect_filesystem_node
+        fake_junction = filesystem_safety.FilesystemNodeInspection(
+            path=junction_dir,
+            kind=filesystem_safety.FilesystemNodeKind.JUNCTION,
+            mode=0o040755,
+            file_attributes=0,
+            reparse_tag=filesystem_safety._IO_REPARSE_TAG_MOUNT_POINT,
+        )
 
-        def fake_is_link_like(path: Path) -> bool:
-            if path == junction_dir:
-                return True
-            return original_is_link_like(path)
+        def fake_inspect(path: Path) -> filesystem_safety.FilesystemNodeInspection:
+            if Path(path) == junction_dir:
+                return fake_junction
+            return original_inspect(path)
 
-        def fake_describe(path: Path) -> str:
-            if path == junction_dir:
-                return "junction"
-            return original_describe(path)
-
-        monkeypatch.setattr(filesystem_safety, "is_link_like_or_reparse", fake_is_link_like)
-        monkeypatch.setattr(filesystem_safety, "describe_link_like", fake_describe)
+        monkeypatch.setattr(filesystem_safety, "inspect_filesystem_node", fake_inspect)
 
         with pytest.raises(LogRootAuthorizationError, match="junction"):
             paths._reject_unsafe_log_root(junction_dir)
+
+    def test_rejects_uninspectable_root(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """12g. A root whose ``inspect_filesystem_node`` raises ``OSError``
+        (other than ``FileNotFoundError``) is rejected fail-closed. An
+        uninspectable root is NEVER treated as a safe regular directory.
+        """
+
+        uninspectable = tmp_path / "uninspectable-logs"
+        uninspectable.mkdir(parents=True, exist_ok=True)
+        original_inspect = filesystem_safety.inspect_filesystem_node
+
+        def fake_inspect(path: Path) -> filesystem_safety.FilesystemNodeInspection:
+            if Path(path) == uninspectable:
+                raise PermissionError("denied")
+            return original_inspect(path)
+
+        monkeypatch.setattr(filesystem_safety, "inspect_filesystem_node", fake_inspect)
+
+        with pytest.raises(LogRootAuthorizationError, match="uninspectable"):
+            paths._reject_unsafe_log_root(uninspectable)
 
     def test_unsafe_root_rejected_by_ensure(self, tmp_path: Path) -> None:
         """ensure_managed_log_root also rejects unsafe roots (shared check)."""
@@ -1039,24 +1061,24 @@ def _make_symlink_root(tmp_path: Path) -> tuple[Path, Path]:
 def _make_junction_root(tmp_path: Path) -> tuple[Path, Path]:
     """Create a Windows junction managed root and return (link, real_dir).
 
-    Uses ``_mklink /J`` via ``subprocess``. Skips on non-Windows or when the
-    runner lacks permission. Caller should fall back to patching
-    ``Path.is_junction`` when this helper skips.
+    Uses ``cmd /d /c mklink /J`` via ``subprocess``. On Windows, junction
+    creation failure is a TEST FAILURE (not skip) — the error includes the
+    command, exit code, stdout, and stderr so CI logs prove the junction tests
+    actually ran. Callers must guard entry with ``@pytest.mark.skipif`` for
+    non-Windows platforms.
     """
-
-    import subprocess
 
     real_dir = tmp_path / "real-logs"
     real_dir.mkdir(parents=True, exist_ok=True)
     link = tmp_path / "link-logs"
-    try:
-        subprocess.check_call(
-            ["cmd", "/c", "mklink", "/J", str(link), str(real_dir)],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-    except (OSError, subprocess.CalledProcessError):
-        pytest.skip("junction creation not supported on this platform/runner")
+    result = subprocess.run(
+        ["cmd", "/d", "/c", "mklink", "/J", str(link), str(real_dir)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise OSError(f"mklink /J failed (exit {result.returncode}): stdout={result.stdout!r} stderr={result.stderr!r}")
     return link, real_dir
 
 
@@ -1111,9 +1133,12 @@ class TestCliSymlinkRootRejection:
         # The stale log must survive — cleanup did not run.
         assert stale_log.exists()
 
+    @pytest.mark.skipif(sys.platform != "win32", reason="Windows junction test")
+    @pytest.mark.windows_junction
     def test_initialize_managed_root_rejects_junction(self, tmp_path: Path) -> None:
         """``--initialize-managed-root --log-dir <junction>`` exits non-zero
-        on Windows junctions. Skipped if junction creation is unavailable.
+        on Windows junctions. Junction creation failure is a test failure
+        (not skip) so CI logs prove the test ran.
         """
 
         from click.testing import CliRunner
@@ -1159,6 +1184,8 @@ class TestCreateAdoptRunLogSymlinkRejection:
         # No marker on the real target.
         assert not (real_dir / MANAGED_ROOT_MARKER).exists()
 
+    @pytest.mark.skipif(sys.platform != "win32", reason="Windows junction test")
+    @pytest.mark.windows_junction
     def test_create_run_log_context_rejects_junction_managed_root(self, tmp_path: Path) -> None:
         link, real_dir = _make_junction_root(tmp_path)
         runtime_paths = paths.resolve_runtime_paths(explicit_log_dir=tmp_path / "default")
@@ -1182,14 +1209,14 @@ class TestEntryRawPathValidationPatched:
     def test_create_run_log_context_rejects_patched_symlink_root(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Patch ``filesystem_safety.is_link_like_or_reparse`` to return True
-        for the managed root. If ``create_run_log_context`` called
-        ``.resolve()`` before the safety check, the patched
-        ``is_link_like_or_reparse`` would no longer see the symlink (because
+        """Patch ``filesystem_safety.inspect_filesystem_node`` to return a
+        SYMLINK inspection for the managed root. If ``create_run_log_context``
+        called ``.resolve()`` before the safety check, the patched
+        ``inspect_filesystem_node`` would no longer see the symlink (because
         the resolved path is the real directory) and the entry would NOT
         raise — which is the regression we must catch.
 
-        The production code uses ``filesystem_safety.is_link_like_or_reparse``
+        The production code uses ``filesystem_safety.inspect_filesystem_node``
         (via ``os.lstat``) rather than ``Path.is_symlink`` so that Windows
         junctions and other reparse points are also caught on Python 3.10/3.11
         where ``Path.is_junction()`` is unavailable.
@@ -1200,25 +1227,23 @@ class TestEntryRawPathValidationPatched:
         runtime_paths = paths.resolve_runtime_paths(explicit_log_dir=log_root)
         explicit_path = runtime_paths.run_logs_dir / "run.log"
 
-        # Patch the shared filesystem-safety primitive to simulate a symlink
-        # at the managed root. ``ensure_managed_log_root`` calls
-        # ``_reject_unsafe_log_root`` which calls
-        # ``is_link_like_or_reparse`` on the raw path BEFORE resolving.
-        original_is_link_like = filesystem_safety.is_link_like_or_reparse
-        original_describe = filesystem_safety.describe_link_like
+        # Patch the shared filesystem-safety inspection API to simulate a
+        # symlink at the managed root. ``ensure_managed_log_root`` calls
+        # ``_reject_unsafe_log_root`` which calls ``inspect_filesystem_node``
+        # on the raw path BEFORE resolving.
+        original_inspect = filesystem_safety.inspect_filesystem_node
+        fake_symlink = filesystem_safety.FilesystemNodeInspection(
+            path=runtime_paths.logs_dir,
+            kind=filesystem_safety.FilesystemNodeKind.SYMLINK,
+            mode=0o120755,
+        )
 
-        def _patched_is_link_like(path: Path) -> bool:
-            if path == runtime_paths.logs_dir:
-                return True
-            return original_is_link_like(path)
+        def _patched_inspect(path: Path) -> filesystem_safety.FilesystemNodeInspection:
+            if Path(path) == runtime_paths.logs_dir:
+                return fake_symlink
+            return original_inspect(path)
 
-        def _patched_describe(path: Path) -> str:
-            if path == runtime_paths.logs_dir:
-                return "symlink"
-            return original_describe(path)
-
-        monkeypatch.setattr(filesystem_safety, "is_link_like_or_reparse", _patched_is_link_like)
-        monkeypatch.setattr(filesystem_safety, "describe_link_like", _patched_describe)
+        monkeypatch.setattr(filesystem_safety, "inspect_filesystem_node", _patched_inspect)
 
         with pytest.raises(run_logging.RunLogContextError, match="symlink"):
             run_logging.create_run_log_context(
