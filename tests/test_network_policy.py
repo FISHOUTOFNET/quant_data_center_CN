@@ -53,7 +53,7 @@ def test_build_network_env_inherit_keeps_proxy_vars_and_overwrites_profile() -> 
 
 
 def test_build_network_env_rejects_invalid_profile() -> None:
-    with pytest.raises(ValueError, match="invalid.*allowed values|Invalid.*allowed values"):
+    with pytest.raises(ValueError, match=r"invalid.*allowed values|Invalid.*allowed values"):
         build_network_env({}, profile="invalid")
 
 

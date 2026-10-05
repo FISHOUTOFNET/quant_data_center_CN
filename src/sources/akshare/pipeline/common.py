@@ -5,7 +5,7 @@ from __future__ import annotations
 import traceback
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pandas as pd
 
@@ -37,7 +37,7 @@ def ensure_response(result: object, endpoint: str, params: dict[str, object], cl
         endpoint=endpoint,
         params=params,
         akshare_version=client_akshare_version(client),
-        data=result.copy(),
+        data=cast(pd.DataFrame, result).copy(),
     )
 
 

@@ -11,11 +11,11 @@ import pytest
 from src.sources.derived import update as update_module
 from src.sources.derived.common import (
     BuildDerivedLockError,
+    build_derived_file_lock,
     commit_derived_dataset_staging,
     commit_derived_partition_staging,
     create_derived_dataset_staging_area,
     create_derived_partition_staging_area,
-    build_derived_file_lock,
 )
 from src.sources.derived.stock_daily_bar import build_cn_stock_daily_bar
 from src.storage.parquet_store import ParquetStore

@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
+from dataclasses import dataclass
+from datetime import datetime
 from typing import Any, cast
 
 import pandas as pd
@@ -10,7 +12,12 @@ import pandas as pd
 from src.storage.dataset_catalog import dataset_definition
 from src.storage.manifest_rebuild import rebuild_one_partition_manifest
 from src.storage.parquet_store import ParquetStore
-from src.storage.partition_manifest import master_row_hash, source_signature
+from src.storage.partition_manifest import (
+    dataset_partition_manifest_row,
+    master_row_hash,
+    source_signature,
+)
+from src.utils.logging import logger
 
 SourcePartition = tuple[str, str]
 
@@ -90,6 +97,85 @@ def upsert_derived_partition_manifest(
         source_signature_value=source_signature_value,
         master_row_hash_value=master_row_hash_value,
     )
+
+
+@dataclass(frozen=True)
+class ManifestBatchEntry:
+    """One partition's data needed to build a manifest row in batch."""
+
+    security_id: str
+    df: pd.DataFrame
+    source_signature_value: str
+    master_row_hash_value: str
+
+
+def batch_upsert_derived_partition_manifests(
+    store: ParquetStore,
+    dataset_id: str,
+    entries: Sequence[ManifestBatchEntry],
+    *,
+    run_id: str = "",
+    writer_pid: int | None = None,
+    writer_thread: str = "",
+    now: datetime | None = None,
+) -> int:
+    """Upsert manifest rows for multiple partitions in a single DuckDB call.
+
+    This eliminates the per-partition DuckDB connect/close overhead that
+    ``upsert_derived_partition_manifest`` incurs when called in a loop. The
+    atomic replacement of each partition's parquet file must already be
+    complete before this function is called, because manifest rows reference
+    the final partition file's stat (size, mtime).
+
+    Returns the number of manifest rows upserted.
+
+    Failure semantics: if the batch upsert fails, the partitions' data is
+    already committed but their manifest rows are missing. On resume, the
+    planner will detect ``manifest_missing`` and rebuild those partitions.
+    This is the same recoverable state described in the spec for
+    "partition replaced but manifest update failed".
+    """
+
+    if not entries:
+        return 0
+    definition = dataset_definition(dataset_id)
+    partition_column = definition.partition_column
+    if partition_column is None:
+        raise ValueError(f"{dataset_id} is not partitioned")
+    timestamp = now or datetime.now()
+    rows: list[dict[str, object]] = []
+    for entry in entries:
+        path = store.dataset_path(dataset_id, {partition_column: entry.security_id})
+        if not path.exists():
+            logger.warning(
+                "batch_upsert: skipping {} (partition file missing at {})",
+                entry.security_id,
+                path,
+            )
+            continue
+        cleaned = store.prepare_dataset_frame(dataset_id, entry.df, {partition_column: entry.security_id})
+        rows.append(
+            dataset_partition_manifest_row(
+                dataset=dataset_id,
+                partition_column=partition_column,
+                partition_value=entry.security_id,
+                output_path=path,
+                root=store.root,
+                df=cleaned,
+                schema=definition.schema,
+                source_signature_value=entry.source_signature_value,
+                master_row_hash_value=entry.master_row_hash_value,
+                run_id=run_id,
+                writer_pid=writer_pid,
+                writer_thread=writer_thread,
+                updated_at=timestamp,
+            )
+        )
+    if not rows:
+        return 0
+    frame = pd.DataFrame(rows)
+    store._metadata_store.upsert_dataset_partition_manifest(frame)
+    return len(rows)
 
 
 def delete_derived_partition_manifest(store: ParquetStore, dataset_id: str, security_id: str) -> None:

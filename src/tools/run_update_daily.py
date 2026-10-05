@@ -25,12 +25,46 @@ from src.pipeline.common import (
     default_candidate_date,
     latest_trading_day_on_or_before,
 )
+from src.pipeline.step_health import (
+    StepHealthSummary,
+    is_failure_status,
+    read_step_health_summary,
+)
+from src.sources.derived.progress import (
+    PROGRESS_SNAPSHOT_SCHEMA_VERSION,
+    ProgressIdentity,
+    make_progress_contract_id,
+)
 from src.storage.metadata_store import default_metadata_duckdb_file
 from src.storage.parquet_store import ParquetStore
+from src.tools.run_logging import (
+    RunLogContext,
+    RunLogContextError,
+    adopt_run_log_context,
+    create_run_log_context,
+)
 from src.utils import paths
 from src.utils.config_mgr import ConfigError, ConfigManager
+from src.utils.logging import logger
 from src.utils.network_policy import NETWORK_PROFILE_DIRECT, NETWORK_PROFILES, build_network_env
 from src.utils.process_lock import ProcessLockError, acquire_process_lock, is_pid_alive
+
+# Module-level scratch field updated by ``_run_subprocess`` immediately after
+# ``Popen`` returns. ``run_daily_update`` reads it after the runner call to
+# record the actual subprocess pid in the state file (in addition to the
+# orchestrator pid). Tests that supply a synthetic ``command_runner`` do not
+# touch this field, so ``child_pid`` stays ``None`` for them.
+_LAST_CHILD_PID: int | None = None
+
+# Critical derived datasets whose parquet existence authorizes a stale-aware
+# DuckDB view rebuild when upstream steps failed. If ANY of these is missing,
+# build-duckdb-views must not pretend to succeed.
+CRITICAL_DERIVED_DATASETS_FOR_VIEWS: tuple[str, ...] = (
+    "cn_security_master",
+    "cn_stock_daily_bar",
+    "cn_stock_valuation",
+)
+STEP_RESULT_PATH_ENV = "QDC_STEP_RESULT_PATH"
 
 
 class StateFileError(RuntimeError):
@@ -85,15 +119,97 @@ SCHEDULE_POLICIES = {"daily", "market_window", "legacy_when"}
 STATE_KEY_POLICIES = {"natural_date", "market_date", "run_instance"}
 RESUME_POLICIES = {"skip_if_success", "always_run"}
 DATA_FRESHNESS_POLICIES = {"market_session", "natural_daily", "disclosure_calendar", "maintenance"}
-FAILED_DEPENDENCY_STATUSES = {"failed", "failed_resource_locked", "failed_timeout_cleanup", "blocked", "abandoned"}
+
+
+@dataclass(frozen=True)
+class DerivedProgressContract:
+    """Immutable progress contract for one derived build step.
+
+    Generated ONCE per (run_instance, step) by :func:`_make_derived_progress_contract`
+    and consumed unchanged by:
+
+    * the daily state file (``progress_path`` / ``progress_contract_id`` /
+      ``progress_target`` / ``progress_dataset_id``);
+    * :func:`_run_subprocess` (child env vars ``QDC_DERIVED_PROGRESS_PATH`` /
+      ``QDC_DERIVED_PROGRESS_CONTRACT_ID``);
+    * :func:`_wait_with_stall_detection` (the expected contract id);
+    * :func:`_read_verified_progress_identity` (the expected identity used to
+      validate the child's final snapshot before backfilling ``journal_run_id``).
+
+    Carrying the contract as a single frozen object guarantees the four
+    consumers cannot drift apart (the original P0 bug was two independent
+    ``make_progress_contract_id`` calls producing two different ids for the
+    same step: state had id-A while env/snapshot/stall had id-B).
+    """
+
+    path: Path
+    contract_id: str
+    target: str
+    dataset_id: str
+
+
+# Dependency-status sets. These MUST stay aligned with the unified authority
+# in :mod:`src.pipeline.step_health` (FAILURE_STATUSES / SKIPPED_STATUSES /
+# SUCCESS_STATUSES). ``partial``, ``cancelled``, ``stalled`` and ``timed_out``
+# are all fatal terminal statuses: a downstream step must NOT run when an
+# upstream dependency ended in any of them.
+FAILED_DEPENDENCY_STATUSES = {
+    "failed",
+    "failed_resource_locked",
+    "failed_timeout_cleanup",
+    "stalled",
+    "timed_out",
+    "partial",
+    "cancelled",
+    "blocked",
+    "abandoned",
+}
 SATISFIED_DEPENDENCY_STATUSES = {"success", "success_degraded", "skipped", "skipped_checkpoint"}
 TIMEOUT_EXIT_CODE = 124
 TIMEOUT_CLEANUP_FAILED_EXIT_CODE = 125
+STALLED_EXIT_CODE = 126  # Distinct from timed_out (124) so the state file can
+# record ``stalled`` vs ``timed_out`` vs ``failed``.
 PROCESS_CLEANUP_WAIT_SECONDS = 30
 RUNNING_ABANDONED_AFTER_SECONDS = 24 * 60 * 60
 RUN_UPDATE_DAILY_LOCK_STALE_AFTER_SECONDS = 24 * 60 * 60
 DAILY_WORKFLOW_CONFIG = "daily_workflow.yaml"
 LEGACY_START_AT_ALIASES = {"build-derived": "build-derived-security-master"}
+# Derived build steps use stall detection instead of a fixed timeout.
+# The orchestrator polls the child's progress state file every
+# ``DERIVED_STALL_POLL_SECONDS`` and declares the build stalled when the
+# heartbeat is older than the configured ``stall_seconds`` AND
+# ``processed`` is unchanged. A safety timeout of
+# ``DERIVED_SAFETY_TIMEOUT_SECONDS`` (18h, well above historical P99)
+# acts as a last-resort fallback.
+DERIVED_STALL_POLL_SECONDS = 60
+# The effective stall threshold is resolved from ``config/settings.yaml``
+# (``derived.stall_seconds``) via :func:`load_derived_runtime_config_or_default`.
+# The fallback default lives in :mod:`src.sources.derived.config` so there is
+# exactly one source of truth.
+DERIVED_SAFETY_TIMEOUT_SECONDS = 18 * 60 * 60
+# Only ``daily_bar`` is wired into the unified derived progress contract
+# (BuildRunContext + journal heartbeat + StreamingBuildCoordinator +
+# orchestrator stall detector). ``valuation`` does NOT use this contract yet:
+# it lacks BuildRunContext, journal heartbeat, and the streaming coordinator,
+# so the orchestrator must not pretend it does. If/when valuation is migrated,
+# add it here in a separate change with its own progress path contract.
+DERIVED_STALL_TARGETS = {"daily_bar"}
+# Environment variables that form the single authoritative progress-path
+# contract between the orchestrator and a derived build subprocess. The
+# orchestrator generates a unique path per (run_instance, step_id) BEFORE
+# spawning the child, passes it via env, and reads only that path — never a
+# directory scan. The child reads it via
+# :func:`src.sources.derived.stock_daily_bar._progress_path_override_from_env`.
+QDC_DERIVED_PROGRESS_PATH_ENV = "QDC_DERIVED_PROGRESS_PATH"
+QDC_DERIVED_PROGRESS_CONTRACT_ID_ENV = "QDC_DERIVED_PROGRESS_CONTRACT_ID"
+# Deprecated alias for ``QDC_DERIVED_PROGRESS_CONTRACT_ID_ENV``. Kept only so
+# an in-flight subprocess from an older orchestrator build does not crash; the
+# new production path always sets the new name. When both are present the new
+# name wins. See :func:`_resolve_progress_contract_id_from_env`.
+QDC_DERIVED_RUN_ID_ENV = "QDC_DERIVED_RUN_ID"
+# Environment variable that propagates the orchestrator's current run-id so
+# that the cleanup subprocess can protect the in-flight run log from deletion.
+QDC_ACTIVE_RUN_ID_ENV = "QDC_ACTIVE_RUN_ID"
 _LAST_LOCKED_DUCKDB_PATHS: tuple[Path, ...] = ()
 # Kept only as a test/migration reference for the legacy workflow shape.
 # Production execution must load config/daily_workflow.yaml and must not
@@ -734,15 +850,55 @@ def run_daily_update(
         as_of_date=as_of_date,
         market_date=market_date,
     )
-    run_instance_key = f"run_instance:{(now or datetime.now)().strftime('%Y%m%d_%H%M%S')}"
+    # ``run_instance_key`` identifies one orchestrator invocation. The nonce
+    # (8 hex chars) guarantees uniqueness across same-second restarts and
+    # concurrent invocations; the timestamp keeps it human-readable in the
+    # state file and the progress path. The same ``run_instance_key`` is used
+    # for state, step results, and the per-step progress path so all artifacts
+    # from one invocation are grouped together.
+    run_instance_stamp = (now or datetime.now)().strftime("%Y%m%d_%H%M%S")
+    run_instance_id = f"{run_instance_stamp}-{uuid.uuid4().hex[:8]}"
+    run_instance_key = f"run_instance:{run_instance_id}"
     resolved_state_file = state_file or base / "data" / "metadata" / "run_update_daily_state.json"
-    resolved_log = run_log or _default_run_log(base, now)
-    runner = command_runner or (lambda step, log_path: _run_subprocess(step, log_path, base))
+    run_log_context = _resolve_run_log_context(base=base, run_log=run_log, now=now)
+    resolved_log = run_log_context.path
+
+    # ``_on_child_spawn`` is invoked by ``_run_subprocess`` immediately after
+    # ``Popen`` returns, so the child pid lands in the state file *while* the
+    # step is still running. Synthetic test runners do not call it, so
+    # ``child_pid`` stays absent for them. The callback also records the
+    # orchestrator-pinned derived progress path so crash recovery can find
+    # the exact file the stall detector is reading.
+    def _on_child_spawn(child_pid: int, step_id: str, step_state_view: dict[str, Any]) -> None:
+        row = step_state_view.get(step_id)
+        if isinstance(row, dict):
+            row["child_pid"] = child_pid
+            _write_state(resolved_state_file, state)
+
+    # Mutable cell that carries the per-step :class:`DerivedProgressContract`
+    # from the step loop into ``_default_runner`` without changing the
+    # ``CommandRunner`` callable signature (synthetic test runners ignore it).
+    # The cell is reassigned at the top of each step iteration and read
+    # synchronously when ``runner(...)`` is called, so there is no risk of
+    # cross-step bleed.
+    progress_contract_cell: list[DerivedProgressContract | None] = [None]
+
+    def _default_runner(step: DailyStep, log_path: Path) -> int:
+        return _run_subprocess(
+            step,
+            log_path,
+            base,
+            run_log_context=run_log_context,
+            progress_contract=progress_contract_cell[0],
+            on_spawn=lambda pid: _on_child_spawn(pid, step.id, step_state),
+        )
+
+    runner = command_runner or _default_runner
     steps = _daily_steps_for_root(effective_dates, base)
     steps_by_id = {step.id: step for step in steps}
     step_ids = [step.id for step in steps]
     original_start_at = start_at
-    mapped_start_at = LEGACY_START_AT_ALIASES.get(start_at)
+    mapped_start_at = LEGACY_START_AT_ALIASES.get(start_at) if start_at is not None else None
     if start_at is not None and start_at not in step_ids and mapped_start_at in step_ids:
         start_at = mapped_start_at
 
@@ -759,6 +915,7 @@ def run_daily_update(
             "natural_date": effective_dates.natural_date.isoformat(),
             "candidate_date": effective_dates.candidate_date.isoformat(),
             "market_date": effective_dates.market_date.isoformat(),
+            "run_id": run_log_context.run_id,
         },
     )
     try:
@@ -769,9 +926,16 @@ def run_daily_update(
     exc_info: tuple[type[BaseException] | None, BaseException | None, object | None] = (None, None, None)
     try:
         state = _read_state_for_run(resolved_state_file, reset_if_corrupt=force)
-        state_needs_write = state.get("version") != 2
         state["version"] = 2
         state.setdefault("runs", {})
+        # Record the per-run log context (run_id, path, log_status) so that
+        # crash recovery and external monitors can tell whether the log is
+        # still alive. ``log_status`` is recomputed on every state write via
+        # ``RunLogContext.status_payload`` (which stats the file), so a missing
+        # log is reported as ``"missing"`` instead of silently keeping a stale
+        # path reference.
+        state["run_log"] = run_log_context.status_payload(now=(now or datetime.now)())
+        state["orchestrator_pid"] = os.getpid()
         resolved_log.parent.mkdir(parents=True, exist_ok=True)
         if original_start_at is not None and original_start_at != start_at:
             _emit(
@@ -786,7 +950,6 @@ def run_daily_update(
             now,
             active_lock.owner,
         ):
-            state_needs_write = False
             _write_state(resolved_state_file, state)
 
         start_seen = start_at is None
@@ -828,6 +991,34 @@ def run_daily_update(
                 effective_dates=effective_dates,
                 run_instance_key=run_instance_key,
             )
+            stale_parquet_reason: str | None = None
+            if blocked_by and step.id == "build-duckdb-views":
+                # Stale-aware rebuild: if upstream derived steps failed but the
+                # critical derived parquet files already exist, we may still
+                # rebuild DuckDB views against the stale parquet and record the
+                # step as success_degraded. If any critical parquet is missing,
+                # we must NOT pretend to succeed.
+                if _critical_derived_parquet_available(base):
+                    stale_parquet_reason = (
+                        f"degraded: upstream failed/blocked ({', '.join(blocked_by)}) "
+                        "but critical derived parquet exists; rebuilt views from stale parquet"
+                    )
+                    _emit(
+                        resolved_log,
+                        now,
+                        f"Warning: {step.id} upstream dependency failed: {', '.join(blocked_by)}; "
+                        "critical derived parquet exists, proceeding with stale-aware view rebuild",
+                        console=False,
+                    )
+                    blocked_by = ()
+                else:
+                    _emit(
+                        resolved_log,
+                        now,
+                        f"Warning: {step.id} upstream dependency failed and critical derived "
+                        "parquet is missing; cannot rebuild views",
+                        console=False,
+                    )
             if blocked_by:
                 _record_step(step_state, step, "blocked", 1, resolved_log, now, blocked_by=blocked_by)
                 _write_state(resolved_state_file, state)
@@ -882,7 +1073,7 @@ def run_daily_update(
                                 "AkShare daily_bar input is degraded",
                                 console=False,
                             )
-                        else:
+                        elif isinstance(degraded_step, DailyStep):
                             effective_step = degraded_step
                             degraded_success_reason = (
                                 "degraded: excluded target=daily_bar because "
@@ -906,8 +1097,7 @@ def run_daily_update(
                     )
                     if degraded_success_reason is None:
                         degraded_success_reason = (
-                            "degraded: soft dependency "
-                            f"{dep_id} status={dep_status} for {readable_state_key}"
+                            f"degraded: soft dependency {dep_id} status={dep_status} for {readable_state_key}"
                         )
 
             if blocked_reason is not None:
@@ -917,6 +1107,28 @@ def run_daily_update(
                 continue
 
             _record_step(step_state, effective_step, "running", None, resolved_log, now)
+            # Generate the single :class:`DerivedProgressContract` for this
+            # derived step ONCE. The same frozen object flows to the daily
+            # state, the child env (via ``_run_subprocess``), the stall
+            # detector, and the verified journal-id backfill. This eliminates
+            # the original P0 bug where ``run_daily_update`` and
+            # ``_run_subprocess`` each called ``make_progress_contract_id``
+            # independently, producing two different ids for the same step
+            # (state had id-A while env/snapshot/stall had id-B).
+            # ``journal_run_id`` is filled in later by the child via the
+            # progress snapshot (the orchestrator does not know the journal
+            # run id until the child decides whether to resume or start fresh).
+            progress_contract = _make_derived_progress_contract(
+                root=base,
+                run_instance_key=run_instance_key,
+                step=effective_step,
+            )
+            progress_contract_cell[0] = progress_contract
+            if progress_contract is not None:
+                step_state[effective_step.id]["progress_path"] = str(progress_contract.path)
+                step_state[effective_step.id]["progress_contract_id"] = progress_contract.contract_id
+                step_state[effective_step.id]["progress_target"] = progress_contract.target
+                step_state[effective_step.id]["progress_dataset_id"] = progress_contract.dataset_id
             _write_state(resolved_state_file, state)
             _emit(
                 resolved_log,
@@ -927,12 +1139,82 @@ def run_daily_update(
             _emit(resolved_log, now, f"Command: {effective_step.command_text}", console=False)
             _emit(resolved_log, now, f"Network profile: {effective_step.network_profile}", console=False)
 
-            exit_code = int(runner(effective_step, resolved_log))
+            # Resolve per-step health summary path and expose it to the runner
+            # (and the real subprocess) via QDC_STEP_RESULT_PATH. The runner
+            # closure (default or test) inherits this from os.environ. After
+            # the runner returns we read the summary, if any, to decide whether
+            # a exit_code==0 step should be recorded as success or
+            # success_degraded based on the records the command itself wrote.
+            step_result_path = _step_result_path(base, run_instance_key, effective_step)
+            prior_env_result_path = os.environ.get(STEP_RESULT_PATH_ENV)
+            os.environ[STEP_RESULT_PATH_ENV] = str(step_result_path)
+            # Clear any stale summary from a previous run so we never read it
+            # by mistake if the current command does not write one.
+            with suppress(OSError):
+                if step_result_path.exists():
+                    step_result_path.unlink()
+            try:
+                exit_code = int(runner(effective_step, resolved_log))
+            finally:
+                if prior_env_result_path is None:
+                    os.environ.pop(STEP_RESULT_PATH_ENV, None)
+                else:
+                    os.environ[STEP_RESULT_PATH_ENV] = prior_env_result_path
+            step_health_summary = read_step_health_summary(step_result_path)
+            # Backfill ``journal_run_id`` from the child's final progress
+            # snapshot into the daily state so crash recovery and external
+            # monitors can correlate the orchestrator step with the derived
+            # build journal. The orchestrator does not know the journal run
+            # id until the child writes its first snapshot (the child decides
+            # whether to resume an existing journal or start a fresh one), so
+            # we read it from the pinned progress file after the step
+            # completes. The snapshot's full identity (contract id, target,
+            # dataset id, schema version) is verified against the
+            # :class:`DerivedProgressContract` pinned before spawn so a stale
+            # or mismatched snapshot cannot pollute the state with a wrong
+            # journal run id.
+            if progress_contract is not None:
+                identity = _read_verified_progress_identity(
+                    progress_contract.path,
+                    expected_contract_id=progress_contract.contract_id,
+                    expected_target=progress_contract.target,
+                    expected_dataset_id=progress_contract.dataset_id,
+                )
+                if identity is not None:
+                    step_state[effective_step.id]["journal_run_id"] = identity.journal_run_id
             if exit_code != 0:
                 timed_out = exit_code == TIMEOUT_EXIT_CODE and step.timeout_seconds is not None
                 timeout_cleanup_failed = (
                     exit_code == TIMEOUT_CLEANUP_FAILED_EXIT_CODE and step.timeout_seconds is not None
                 )
+                stalled = exit_code == STALLED_EXIT_CODE
+                if stalled:
+                    # Stall detection (derived builds only): the child's
+                    # heartbeat was stale and ``processed`` was unchanged.
+                    # The child was sent SIGINT for cooperative cancellation;
+                    # whatever it committed before exiting is preserved. Record
+                    # a distinct ``stalled`` status so the state file clearly
+                    # distinguishes this from ``timed_out`` / ``failed``.
+                    _record_step(
+                        step_state,
+                        effective_step,
+                        "stalled",
+                        exit_code,
+                        resolved_log,
+                        now,
+                        reason="derived build stalled: heartbeat stale and processed unchanged",
+                        health_summary=step_health_summary,
+                        health_summary_path=step_result_path if step_result_path.exists() else None,
+                    )
+                    _write_state(resolved_state_file, state)
+                    _emit(
+                        resolved_log,
+                        now,
+                        f"{step.name} declared stalled (heartbeat stale, processed unchanged); stopping",
+                        console=True,
+                    )
+                    failed_exit_code = failed_exit_code or exit_code
+                    continue
                 if timed_out or timeout_cleanup_failed:
                     if timeout_cleanup_failed:
                         if step.optional:
@@ -943,9 +1225,20 @@ def run_daily_update(
                                 exit_code,
                                 resolved_log,
                                 now,
+                                health_summary=step_health_summary,
+                                health_summary_path=step_result_path if step_result_path.exists() else None,
                             )
                         else:
-                            _record_step(step_state, effective_step, "failed", exit_code, resolved_log, now)
+                            _record_step(
+                                step_state,
+                                effective_step,
+                                "failed",
+                                exit_code,
+                                resolved_log,
+                                now,
+                                health_summary=step_health_summary,
+                                health_summary_path=step_result_path if step_result_path.exists() else None,
+                            )
                         _write_state(resolved_state_file, state)
                         _emit(
                             resolved_log,
@@ -967,9 +1260,20 @@ def run_daily_update(
                                 exit_code,
                                 resolved_log,
                                 now,
+                                health_summary=step_health_summary,
+                                health_summary_path=step_result_path if step_result_path.exists() else None,
                             )
                         else:
-                            _record_step(step_state, effective_step, "failed", exit_code, resolved_log, now)
+                            _record_step(
+                                step_state,
+                                effective_step,
+                                "failed",
+                                exit_code,
+                                resolved_log,
+                                now,
+                                health_summary=step_health_summary,
+                                health_summary_path=step_result_path if step_result_path.exists() else None,
+                            )
                         _write_state(resolved_state_file, state)
                         _emit(
                             resolved_log,
@@ -993,7 +1297,16 @@ def run_daily_update(
                         reason,
                         console=True,
                     )
-                    _record_step(step_state, effective_step, status, exit_code, resolved_log, now)
+                    _record_step(
+                        step_state,
+                        effective_step,
+                        status,
+                        exit_code,
+                        resolved_log,
+                        now,
+                        health_summary=step_health_summary,
+                        health_summary_path=step_result_path if step_result_path.exists() else None,
+                    )
                     _write_state(resolved_state_file, state)
                     continue
                 if timed_out:
@@ -1005,14 +1318,65 @@ def run_daily_update(
                     )
                 else:
                     _emit(resolved_log, now, f"{step.name} failed with error code {exit_code}", console=True)
-                _record_step(step_state, effective_step, "failed", exit_code, resolved_log, now)
+                _record_step(
+                    step_state,
+                    effective_step,
+                    "failed",
+                    exit_code,
+                    resolved_log,
+                    now,
+                    health_summary=step_health_summary,
+                    health_summary_path=step_result_path if step_result_path.exists() else None,
+                )
                 _write_state(resolved_state_file, state)
                 if failed_exit_code is None:
                     failed_exit_code = exit_code
                 continue
 
             _emit(resolved_log, now, f"Completed {effective_step.id} ({effective_step.name})", console=True)
-            if degraded_success_reason is not None:
+            # If the command wrote a StepHealthSummary, use its status to decide
+            # the step verdict. The summary takes precedence over the
+            # orchestrator-derived degraded reasons because the command has the
+            # most accurate view of its own records.
+            summary_status = step_health_summary.status if step_health_summary is not None else None
+            if summary_status == "failed":
+                # The command reported a fatal/threshold failure even though
+                # the sub-process returned exit code 0 (e.g. tolerant policy
+                # threshold exceeded). Treat it as a real failure.
+                _emit(
+                    resolved_log,
+                    now,
+                    f"{step.name} reported status=failed via health summary: "
+                    f"{step_health_summary.reason if step_health_summary else 'unknown'}",
+                    console=True,
+                )
+                _record_step(
+                    step_state,
+                    effective_step,
+                    "failed",
+                    exit_code,
+                    resolved_log,
+                    now,
+                    health_summary=step_health_summary,
+                    health_summary_path=step_result_path if step_result_path.exists() else None,
+                )
+                _write_state(resolved_state_file, state)
+                if failed_exit_code is None:
+                    failed_exit_code = exit_code if exit_code != 0 else 1
+                continue
+            if summary_status == "success_degraded":
+                _record_step(
+                    step_state,
+                    effective_step,
+                    "success_degraded",
+                    0,
+                    resolved_log,
+                    now,
+                    reason=step_health_summary.reason if step_health_summary else None,
+                    health_summary=step_health_summary,
+                    health_summary_path=step_result_path if step_result_path.exists() else None,
+                )
+            elif degraded_success_reason is not None:
                 _record_step(
                     step_state,
                     effective_step,
@@ -1021,6 +1385,8 @@ def run_daily_update(
                     resolved_log,
                     now,
                     reason=degraded_success_reason,
+                    health_summary=step_health_summary,
+                    health_summary_path=step_result_path if step_result_path.exists() else None,
                 )
             elif upstream_degraded_reason is not None:
                 _record_step(
@@ -1031,9 +1397,32 @@ def run_daily_update(
                     resolved_log,
                     now,
                     reason=upstream_degraded_reason,
+                    health_summary=step_health_summary,
+                    health_summary_path=step_result_path if step_result_path.exists() else None,
+                )
+            elif stale_parquet_reason is not None:
+                _record_step(
+                    step_state,
+                    effective_step,
+                    "success_degraded",
+                    0,
+                    resolved_log,
+                    now,
+                    reason=stale_parquet_reason,
+                    health_summary=step_health_summary,
+                    health_summary_path=step_result_path if step_result_path.exists() else None,
                 )
             else:
-                _record_step(step_state, effective_step, "success", 0, resolved_log, now)
+                _record_step(
+                    step_state,
+                    effective_step,
+                    "success",
+                    0,
+                    resolved_log,
+                    now,
+                    health_summary=step_health_summary,
+                    health_summary_path=step_result_path if step_result_path.exists() else None,
+                )
             _write_state(resolved_state_file, state)
 
         final_exit_code = _final_exit_code_for_state(
@@ -1047,8 +1436,11 @@ def run_daily_update(
             _emit(resolved_log, now, "All updates completed successfully", console=True)
         else:
             _emit(resolved_log, now, f"Daily update completed with failures; exit code {final_exit_code}", console=True)
-        if state_needs_write:
-            _write_state(resolved_state_file, state)
+        # Refresh log_status one final time so the state file reflects whether
+        # the run log survived (e.g. ``available`` vs ``missing`` after an
+        # external cleanup ran in parallel).
+        state["run_log"] = run_log_context.status_payload(now=(now or datetime.now)())
+        _write_state(resolved_state_file, state)
         return final_exit_code
     except BaseException:
         exc_info = sys.exc_info()
@@ -1066,13 +1458,141 @@ def _cmd(module: str, *args: str) -> tuple[str, ...]:
 
 
 def _default_run_log(root: Path, now: Callable[[], datetime] | None) -> Path:
+    """Deprecated: kept for backwards compatibility with code that imports it.
+
+    New code should use ``RunLogContext`` via ``_resolve_run_log_context`` so
+    that the per-run log lives outside the Git workspace by default.
+    """
+
     stamp = (now or datetime.now)().strftime("%Y%m%d_%H%M%S")
     return root / "logs" / f"run_update_daily_{stamp}.log"
 
 
-def _run_subprocess(step: DailyStep, log_path: Path, root: Path) -> int:
+def _resolve_run_log_context(
+    *,
+    base: Path,
+    run_log: Path | None,
+    now: Callable[[], datetime] | None,
+) -> RunLogContext:
+    """Resolve the per-run log context used by ``run_daily_update``.
+
+    When ``run_log`` is provided (CLI ``--run-log`` or test fixture), the
+    orchestrator adopts that path so existing entrypoints (BAT script, tests)
+    keep working. Otherwise it creates a fresh run log under the resolved
+    ``RuntimePaths.run_logs_dir`` (outside the Git workspace by default).
+    """
+
+    timestamp = (now or datetime.now)()
+    if run_log is not None:
+        try:
+            return adopt_run_log_context(path=run_log, now=timestamp)
+        except RunLogContextError as exc:
+            raise RunDailyUpdateLockError(f"Failed to adopt run log path {run_log}: {exc}") from exc
+    runtime_paths = paths.resolve_runtime_paths(root=base)
+    try:
+        return create_run_log_context(runtime_paths=runtime_paths, now=timestamp)
+    except RunLogContextError as exc:
+        raise RunDailyUpdateLockError(f"Failed to create run log: {exc}") from exc
+
+
+def _step_result_path(base: Path, run_instance_key: str, step: DailyStep) -> Path:
+    """Resolve the per-run JSON path where the step writes its StepHealthSummary.
+
+    Layout: ``data/metadata/step_results/<run_instance>/<step_id>.json``
+
+    The run_instance key looks like ``run_instance:YYYYMMDD_HHMMSS``; we strip
+    the ``run_instance:`` prefix for the on-disk directory name to keep paths
+    readable while still being unique per orchestrator invocation.
+    """
+
+    safe_key = run_instance_key
+    if safe_key.startswith("run_instance:"):
+        safe_key = safe_key[len("run_instance:") :]
+    return base / "data" / "metadata" / "step_results" / safe_key / f"{step.id}.json"
+
+
+def _critical_derived_parquet_available(base: Path) -> bool:
+    """Return True iff every critical derived dataset has at least one parquet file.
+
+    Used by build-duckdb-views stale-aware rebuild: when upstream derived
+    steps failed but their prior parquet output still exists, the view layer
+    can be rebuilt against the stale parquet. If any critical parquet is
+    missing, the view rebuild must NOT pretend to succeed.
+    """
+
+    parquet_root = base / "data" / "parquet"
+    for dataset_id in CRITICAL_DERIVED_DATASETS_FOR_VIEWS:
+        dataset_dir = parquet_root / dataset_id
+        if not dataset_dir.exists():
+            return False
+        if not any(
+            file.name.endswith(".parquet") and ".tmp.parquet" not in file.name
+            for file in dataset_dir.rglob("*.parquet")
+        ):
+            return False
+    return True
+
+
+def _run_subprocess(
+    step: DailyStep,
+    log_path: Path,
+    root: Path,
+    *,
+    run_log_context: RunLogContext | None = None,
+    progress_contract: DerivedProgressContract | None = None,
+    on_spawn: Callable[[int], None] | None = None,
+) -> int:
+    """Spawn a step's command as a subprocess and wait for it (with stall detection).
+
+    For derived build steps in :data:`DERIVED_STALL_TARGETS`, the caller
+    generates a single :class:`DerivedProgressContract` BEFORE spawn (via
+    :func:`_make_derived_progress_contract`) and passes it as
+    ``progress_contract``. This function only CONSUMES the contract — it never
+    regenerates the contract id or progress path. The contract's ``path`` and
+    ``contract_id`` flow to the child env (``QDC_DERIVED_PROGRESS_PATH`` /
+    ``QDC_DERIVED_PROGRESS_CONTRACT_ID``) and to the stall detector
+    (:func:`_wait_with_stall_detection`), guaranteeing all four consumers
+    (state, env, stall detector, snapshot identity) share one id.
+
+    For the cleanup step (and any step that respects ``--active-run-id``), the
+    orchestrator's current run-id is propagated via
+    :data:`QDC_ACTIVE_RUN_ID_ENV` so the cleanup subprocess can protect the
+    in-flight run log from deletion.
+    """
+
+    global _LAST_CHILD_PID
     env = build_network_env(os.environ, profile=step.network_profile)
+    # ``QDC_DISABLE_FILE_LOG=1`` is preserved for backwards compatibility. Its
+    # actual semantics is "subprocess only echoes to the per-run log captured
+    # by the orchestrator via stdout/stderr redirection"; it does not silence
+    # the application log entirely. See ``run_logging`` for details.
     env["QDC_DISABLE_FILE_LOG"] = "1"
+    # Share the per-run log path with the child so that any subprocess that
+    # wants to write a structured progress line (e.g. build-derived heartbeat)
+    # appends to the same run log instead of opening a parallel file.
+    env["QDC_RUN_LOG_PATH"] = str(log_path)
+    # The orchestrator sets QDC_STEP_RESULT_PATH in os.environ before invoking
+    # the runner; propagate it into the child process so that CLI commands
+    # (baostock / akshare / build-derived) can write their StepHealthSummary.
+    step_result_path = os.environ.get(STEP_RESULT_PATH_ENV)
+    if step_result_path:
+        env[STEP_RESULT_PATH_ENV] = step_result_path
+    # Propagate the orchestrator's current run-id to every child so that the
+    # cleanup subprocess (and any other tool that respects QDC_ACTIVE_RUN_ID)
+    # can protect the in-flight run log. We do NOT read this from os.environ
+    # because the orchestrator is the authoritative source of the run id;
+    # relying on a stale env var would defeat the protection.
+    if run_log_context is not None:
+        env[QDC_ACTIVE_RUN_ID_ENV] = run_log_context.run_id
+    # Consume the single progress contract pinned by the caller. The child
+    # (build_cn_stock_daily_bar) reads these env vars via
+    # ``_progress_path_override_from_env`` and ``_progress_contract_id_from_env_or_local``
+    # and writes its ProgressReporter state to exactly this file. The stall
+    # detector below reads the same path and verifies the same contract id —
+    # no directory scan is involved and no second id is generated here.
+    if progress_contract is not None:
+        env[QDC_DERIVED_PROGRESS_PATH_ENV] = str(progress_contract.path)
+        env[QDC_DERIVED_PROGRESS_CONTRACT_ID_ENV] = progress_contract.contract_id
     with log_path.open("a", encoding="utf-8") as log:
         popen_kwargs: dict[str, Any] = {
             "cwd": root,
@@ -1083,15 +1603,412 @@ def _run_subprocess(step: DailyStep, log_path: Path, root: Path) -> int:
         }
         if os.name != "nt":
             popen_kwargs["start_new_session"] = True
+        else:
+            # On Windows, create the child in its own process group so the
+            # orchestrator can send ``CTRL_BREAK_EVENT`` for cooperative
+            # cancellation when stall detection triggers. Without this flag,
+            # ``send_signal(CTRL_BREAK_EVENT)`` would also interrupt the
+            # orchestrator itself.
+            popen_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP  # type: ignore[attr-defined]
         proc = subprocess.Popen(step.command, **popen_kwargs)
+        # Capture the child pid immediately so the orchestrator (and the
+        # ``on_spawn`` callback) can surface it in the state file *while* the
+        # step is still running, instead of recording it only post-mortem.
+        _LAST_CHILD_PID = proc.pid
+        if on_spawn is not None:
+            try:
+                on_spawn(proc.pid)
+            except Exception:  # pragma: no cover - state-file writes must never kill the step
+                logger.exception("Failed to record child_pid for step {}", step.id)
         try:
-            return int(proc.wait(timeout=step.timeout_seconds))
+            # Derived build steps in DERIVED_STALL_TARGETS have no fixed
+            # ``timeout_seconds`` because a normal full rebuild can legitimately
+            # exceed 4 hours. Instead of a hard timeout, we use stall detection:
+            # the orchestrator polls the child's pinned progress state file and
+            # declares the build stalled when the heartbeat is stale AND
+            # ``processed`` is unchanged. A high safety timeout (18h) acts as
+            # a last-resort fallback. See ``progress.check_stall`` for details.
+            if step.timeout_seconds is not None:
+                return int(proc.wait(timeout=step.timeout_seconds))
+            if progress_contract is not None:
+                return _wait_with_stall_detection(
+                    proc,
+                    step,
+                    log,
+                    root,
+                    progress_path=progress_contract.path,
+                    progress_contract_id=progress_contract.contract_id,
+                )
+            return int(proc.wait())
         except subprocess.TimeoutExpired:
             log.write(f"Step timed out after {step.timeout_seconds} seconds; terminating process tree\n")
             if _terminate_process_tree(proc, log):
                 return TIMEOUT_EXIT_CODE
             log.write("Process tree cleanup failed after timeout\n")
             return TIMEOUT_CLEANUP_FAILED_EXIT_CODE
+        finally:
+            _LAST_CHILD_PID = None
+
+
+def _step_uses_derived_stall_detection(step: DailyStep) -> bool:
+    """Return True if the step is a derived build that should use stall detection."""
+
+    return step.id.startswith("build-derived-") and any(
+        f"--target {target}" in step.command_text or f"--target={target}" in step.command_text
+        for target in DERIVED_STALL_TARGETS
+    )
+
+
+def _wait_with_stall_detection(
+    proc: subprocess.Popen[Any],
+    step: DailyStep,
+    log: TextIO,
+    root: Path,
+    *,
+    progress_path: Path | None = None,
+    progress_contract_id: str | None = None,
+) -> int:
+    """Poll the child's pinned progress state and terminate if stalled.
+
+    Replaces ``proc.wait()`` for derived build steps. Polls every
+    :data:`DERIVED_STALL_POLL_SECONDS` and checks:
+
+    1. Is the child PID still alive? If not, return its exit code.
+    2. Has the safety timeout (18h) been exceeded? If so, terminate → ``timed_out``.
+    3. Is the progress heartbeat stale AND ``processed`` unchanged? If so,
+       terminate → ``stalled``.
+
+    Stall verdict preservation (P0):
+
+    Once the orchestrator declares the build stalled, the final exit code is
+    fixed to :data:`STALLED_EXIT_CODE` (126) regardless of what the child
+    returns after SIGINT. The child's exit code (0, 1, ...) CANNOT override
+    the stall verdict — that was the original bug. The only exception is when
+    the process tree cannot be cleaned up at all, in which case the exit code
+    is :data:`TIMEOUT_CLEANUP_FAILED_EXIT_CODE` (125) to signal a more severe
+    failure.
+
+    The four terminal states are distinguishable by exit code:
+    - normal completion → child's exit code
+    - stalled (clean shutdown or force-kill succeeded) → ``STALLED_EXIT_CODE`` (126)
+    - stalled AND process-tree cleanup failed → ``TIMEOUT_CLEANUP_FAILED_EXIT_CODE`` (125)
+    - timed_out (safety timeout) → ``TIMEOUT_EXIT_CODE`` (124)
+    - failed → child's non-zero exit code
+    """
+
+    from src.sources.derived.progress import check_stall
+
+    # Resolve the pinned progress path. The orchestrator MUST pass the path it
+    # pinned before spawn; we never scan the derived-runs directory in
+    # production. Falling back to ``latest_progress_state_path`` is forbidden
+    # because a stale or unrelated progress file could mask a real stall.
+    if progress_path is None:
+        # Defensive: if a caller forgot to pin a path (e.g. an old test), we
+        # refuse to invent one. Treat the build as non-stallable and just wait.
+        log.write(
+            "Stall detection skipped: no pinned progress_path was provided; waiting for child without stall detection\n"
+        )
+        return int(proc.wait())
+
+    metadata_dir = root / "data" / "metadata"
+    del metadata_dir  # Kept for clarity; not used in the pinned-path model.
+    start_monotonic = time.monotonic()
+    previous_processed: int | None = None
+    stall_threshold_seconds = _resolve_derived_stall_seconds(root)
+    while True:
+        # Check if the child has exited.
+        exit_code = proc.poll()
+        if exit_code is not None:
+            return int(exit_code)
+        # Check safety timeout (18h, well above historical P99).
+        elapsed = time.monotonic() - start_monotonic
+        if elapsed > DERIVED_SAFETY_TIMEOUT_SECONDS:
+            log.write(
+                f"Step exceeded safety timeout of {DERIVED_SAFETY_TIMEOUT_SECONDS} seconds "
+                f"(elapsed {elapsed:.0f}s); terminating process tree\n"
+            )
+            if _terminate_process_tree(proc, log):
+                return TIMEOUT_EXIT_CODE
+            log.write("Process tree cleanup failed after safety timeout\n")
+            return TIMEOUT_CLEANUP_FAILED_EXIT_CODE
+        # Check stall via the PINNED progress state file. We never call
+        # ``latest_progress_state_path`` here: a directory scan could pick up
+        # an unrelated or stale progress file and either mask a real stall or
+        # stall a healthy build that writes to a different path. The
+        # ``expected_contract_id`` check additionally rejects a snapshot that
+        # was written for a different progress contract (e.g. a stale file
+        # from a previous run that happened to land at the same path after a
+        # nonce collision — extremely unlikely, but the check is cheap).
+        if progress_path.exists():
+            report = check_stall(
+                progress_path,
+                stall_heartbeat_seconds=stall_threshold_seconds,
+                previous_processed=previous_processed,
+                expected_contract_id=progress_contract_id,
+            )
+            if report.stalled:
+                log.write(
+                    f"Step declared stalled: {report.reason}; "
+                    f"terminating process tree (child will commit "
+                    f"whatever was completed via cooperative cancellation)\n"
+                )
+                # Send SIGINT first to allow cooperative cancellation
+                # (the child's signal handler sets the cancel event,
+                # running workers finish, and the coordinator commits).
+                _send_interrupt(proc, log)
+                # Wait up to 60 seconds for graceful shutdown. Regardless of
+                # the child's exit code (0, 1, ...), the orchestrator's
+                # verdict is ``stalled`` — the child cannot override it.
+                try:
+                    proc.wait(timeout=60)
+                except subprocess.TimeoutExpired:
+                    log.write("Child did not respond to SIGINT within 60s; force-terminating\n")
+                # Force-kill whatever is left. If cleanup succeeds, the stall
+                # verdict stands (126). If cleanup fails, escalate to 125.
+                if _terminate_process_tree(proc, log):
+                    log.write(
+                        "Stall verdict preserved: returning STALLED_EXIT_CODE (126); "
+                        "child exit code is ignored per the stall contract.\n"
+                    )
+                    return STALLED_EXIT_CODE
+                log.write("Process tree cleanup failed after stall; returning TIMEOUT_CLEANUP_FAILED_EXIT_CODE (125)\n")
+                return TIMEOUT_CLEANUP_FAILED_EXIT_CODE
+            previous_processed = report.processed
+        # Sleep before next poll. Use a short wait so we don't miss a
+        # quick exit by more than the poll interval.
+        try:
+            exit_code = proc.wait(timeout=DERIVED_STALL_POLL_SECONDS)
+            return int(exit_code)
+        except subprocess.TimeoutExpired:
+            continue
+
+
+def _resolve_derived_stall_seconds(root: Path) -> float:
+    """Resolve the stall heartbeat threshold from settings.yaml.
+
+    Priority: settings.yaml (``derived.stall_seconds``) > code default
+    (``DEFAULT_STALL_SECONDS`` in :mod:`src.sources.derived.config`).
+    Configuration errors fall back to the code default rather than aborting
+    the build — a missing or invalid settings.yaml must not prevent stall
+    detection from running at all.
+    """
+
+    from src.sources.derived.config import load_derived_runtime_config_or_default
+
+    config = load_derived_runtime_config_or_default(root=root)
+    return float(config.stall_seconds)
+
+
+def _derived_progress_path_for_step(root: Path, run_instance_key: str, step_id: str) -> Path:
+    """Resolve the pinned progress-state path for one derived build step.
+
+    Layout: ``data/metadata/derived-step-progress/<run_instance>/<step_id>.state.json``
+
+    The path is unique per (run_instance, step_id), so concurrent orchestrator
+    invocations never collide, and a resumed run writes to a fresh path
+    (the previous run's path is left in place for forensic inspection). The
+    path is generated BEFORE spawn and communicated to the child via
+    :data:`QDC_DERIVED_PROGRESS_PATH_ENV`.
+    """
+
+    safe_key = run_instance_key
+    if safe_key.startswith("run_instance:"):
+        safe_key = safe_key[len("run_instance:") :]
+    return root / "data" / "metadata" / "derived-step-progress" / safe_key / f"{step_id}.state.json"
+
+
+def _make_derived_progress_contract(
+    *,
+    root: Path,
+    run_instance_key: str,
+    step: DailyStep,
+) -> DerivedProgressContract | None:
+    """Generate the single progress contract for one derived step.
+
+    This is the ONLY place that calls :func:`make_progress_contract_id` for a
+    derived step in production. The returned :class:`DerivedProgressContract`
+    is a frozen value object consumed unchanged by the daily state, the child
+    env (via :func:`_run_subprocess`), the stall detector, and the verified
+    journal-id backfill. Generating the contract here — instead of separately
+    in ``run_daily_update`` and ``_run_subprocess`` — eliminates the original
+    P0 bug where two independent calls produced two different ids for the same
+    step.
+
+    Returns ``None`` when the step does not use derived stall detection (i.e.
+    is not in :data:`DERIVED_STALL_TARGETS`) or when the target/dataset
+    mapping cannot be resolved. A ``None`` contract means no progress env vars
+    are set and no stall detection runs.
+    """
+
+    if not _step_uses_derived_stall_detection(step):
+        return None
+    target = _extract_derived_target(step)
+    if target is None:
+        return None
+    dataset_id = _derived_dataset_id_for_target(target)
+    if dataset_id is None:
+        return None
+    progress_path = _derived_progress_path_for_step(root, run_instance_key, step.id)
+    contract_id = make_progress_contract_id(step.id)
+    return DerivedProgressContract(
+        path=progress_path,
+        contract_id=contract_id,
+        target=target,
+        dataset_id=dataset_id,
+    )
+
+
+def _derived_dataset_id_for_target(target: str) -> str | None:
+    """Map a derived ``--target`` name to its canonical dataset id.
+
+    Reuses the single :data:`src.sources.derived.update.DATASET_BY_TARGET`
+    mapping so the orchestrator and the derived builders cannot drift apart.
+    Imported lazily to avoid an import cycle (``src.sources.derived.update``
+    pulls in the derived builder stack).
+    """
+
+    from src.sources.derived.update import DATASET_BY_TARGET
+
+    return DATASET_BY_TARGET.get(target)
+
+
+def _read_verified_progress_identity(
+    progress_path: Path,
+    *,
+    expected_contract_id: str,
+    expected_target: str,
+    expected_dataset_id: str,
+) -> ProgressIdentity | None:
+    """Read and fully verify the child's final progress snapshot.
+
+    Replaces the previous ``_read_journal_run_id_from_progress`` which only
+    read ``journal_run_id`` and could therefore backfill a wrong id from a
+    stale or mismatched snapshot. This function validates the snapshot's
+    COMPLETE identity before returning the journal run id:
+
+    * ``schema_version`` == :data:`PROGRESS_SNAPSHOT_SCHEMA_VERSION`
+    * ``progress_contract_id`` == ``expected_contract_id``
+    * ``target`` == ``expected_target``
+    * ``dataset_id`` == ``expected_dataset_id``
+    * ``journal_run_id`` is a non-empty string
+
+    On ANY mismatch the function returns ``None`` (no backfill), logs a
+    warning with the path and the expected vs actual values, and never raises
+    — a corrupt or stale snapshot must not overwrite the step's actual result.
+    It never scans sibling progress files (O(1)).
+    """
+
+    if not progress_path.exists():
+        return None
+    try:
+        data = json.loads(progress_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        logger.warning(
+            "Progress snapshot unreadable; not backfilling journal_run_id: path={} error={}",
+            progress_path,
+            exc,
+        )
+        return None
+    if not isinstance(data, dict):
+        logger.warning(
+            "Progress snapshot is not a JSON object; not backfilling journal_run_id: path={} type={}",
+            progress_path,
+            type(data).__name__,
+        )
+        return None
+
+    schema_version = data.get("schema_version")
+    if schema_version != PROGRESS_SNAPSHOT_SCHEMA_VERSION:
+        logger.warning(
+            "Progress snapshot schema_version mismatch; not backfilling journal_run_id: path={} expected={} actual={}",
+            progress_path,
+            PROGRESS_SNAPSHOT_SCHEMA_VERSION,
+            schema_version,
+        )
+        return None
+
+    actual_contract_id = data.get("progress_contract_id")
+    if actual_contract_id != expected_contract_id:
+        logger.warning(
+            "Progress snapshot progress_contract_id mismatch; not backfilling journal_run_id: "
+            "path={} expected={} actual={}",
+            progress_path,
+            expected_contract_id,
+            actual_contract_id,
+        )
+        return None
+
+    actual_target = data.get("target")
+    if actual_target != expected_target:
+        logger.warning(
+            "Progress snapshot target mismatch; not backfilling journal_run_id: path={} expected={} actual={}",
+            progress_path,
+            expected_target,
+            actual_target,
+        )
+        return None
+
+    actual_dataset_id = data.get("dataset_id")
+    if actual_dataset_id != expected_dataset_id:
+        logger.warning(
+            "Progress snapshot dataset_id mismatch; not backfilling journal_run_id: path={} expected={} actual={}",
+            progress_path,
+            expected_dataset_id,
+            actual_dataset_id,
+        )
+        return None
+
+    journal_run_id = data.get("journal_run_id")
+    if not isinstance(journal_run_id, str) or not journal_run_id:
+        logger.warning(
+            "Progress snapshot journal_run_id missing or empty; not backfilling: path={}",
+            progress_path,
+        )
+        return None
+
+    return ProgressIdentity(
+        progress_contract_id=str(actual_contract_id),
+        target=str(actual_target),
+        dataset_id=str(actual_dataset_id),
+        journal_run_id=journal_run_id,
+    )
+
+
+def _extract_derived_target(step: DailyStep) -> str | None:
+    """Extract the ``--target`` value from a build-derived step's command."""
+
+    command = step.command
+    for i, arg in enumerate(command):
+        if arg == "--target" and i + 1 < len(command):
+            return command[i + 1]
+        if arg.startswith("--target="):
+            return arg.split("=", 1)[1]
+    return None
+
+
+def _send_interrupt(proc: subprocess.Popen[Any], log: TextIO) -> None:
+    """Send a cooperative interrupt signal to the child process.
+
+    On POSIX we send SIGINT to the process group (since the child was started
+    with ``start_new_session=True``). On Windows we send CTRL_BREAK_EVENT to
+    the child's process group; the child's SIGINT handler translates this to
+    a cancel event.
+
+    We intentionally send SIGINT (not SIGTERM/SIGKILL) so the child can
+    cooperatively cancel: stop submitting new work, let running workers
+    finish, and commit whatever was completed.
+    """
+
+    if os.name == "nt":
+        try:
+            proc.send_signal(signal.CTRL_BREAK_EVENT)  # type: ignore[attr-defined]
+        except (OSError, ValueError, AttributeError) as exc:
+            log.write(f"Failed to send CTRL_BREAK_EVENT to child {proc.pid}: {exc}\n")
+    else:
+        try:
+            os.killpg(proc.pid, signal.SIGINT)
+        except (ProcessLookupError, OSError) as exc:
+            log.write(f"Failed to send SIGINT to process group {proc.pid}: {exc}\n")
 
 
 def _terminate_process_tree(proc: subprocess.Popen[Any], log: TextIO) -> bool:
@@ -1392,6 +2309,8 @@ def _record_step(
     *,
     blocked_by: tuple[str, ...] | list[str] | None = None,
     reason: str | None = None,
+    health_summary: StepHealthSummary | None = None,
+    health_summary_path: str | Path | None = None,
 ) -> None:
     previous = step_state.get(step.id, {})
     timestamp = _timestamp(now)
@@ -1409,10 +2328,46 @@ def _record_step(
     if status == "running":
         row["pid"] = os.getpid()
         row["orchestrator_pid"] = os.getpid()
+    # Preserve the recorded child_pid across status transitions. ``_run_subprocess``
+    # populates this via the ``on_spawn`` callback after ``Popen`` returns; the
+    # value must survive the ``running`` → ``success`` / ``failed`` row rewrite
+    # so that forensic inspection of a completed step can still find the actual
+    # subprocess that produced the result.
+    previous_child_pid = previous.get("child_pid") if isinstance(previous, dict) else None
+    if previous_child_pid is not None:
+        row["child_pid"] = previous_child_pid
+    # Preserve the orchestrator-pinned derived progress contract fields
+    # across status transitions (running → stalled/failed/success). These are
+    # written once before spawn and must survive the row rewrite so crash
+    # recovery can locate the exact progress file the stall detector was
+    # reading and verify the snapshot identity. ``journal_run_id`` is also
+    # preserved once the child's first snapshot lands (the orchestrator
+    # backfills it from the verified progress snapshot after step completion).
+    for preserve_key in (
+        "progress_path",
+        "progress_contract_id",
+        "progress_target",
+        "progress_dataset_id",
+        "journal_run_id",
+    ):
+        previous_value = previous.get(preserve_key) if isinstance(previous, dict) else None
+        if previous_value is not None:
+            row[preserve_key] = previous_value
     if blocked_by is not None:
         row["blocked_by"] = list(blocked_by)
     if reason is not None:
         row["reason"] = reason
+    if health_summary is not None:
+        row["record_count"] = health_summary.total_records
+        row["success_count"] = health_summary.success_records
+        row["failed_count"] = health_summary.failed_records
+        row["failed_ratio"] = health_summary.failed_record_ratio
+        row["failed_codes_sample"] = list(health_summary.failed_codes[:10])
+        row["failed_datasets_sample"] = list(health_summary.failed_datasets[:10])
+        if health_summary.reason and not reason:
+            row["reason"] = health_summary.reason
+    if health_summary_path is not None:
+        row["health_summary_path"] = str(health_summary_path)
     step_state[step.id] = row
 
 
@@ -1624,9 +2579,13 @@ def _blocked_dependencies(
 def _final_exit_code(steps: list[DailyStep], step_state: dict[str, Any], failed_exit_code: int | None) -> int:
     if failed_exit_code is not None:
         return failed_exit_code
+    # Any fatal terminal status (failed / failed_* / partial / cancelled /
+    # stalled / timed_out / abandoned) on any step forces a non-zero final
+    # exit code. This MUST stay aligned with the unified authority in
+    # :func:`src.pipeline.step_health.is_failure_status`.
     for step in steps:
         current = step_state.get(step.id, {})
-        if str(current.get("status")) in {"failed", "failed_resource_locked", "failed_timeout_cleanup", "abandoned"}:
+        if is_failure_status(current.get("status")):
             raw_exit_code = current.get("exit_code")
             return int(raw_exit_code) if raw_exit_code is not None else 1
     for step in steps:

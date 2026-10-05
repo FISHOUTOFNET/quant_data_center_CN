@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import cast
+
 import pandas as pd
 
 from src.pipeline.common import (
@@ -181,7 +183,7 @@ def _write_baostock_cn_trading_calendar_target(
         ),
         started_at=now,
         ended_at=now,
-        row_count=len(fetched_baostock_cn_trading_calendar_df),
+        row_count=len(cast(pd.DataFrame, fetched_baostock_cn_trading_calendar_df)),
     )
     run_records.append(rows.run_row)
     _persist_lifecycle_rows(store, rows)

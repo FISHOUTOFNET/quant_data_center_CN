@@ -536,7 +536,7 @@ def _as_dataframe(value: object) -> pd.DataFrame:
     if value is None:
         return pd.DataFrame()
     if isinstance(value, pd.DataFrame):
-        return value.copy()
+        return cast(pd.DataFrame, value).copy()
     if isinstance(value, dict):
         return pd.DataFrame(value)
     if isinstance(value, Sequence):
@@ -558,7 +558,7 @@ def _parse_date_values(values: pd.Series) -> list[pd.Timestamp]:
 
 def _normalize_date_value(value: object) -> str:
     if isinstance(value, pd.Timestamp | datetime | date):
-        return value.isoformat()
+        return cast("pd.Timestamp | datetime | date", value).isoformat()
     text = str(value).strip()
     if not text:
         return ""

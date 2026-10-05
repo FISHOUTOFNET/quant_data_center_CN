@@ -7,7 +7,11 @@ paths:
   parquet_dir: data/parquet
   metadata_dir: data/metadata
   duckdb_dir: data/duckdb
-  logs_dir: logs
+  # logs_dir is intentionally omitted: the default log root is resolved by
+  # src.utils.paths.resolve_runtime_paths to %LOCALAPPDATA%\QuantDataCenter\logs
+  # (outside the Git workspace). Override with QDC_LOG_DIR or --log-dir, or add
+  # ``logs_dir: /absolute/path/outside/repo`` here. A value that resolves inside
+  # the repository is rejected to prevent logs from being lost on git clean.
 
 api:
   provider: baostock
@@ -112,9 +116,15 @@ pipeline:
   background_workers: 4
   qlib_sync_workers: 4
 
+# Derived build pipeline (BuildPlanner -> StreamingBuildCoordinator).
+# These are the only user-facing tunables; internal constants like the
+# journal flush batch size and metadata transaction details stay in code.
+derived:
+  max_workers: 4              # thread pool size for partition executor (1-8)
+  max_in_flight_multiplier: 2 # max in-flight futures = max_workers * this
+  heartbeat_seconds: 30       # progress/journal heartbeat interval
+  stall_seconds: 1800         # 30 min: heartbeat age before stall is declared
+
 storage:
   duckdb_file: data/duckdb/quant.duckdb
   metadata_duckdb_file: data/metadata/qdc_metadata.duckdb
-
-logging:
-  file: logs/qdc.log

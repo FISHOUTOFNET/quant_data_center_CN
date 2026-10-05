@@ -10,7 +10,7 @@ steps:
 
   - id: calendar
     name: update-baostock-daily calendar
-    schedule_policy: daily
+    schedule_policy: market_window
     state_key_policy: natural_date
     resume_policy: skip_if_success
     data_freshness_policy: market_session
@@ -42,7 +42,7 @@ steps:
 
   - id: baostock-basic
     name: update-baostock-daily stock basic
-    schedule_policy: daily
+    schedule_policy: market_window
     state_key_policy: market_date
     resume_policy: skip_if_success
     data_freshness_policy: market_session
@@ -50,7 +50,7 @@ steps:
 
   - id: baostock-market-session
     name: update-baostock-market-session
-    schedule_policy: daily
+    schedule_policy: market_window
     state_key_policy: market_date
     resume_policy: always_run
     data_freshness_policy: market_session
@@ -72,7 +72,7 @@ steps:
 
   - id: baostock-valuation-percentile
     name: update-baostock-valuation-percentile
-    schedule_policy: daily
+    schedule_policy: market_window
     state_key_policy: market_date
     resume_policy: skip_if_success
     data_freshness_policy: market_session
@@ -83,7 +83,7 @@ steps:
 
   - id: akshare-yjyg-em
     name: akshare update yjyg_em incremental
-    schedule_policy: daily
+    schedule_policy: market_window
     state_key_policy: natural_date
     resume_policy: skip_if_success
     data_freshness_policy: natural_daily
@@ -101,7 +101,7 @@ steps:
 
   - id: akshare-report-disclosure
     name: akshare update report_disclosure
-    schedule_policy: daily
+    schedule_policy: market_window
     state_key_policy: natural_date
     resume_policy: skip_if_success
     data_freshness_policy: natural_daily
@@ -109,7 +109,7 @@ steps:
 
   - id: akshare-yysj-em
     name: akshare update yysj_em
-    schedule_policy: daily
+    schedule_policy: market_window
     state_key_policy: natural_date
     resume_policy: skip_if_success
     data_freshness_policy: natural_daily
@@ -148,7 +148,7 @@ steps:
 
   - id: financial-report
     name: akshare update financial_report incremental
-    schedule_policy: daily
+    schedule_policy: market_window
     state_key_policy: natural_date
     resume_policy: skip_if_success
     data_freshness_policy: natural_daily
@@ -156,7 +156,7 @@ steps:
 
   - id: build-derived-security-master
     name: build derived security_master
-    schedule_policy: daily
+    schedule_policy: market_window
     state_key_policy: natural_date
     resume_policy: skip_if_success
     data_freshness_policy: natural_daily
@@ -169,7 +169,7 @@ steps:
 
   - id: build-derived-daily-bar
     name: build derived daily_bar
-    schedule_policy: daily
+    schedule_policy: market_window
     state_key_policy: natural_date
     resume_policy: skip_if_success
     data_freshness_policy: natural_daily
@@ -187,7 +187,7 @@ steps:
 
   - id: build-derived-valuation
     name: build derived valuation
-    schedule_policy: daily
+    schedule_policy: market_window
     state_key_policy: natural_date
     resume_policy: skip_if_success
     data_freshness_policy: natural_daily
@@ -202,7 +202,7 @@ steps:
 
   - id: build-duckdb-views
     name: build-duckdb-views
-    schedule_policy: daily
+    schedule_policy: market_window
     state_key_policy: natural_date
     resume_policy: skip_if_success
     data_freshness_policy: natural_daily

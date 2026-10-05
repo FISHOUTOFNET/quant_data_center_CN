@@ -179,7 +179,7 @@ def _compute_all_history_percentiles(result_columns: dict[str, list[object]], wo
         )
 
         output.loc[~valid] = math.nan
-        result_columns[f"{field}_percentile_{ALL_HISTORY_WINDOW}"] = output.tolist()
+        result_columns[f"{field}_percentile_{ALL_HISTORY_WINDOW}"] = cast(list[object], output.tolist())
 
 
 def update_baostock_valuation_percentile(
@@ -327,7 +327,7 @@ def _compute_append_only_all_history_percentiles(
         current_value = float(value)
         current_date = np.datetime64(row["date"])
         sample = values[valid & (dates <= current_date)]
-        output[append_position_by_index[row_index]] = _percentile_from_values(sample, current_value)
+        output[append_position_by_index[cast(int, row_index)]] = _percentile_from_values(sample, current_value)
 
 
 def _compute_append_only_fixed_window_percentiles(
@@ -355,7 +355,7 @@ def _compute_append_only_fixed_window_percentiles(
         current_value = float(value)
         current_date = row["_date_only"]
         current_timestamp = np.datetime64(row["date"])
-        output_position = append_position_by_index[row_index]
+        output_position = append_position_by_index[cast(int, row_index)]
         for name, years in WINDOWS.items():
             threshold = _subtract_years(current_date, years)
             if first_valid_date <= threshold:

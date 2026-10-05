@@ -73,7 +73,7 @@ qdc migrate-metadata-duckdb
 
 The source layer remains unchanged: `baostock_*`, `akshare_*`, and `qlib_*` datasets keep their original schemas and code formats for traceability, repair, and audit. The canonical master layer is `cn_security_master`, which maps `security_id` (`SH.600000`) to Baostock (`sh.600000`), AkShare (`600000`), and Qlib (`sh600000`) codes.
 
-The curated local layer contains `cn_stock_daily_bar` and `cn_stock_valuation`. They are materialized by `security_id` partition and are intended for research, backtesting, and Qlib feature engineering. The daily workflow (`qdc run-update-daily`) runs `qdc build-derived --target all --mode incremental --no-build-duckdb-views` after all required upstream steps succeed, then runs `qdc build-duckdb-views` to refresh query views.
+The curated local layer contains `cn_stock_daily_bar` and `cn_stock_valuation`. They are materialized by `security_id` partition and are intended for research, backtesting, and Qlib feature engineering. In the daily workflow (`qdc run-update-daily`), ordinary Monday-Thursday trading days only collect the non-reconstructable close snapshot (`akshare-spot-quote`). Market-window runs then run `qdc build-derived --target all --mode incremental --no-build-duckdb-views` after all required upstream steps succeed, followed by `qdc build-duckdb-views` to refresh query views.
 
 `build-derived` supports two modes. `--mode incremental` is the default and is used by the daily workflow; it refreshes `cn_security_master` in full because it is small, then rebuilds only changed `security_id` partitions for `cn_stock_daily_bar` and `cn_stock_valuation`. Change detection uses `dataset_partition_manifest.source_signature`, which is derived from source partition `semantic_hash` values plus the relevant `cn_security_master` row hash; it no longer depends on Parquet file mtimes. If the changed partition set cannot be determined reliably, the affected target falls back to full and logs a warning. `--mode full` preserves the previous full-rebuild behavior and is the manual repair path.
 
@@ -85,7 +85,7 @@ qdc build-derived --target daily_bar --security-id SH.600000 --mode incremental 
 qdc build-derived --target valuation --security-id SH.600000 --mode incremental --no-build-duckdb-views
 ```
 
-If any required upstream step fails or is blocked during the daily run, `build-derived` will be blocked and the final exit code will be non-zero, so Windows Task Scheduler or external monitors can alert on partial failures.
+If any required upstream step fails or is blocked during a market-window run, `build-derived` will be blocked and the final exit code will be non-zero, so Windows Task Scheduler or external monitors can alert on partial failures.
 
 ### Daily workflow dates and state
 
@@ -104,17 +104,16 @@ market_date:YYYY-MM-DD
 run_instance:YYYYMMDD_HHMMSS
 ```
 
-Market trading-day tasks use `state_key_policy=market_date`, so a weekend or holiday can reuse a successful previous trading day. Natural-day disclosure and financial tasks use `state_key_policy=natural_date`, so they still run for the current calendar date. Maintenance tasks such as log cleanup use `state_key_policy=run_instance` with `resume_policy=always_run`.
+Market trading-day tasks use `state_key_policy=market_date`, so a weekend or holiday can reuse a successful previous trading day. Natural-day disclosure, financial, derived, and view tasks use `state_key_policy=natural_date` and run in the market window. Maintenance tasks such as log cleanup use `state_key_policy=run_instance` with `resume_policy=always_run`.
 
 The configured task groups are:
 
-- Market trading-day tasks that are low-cost or required daily: `akshare-spot-quote`, `baostock-basic`, `baostock-valuation-percentile`. These use `schedule_policy=daily` with `state_key_policy=market_date`.
-- `baostock-market-session` is a daily step with `state_key_policy=market_date` and `resume_policy=always_run`. It depends on `baostock-basic`. On an ordinary trading day (Monday–Thursday after 18:00), it only updates unadjusted daily bars (`unadjusted_only` mode). On a market-window day (Friday–Sunday, or when `candidate_date != market_date`, or when `--market-date` is explicitly overridden), it runs in `adjusted_market_session` mode, updating unadjusted, qfq, and hfq daily bars and processing adjustment factors as needed.
-- Weekend and holiday market-window heavy tasks: `akshare-delist`, `akshare-valuation-full`, `akshare-daily-bar`, `sync-qlib`. These use `schedule_policy=market_window` with `state_key_policy=market_date`.
-- Natural-day disclosure and financial tasks: `akshare-yjyg-em`, `akshare-report-disclosure`, `akshare-yysj-em`, `financial-report`.
-- Derived and view tasks: `build-derived`, then `build-duckdb-views`, both keyed by `natural_date`.
+- Ordinary Monday-Thursday trading-day tasks: `cleanup` and `akshare-spot-quote`. `spot_quote` uses `schedule_policy=daily` with `state_key_policy=market_date` because the raw close snapshot cannot be reconstructed on Sunday.
+- Market-window source tasks: `calendar`, `akshare-delist`, `baostock-basic`, `baostock-market-session`, `baostock-valuation-percentile`, `akshare-valuation-full`, `akshare-daily-bar`, and `sync-qlib`. These use `schedule_policy=market_window`.
+- Market-window disclosure and financial tasks: `akshare-yjyg-em`, `akshare-report-disclosure`, `akshare-yysj-em`, and `financial-report`.
+- Market-window derived and view tasks: `build-derived`, then `build-duckdb-views`, both keyed by `natural_date`.
 
-`schedule_policy=market_window` enters the workflow only when the natural date is Friday, Saturday, or Sunday, when `candidate_date != market_date` because the candidate is not a trading day, or when `--market-date` explicitly overrides the resolved trading date. On an ordinary Monday to Thursday trading day after 18:00, heavy market-window tasks are not scheduled. Dependencies on steps that are not scheduled for the current run are filtered from downstream steps, so `build-derived` is not blocked by qfq/hfq/sync-qlib on ordinary trading days.
+`schedule_policy=market_window` enters the workflow only when the natural date is Friday, Saturday, or Sunday, when `candidate_date != market_date` because the candidate is not a trading day, or when `--market-date` explicitly overrides the resolved trading date. On an ordinary Monday to Thursday trading day after 18:00, market-window tasks are not scheduled, so derived tables and DuckDB views wait for the next market-window run. Dependencies on steps that are not scheduled for the current run are filtered from downstream steps.
 
 Examples:
 
@@ -168,6 +167,8 @@ qdc repair-baostock-daily --code sh.600000 --start 2024-01-01 --end 2024-04-26 -
 
 - **普通交易日模式**（`unadjusted_only`）：周一至周四 18:00 后，`natural_date == candidate_date == market_date` 且未覆盖 `--market-date` 时，只更新 `baostock_cn_stock_daily_bar_unadjusted`。
 - **market-window 模式**（`adjusted_market_session`）：周五至周日、`candidate_date != market_date`、或 `--market-date-overridden` 时，更新 unadjusted / qfq / hfq 全部日线，并按需处理 `baostock_cn_stock_adjustment_factor`。
+
+普通交易日模式仍可通过独立 CLI 或显式修复命令使用；默认 `run-update-daily` 在普通周一至周四不调度 `baostock-market-session`，而是等待 market-window 统一补齐。
 
 每次运行完成后写入 manifest 文件 `data/metadata/manifests/baostock_market_session/{market_date}.json`，记录 `session_mode`、处理股票代码、成功/失败/跳过详情。
 
@@ -450,7 +451,7 @@ failed step are recorded as `blocked`. The final process exit code remains
 non-zero when any required step failed or was blocked, so Windows Task Scheduler
 and external monitors can still alert on partial failures.
 
-The daily orchestration flow is configured in `config/daily_workflow.yaml`: upstream source updates → `qdc build-derived --target all --mode incremental --no-build-duckdb-views` → `qdc build-duckdb-views`. The `build-derived` step depends on required upstream steps, refreshes `cn_security_master`, and incrementally rebuilds affected `cn_stock_daily_bar` / `cn_stock_valuation` partitions using manifest `source_signature` comparisons.
+The daily orchestration flow is configured in `config/daily_workflow.yaml`: ordinary Monday-Thursday trading days run only `cleanup` and `akshare-spot-quote`; market-window runs execute upstream source updates → `qdc build-derived --target all --mode incremental --no-build-duckdb-views` → `qdc build-duckdb-views`. The `build-derived` step depends on required upstream steps, refreshes `cn_security_master`, and incrementally rebuilds affected `cn_stock_daily_bar` / `cn_stock_valuation` partitions using manifest `source_signature` comparisons.
 
 查询任务状态：
 

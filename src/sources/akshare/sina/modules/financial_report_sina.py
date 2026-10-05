@@ -481,7 +481,7 @@ def _active_pending_rows(config: ConfigManager, pending: pd.DataFrame, effective
     mask = trigger_dates.notna()
     mask &= trigger_dates.dt.date >= oldest_trigger
     mask &= trigger_dates.dt.date <= effective_date
-    return work.loc[mask, PENDING_COLUMNS].to_dict("records")
+    return cast("list[dict[str, object]]", work.loc[mask, PENDING_COLUMNS].to_dict("records"))
 
 
 def _write_financial_report_pending(root: Path, rows: list[dict[str, object]]) -> None:

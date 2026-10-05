@@ -425,7 +425,7 @@ def _ensure_response(result: object, endpoint: str, params: dict[str, object], c
         endpoint=endpoint,
         params=params,
         akshare_version=str(getattr(client, "akshare_version", "unknown")),
-        data=result.copy(),
+        data=cast(pd.DataFrame, result).copy(),
     )
 
 

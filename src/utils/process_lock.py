@@ -106,6 +106,14 @@ def _owner(
 
 
 def _inspect_existing_lock(lock_dir: Path, stale_after_seconds: int) -> tuple[dict[str, object], bool, str | None]:
+    """Decide whether an existing lock is stale and may be reclaimed.
+
+    Decision order (per spec): the PID liveness check wins over age. A live
+    PID on the same host is NEVER reclaimed purely because the lock is old.
+    Only a dead PID (or one we cannot verify on a foreign host whose lease
+    has expired) is considered stale.
+    """
+
     owner = read_lock_owner(lock_dir)
     if owner is None:
         return {}, True, "owner.json missing, invalid, or corrupt"
@@ -113,18 +121,27 @@ def _inspect_existing_lock(lock_dir: Path, stale_after_seconds: int) -> tuple[di
     started_at = _parse_started_at(owner.get("started_at"))
     if started_at is None:
         return owner, True, "owner.json missing valid started_at"
-    if datetime.now() - started_at > timedelta(seconds=stale_after_seconds):
-        return owner, True, "owner exceeded stale_after_seconds"
 
     hostname = str(owner.get("hostname") or "")
-    if hostname and hostname != socket.gethostname():
-        return owner, False, None
+    same_host = not hostname or hostname == socket.gethostname()
 
     pid = _owner_pid(owner)
     if pid is None:
         return owner, True, "owner.json missing valid pid"
-    if not is_pid_alive(pid):
+
+    if same_host:
+        # Same host: PID liveness is authoritative. A live PID is never
+        # reclaimed, no matter how old the lock is.
+        if is_pid_alive(pid):
+            return owner, False, None
         return owner, True, "owner pid is not alive"
+
+    # Cross-host: we cannot reliably verify the PID. Fall back to the lease
+    # (stale_after_seconds). The caller is expected to pass an absolute
+    # fallback (>= 24h) so cross-host locks are only reclaimed after a long,
+    # safe grace period.
+    if datetime.now() - started_at > timedelta(seconds=stale_after_seconds):
+        return owner, True, "cross-host owner lease expired"
     return owner, False, None
 
 

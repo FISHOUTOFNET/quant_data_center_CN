@@ -159,8 +159,7 @@ def commit_derived_dataset_staging(area: DerivedDatasetStagingArea) -> None:
         }
         logger.exception("Failed to promote staged derived dataset; context={}", context)
         raise RuntimeError(
-            "Failed to promote staged derived dataset; "
-            + "; ".join(f"{key}={value}" for key, value in context.items())
+            "Failed to promote staged derived dataset; " + "; ".join(f"{key}={value}" for key, value in context.items())
         ) from exc
     finally:
         if backup_created and area.backup_dir.exists():
@@ -242,6 +241,44 @@ def cleanup_derived_partition_staging(area: DerivedPartitionStagingArea) -> None
     if not area.final_existed and _is_empty_directory(area.final_partition_dir):
         with suppress(OSError):
             area.final_partition_dir.rmdir()
+
+
+def cleanup_stale_derived_staging(store: ParquetStore, dataset_id: str) -> int:
+    """Remove orphaned staging directories left by crashed builds.
+
+    Scans ``<parquet_dir>/.staging/<dataset_id>.*`` and removes any directories
+    that no longer have a corresponding active build (determined by the build
+    lock). This is safe to call at the start or end of a build: the build lock
+    guarantees no other build is concurrently writing to the staging area.
+
+    Returns the number of removed staging directories.
+    """
+
+    staging_root = store.parquet_dir / ".staging"
+    if not staging_root.exists():
+        return 0
+    removed = 0
+    for entry in staging_root.iterdir():
+        if not entry.is_dir():
+            continue
+        if not entry.name.startswith(f"{dataset_id}."):
+            continue
+        # Only remove staging that is older than 1 hour — recent staging may
+        # belong to an in-flight worker within the current build.
+        try:
+            import time
+
+            age_seconds = time.time() - entry.stat().st_mtime
+            if age_seconds < 3600:
+                continue
+        except OSError:
+            continue
+        try:
+            shutil.rmtree(entry, ignore_errors=True)
+            removed += 1
+        except OSError:
+            pass
+    return removed
 
 
 def _require_derived_dataset(dataset_id: str):

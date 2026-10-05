@@ -6,8 +6,9 @@ from datetime import date, datetime
 
 import click
 
-from src.commands.records import echo_pipeline_records, raise_for_failed_records
+from src.commands.records import echo_pipeline_records, finalize_pipeline_records, raise_for_failed_records
 from src.pipeline.common import date_iso, default_candidate_date
+from src.pipeline.step_health import baostock_market_session_policy
 from src.sources.baostock.adjustments import UNADJUSTED_DAILY_DATASET
 from src.sources.baostock.market_session import should_run_adjusted_market_session
 from src.sources.baostock.market_session_manifest import write_baostock_market_session_manifest
@@ -141,15 +142,20 @@ def register_baostock_commands(root: click.Group) -> None:
             force=force,
         )
         ended_at = datetime.now()
+        summary = finalize_pipeline_records(
+            records,
+            label="Baostock market-session update",
+            policy=baostock_market_session_policy(),
+        )
         write_baostock_market_session_manifest(
             records,
             market_date=market_dt.isoformat(),
             session_mode=session_mode,
             started_at=started_at,
             ended_at=ended_at,
+            health_summary=summary,
         )
         echo_pipeline_records(records)
-        raise_for_failed_records(records, label="Baostock market-session update")
 
     @root.command("update-baostock-valuation-percentile")
     @click.option(

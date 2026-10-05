@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import click
 
-from src.commands.records import raise_for_failed_records
+from src.commands.records import finalize_pipeline_records
+from src.sources.derived.executor import DEFAULT_MAX_WORKERS, MAX_WORKERS_CAP
 from src.sources.derived.update import build_derived_datasets as run_build_derived
 
 
@@ -44,6 +45,17 @@ def register_derived_commands(root: click.Group) -> None:
         multiple=True,
         help="Rebuild one security_id partition, e.g. SH.600000. May be repeated.",
     )
+    @click.option(
+        "--max-workers",
+        "max_workers",
+        type=click.IntRange(min=1, max=MAX_WORKERS_CAP),
+        default=None,
+        help=(
+            f"Thread pool size for the partition executor (1-{MAX_WORKERS_CAP}). "
+            "Overrides settings.yaml derived.max_workers and the default "
+            f"({DEFAULT_MAX_WORKERS})."
+        ),
+    )
     @click.option("--build-duckdb-views/--no-build-duckdb-views", "build_views", default=True, show_default=True)
     def build_derived(
         target: tuple[str, ...],
@@ -51,6 +63,7 @@ def register_derived_commands(root: click.Group) -> None:
         mode: str,
         include_security_master: bool,
         security_ids: tuple[str, ...],
+        max_workers: int | None,
         build_views: bool,
     ) -> None:
         """Build canonical and curated derived datasets."""
@@ -63,13 +76,19 @@ def register_derived_commands(root: click.Group) -> None:
                 mode=mode,
                 security_ids=security_ids,
                 build_views=build_views,
+                max_workers=max_workers,
             )
         except ValueError as exc:
             raise click.BadParameter(str(exc)) from exc
         except RuntimeError as exc:
             raise click.ClickException(str(exc)) from exc
         _echo_derived_records(records)
-        raise_for_failed_records(records, label="Derived dataset build")
+        # finalize_pipeline_records treats partial/cancelled/failed as
+        # non-success and writes a StepHealthSummary for the orchestrator.
+        # This replaces the old raise_for_failed_records which only looked at
+        # ``failed`` and ``failed_*`` statuses, allowing cancelled/partial
+        # builds to exit 0.
+        finalize_pipeline_records(records, label="Derived dataset build")
 
     @root.command("build-security-master")
     @click.option("--build-duckdb-views/--no-build-duckdb-views", "build_views", default=True, show_default=True)
@@ -81,7 +100,7 @@ def register_derived_commands(root: click.Group) -> None:
         except RuntimeError as exc:
             raise click.ClickException(str(exc)) from exc
         _echo_derived_records(records)
-        raise_for_failed_records(records, label="Derived dataset build")
+        finalize_pipeline_records(records, label="Derived dataset build")
 
 
 def _echo_derived_records(records: list[dict[str, object]]) -> None:
@@ -90,7 +109,7 @@ def _echo_derived_records(records: list[dict[str, object]]) -> None:
             f"{item.get('dataset')} status={item.get('status')}",
             f"rows={item.get('rows', 0)}",
         ]
-        for key in ("active", "delisted", "partitions"):
+        for key in ("committed", "failed", "skipped", "cancelled", "active", "delisted", "partitions"):
             if key in item:
                 fields.append(f"{key}={item[key]}")
         click.echo(" ".join(fields))
