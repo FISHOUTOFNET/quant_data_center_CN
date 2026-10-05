@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from datetime import datetime
 from pathlib import Path
 
@@ -410,30 +411,41 @@ class TestRawIdentityRejectionSettings:
 
     def test_settings_symlink_loop_does_not_fallback(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """A symlink loop in the settings ``logs_dir`` is rejected — it does
-        NOT fall back to the default. ``.resolve()`` raises ``RuntimeError``
-        for a loop, which the authorization wraps as a ``LinkLikeError`` →
-        ``LogRootAuthorizationError``.
+        NOT fall back to the default. The raw symlink is rejected before
+        resolution, including when its target is another symlink in a loop.
         """
 
         loop_a = tmp_path.parent / "loop_a_for_settings"
         loop_b = tmp_path.parent / "loop_b_for_settings"
         try:
-            loop_a.symlink_to(loop_b)
-            loop_b.symlink_to(loop_a)
-        except OSError:
-            pytest.skip("symlink not supported on this platform")
+            try:
+                loop_a.symlink_to(loop_b)
+                loop_b.symlink_to(loop_a)
+            except OSError:
+                pytest.skip("symlink not supported on this platform")
 
-        config_dir = tmp_path / "config"
-        config_dir.mkdir()
-        (config_dir / "settings.yaml").write_text(
-            f"project:\n  name: test\npaths:\n  logs_dir: {loop_a.as_posix()}\n",
-            encoding="utf-8",
-        )
-        monkeypatch.setenv("QDC_ROOT", str(tmp_path))
-        monkeypatch.delenv("QDC_LOG_DIR", raising=False)
+            config_dir = tmp_path / "config"
+            config_dir.mkdir()
+            (config_dir / "settings.yaml").write_text(
+                f"project:\n  name: test\npaths:\n  logs_dir: {loop_a.as_posix()}\n",
+                encoding="utf-8",
+            )
+            monkeypatch.setenv("QDC_ROOT", str(tmp_path))
+            monkeypatch.delenv("QDC_LOG_DIR", raising=False)
 
-        with pytest.raises(LogRootAuthorizationError, match="cannot resolve"):
-            paths.resolve_runtime_paths(root=tmp_path)
+            with pytest.raises(LogRootAuthorizationError, match="symlink managed root"):
+                paths.resolve_runtime_paths(root=tmp_path)
+        finally:
+            # These siblings live directly in pytest's basetemp. Remove the
+            # links themselves even after partial creation, skip or failure;
+            # session cleanup resolves basetemp symlinks and cannot handle loops.
+            loop_a.unlink(missing_ok=True)
+            loop_b.unlink(missing_ok=True)
+
+        # exists() follows links and can hide dangling entries. Check the
+        # directory entries themselves before pytest's session cleanup runs.
+        assert not os.path.lexists(loop_a)
+        assert not os.path.lexists(loop_b)
 
     def test_settings_unconfigured_falls_back_to_default(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """When no ``paths.logs_dir`` is configured, the default source is
